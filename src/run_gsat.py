@@ -26,6 +26,71 @@ from utils import get_local_config_name, get_model, get_data_loaders, write_stat
 
 from torch_geometric.utils import scatter  # or from torch_scatter import scatter
 
+def save_epoch_metrics(self, epoch, phase, loss_dict, att_auroc, precision, clf_acc, clf_roc):
+    """Save metrics for each epoch to track training progress."""
+    metrics_path = os.path.join(self.seed_dir, 'epoch_metrics.jsonl')
+    
+    metric_record = {
+        'epoch': epoch,
+        'phase': phase,
+        'loss': loss_dict['loss'],
+        'pred_loss': loss_dict['pred'],
+        'info_loss': loss_dict['info'],
+        'motif_loss': loss_dict['motif_consistency'],
+        'att_auroc': float(att_auroc) if att_auroc is not None else None,
+        'precision_at_k': float(precision) if precision is not None else None,
+        'clf_acc': float(clf_acc) if clf_acc is not None else None,
+        'clf_roc': float(clf_roc) if clf_roc is not None else None,
+        'learning_rate': get_lr(self.optimizer)
+    }
+    
+    with open(metrics_path, 'a') as f:
+        f.write(json.dumps(metric_record) + '\n')
+
+
+def save_attention_distributions(self, epoch, phase, att):
+    """Save attention weight distribution statistics."""
+    dist_path = os.path.join(self.seed_dir, 'attention_distributions.jsonl')
+    
+    att_np = att.cpu().numpy() if torch.is_tensor(att) else att
+    
+    # Calculate distribution metrics
+    dist_record = {
+        'epoch': epoch,
+        'phase': phase,
+        'mean': float(np.mean(att_np)),
+        'std': float(np.std(att_np)),
+        'median': float(np.median(att_np)),
+        'min': float(np.min(att_np)),
+        'max': float(np.max(att_np)),
+        'q25': float(np.percentile(att_np, 25)),
+        'q75': float(np.percentile(att_np, 75)),
+        # Measure how polarized weights are (near 0/1 vs 0.5)
+        'pct_near_0': float(np.mean(att_np < 0.1)),  # Percentage < 0.1
+        'pct_near_1': float(np.mean(att_np > 0.9)),  # Percentage > 0.9
+        'pct_middle': float(np.mean((att_np >= 0.4) & (att_np <= 0.6))),  # Percentage in [0.4, 0.6]
+        # Entropy as measure of uncertainty
+        'entropy': float(self._calculate_entropy(att_np))
+    }
+    
+    with open(dist_path, 'a') as f:
+        f.write(json.dumps(dist_record) + '\n')
+
+def save_final_metrics(self, metric_dict):
+    """Save final best metrics after training completes."""
+    final_metrics_path = os.path.join(self.seed_dir, 'final_metrics.json')
+    
+    with open(final_metrics_path, 'w') as f:
+        json.dump(metric_dict, f, indent=2)
+
+@staticmethod
+def _calculate_entropy(weights, num_bins=20):
+    """Calculate entropy of weight distribution."""
+    hist, _ = np.histogram(weights, bins=num_bins, range=(0, 1), density=True)
+    hist = hist / hist.sum()  # Normalize
+    hist = hist[hist > 0]  # Remove zero bins
+    return -np.sum(hist * np.log(hist))
+
 
 def motif_consistency_loss(att, nodes_to_motifs):
     """
@@ -224,8 +289,19 @@ class GSAT(nn.Module):
         self.multi_label = multi_label
         self.criterion = Criterion(num_class, multi_label, task_type)
         
-        # Create directory for saving scores
-        self.seed_dir = os.path.join("/nfs/hpc/share/kokatea/ChemIntuit/GSAT",f"MotifLoss_{self.motif_loss_coef}_{datetime.now().strftime('%m_%d_%Y-%H_%M_%S')}",str(self.dataset_name), f'model{self.model_name}' ,f'fold{self.fold}', f'seed{self.random_state}')
+        # Create directory for saving scores. Add a tuning_id parameter to method_config for tracking experiments
+        tuning_id = method_config.get('tuning_id', 'default')
+        timestamp = datetime.now().strftime('%m_%d_%Y-%H_%M_%S')
+
+        self.seed_dir = os.path.join(
+            "tuning_results",  # Base directory
+            str(self.dataset_name),
+            f'model_{self.model_name}',
+            f'tuning_{tuning_id}',
+            f'pred{self.pred_loss_coef}_info{self.info_loss_coef}_motif{self.motif_loss_coef}',
+            f'init{self.init_r}_final{self.final_r}_decay{self.decay_r}',
+            f'fold{self.fold}_seed{self.random_state}_{timestamp}'
+        )
         os.makedirs(self.seed_dir, exist_ok=True)
         # Save configs
         with open(os.path.join(self.seed_dir, "method_config.yaml"), "w") as f:
@@ -233,6 +309,32 @@ class GSAT(nn.Module):
 
         with open(os.path.join(self.seed_dir, "shared_config.yaml"), "w") as f:
             yaml.safe_dump(shared_config, f, sort_keys=False)
+
+        # Save a summary of this experimental run
+        summary = {
+            'dataset': self.dataset_name,
+            'model': self.model_name,
+            'fold': self.fold,
+            'seed': self.random_state,
+            'task_type': self.task_type,
+            'tuning_id': tuning_id,
+            'loss_coefficients': {
+                'pred_loss_coef': self.pred_loss_coef,
+                'info_loss_coef': self.info_loss_coef,
+                'motif_loss_coef': self.motif_loss_coef
+            },
+            'weight_distribution_params': {
+                'init_r': self.init_r,
+                'final_r': self.final_r,
+                'decay_r': self.decay_r,
+                'decay_interval': self.decay_interval,
+                'fix_r': self.fix_r
+            },
+            'timestamp': timestamp
+        }
+
+        with open(os.path.join(self.seed_dir, "experiment_summary.json"), "w") as f:
+            json.dump(summary, f, indent=2)
 
     def __loss__(self, att, clf_logits, clf_labels, epoch, nodes_to_motifs):
         if not self.multi_label:
@@ -323,6 +425,8 @@ class GSAT(nn.Module):
                     all_loss_dict[k] = v / loader_len
                 desc, att_auroc, precision, clf_acc, clf_roc, avg_loss = self.log_epoch(epoch, phase, all_loss_dict, all_exp_labels, all_att,
                                                                                         all_precision_at_k, all_clf_labels, all_clf_logits, batch=False)
+                self.save_epoch_metrics(epoch, phase.strip(), all_loss_dict, att_auroc, precision, clf_acc, clf_roc)
+                self.save_attention_distributions(epoch, phase.strip(), all_att)
             pbar.set_description(desc)
         return att_auroc, precision, clf_acc, clf_roc, avg_loss
 
@@ -454,6 +558,7 @@ class GSAT(nn.Module):
                                     masked_result = {
                                         'split': split_name,
                                         'graph_idx': di,
+                                        'smiles': data.smiles,
                                         'motif_idx': int(local_motif_key),
                                         'old_prediction': old_pred_value,
                                         'new_prediction': new_pred_value
@@ -492,6 +597,7 @@ class GSAT(nn.Module):
                                     masked_edge_result = {
                                         'split': split_name,
                                         'graph_idx': di,
+                                        'smiles': data.smiles,
                                         'motif_idx': int(local_motif_key),
                                         'old_prediction': old_pred_value_edge,
                                         'new_prediction': new_pred_value_edge
@@ -509,7 +615,7 @@ class GSAT(nn.Module):
                                 sample_results['edge_att'] = att.detach().cpu().numpy()
 
                             # Save scores for each sample in the batch
-                            self.save_sample_scores(sample_results, split_name, node_f, edge_f)
+                            self.save_sample_scores(sample_results, split_name, di, node_f, edge_f)
                         
                 print(f"[INFO] Successfully saved attention scores to {node_jsonl_path} and {edge_jsonl_path}")
                 
@@ -535,6 +641,7 @@ class GSAT(nn.Module):
                       f'Best Test X AUROC: {metric_dict["metric/best_x_roc_test"]:.3f}')
             print('====================================')
             print('====================================')
+        self.save_final_metrics(metric_dict)
         return metric_dict
 
     def log_epoch(self, epoch, phase, loss_dict, exp_labels, att, precision_at_k, clf_labels, clf_logits, batch):
@@ -670,7 +777,7 @@ class GSAT(nn.Module):
     '''
     NOTE: CHECK LOGIC
     '''
-    def save_sample_scores(self, sample_result, split_name, node_f, edge_f):
+    def save_sample_scores(self, sample_result, split_name, graph_idx,node_f, edge_f):
         """
         Save individual sample attention scores to JSONL files.
         
@@ -695,6 +802,7 @@ class GSAT(nn.Module):
             for local_node_idx in range(len(node_att)):
                 node_record = {
                     'split': split_name,
+                    'graph_idx': graph_idx,
                     'smiles': sample.smiles,
                     'node_index': local_node_idx,
                     'motif_index': int(sample.nodes_to_motifs[local_node_idx]),
@@ -710,6 +818,7 @@ class GSAT(nn.Module):
                 
                 edge_record = {
                     'split': split_name,
+                    'graph_idx': graph_idx,
                     'smiles': sample.smiles,
                     'edge_index': local_edge_idx,
                     'source': source,
@@ -838,12 +947,10 @@ def main():
         default=False,
         help="If False uses sigmoid activation",
     )
-    parser.add_argument('--out_root', type=str, help='backbone model used')
+    parser.add_argument('--config', type=str, default=None,
+                   help='Path to tuning config file')
     parser.add_argument('--cuda', type=int, help='cuda device id, -1 for cpu')
     args = parser.parse_args()
-    
-    out_root = Path(getattr(args, "out_root", "./data")).resolve()
-    
     
     dataset_name = args.dataset
     model_name = args.backbone
@@ -863,6 +970,15 @@ def main():
     global_config = yaml.safe_load((config_dir / 'global_config.yml').open('r'))
     local_config_name = get_local_config_name(model_name, dataset_name)
     local_config = yaml.safe_load((config_dir / local_config_name).open('r'))
+
+    # Load tuning config if provided
+    if args.config is not None:
+        with open(args.config, 'r') as f:
+            tuning_config = yaml.safe_load(f)
+        
+        # Merge into local_config['GSAT_config']
+        for key, value in tuning_config.items():
+            local_config['GSAT_config'][key] = value
 
     data_dir = Path(global_config['data_dir'])
     num_seeds = global_config['num_seeds']
