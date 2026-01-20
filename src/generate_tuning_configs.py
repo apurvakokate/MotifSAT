@@ -216,6 +216,8 @@ def save_configs(configs, output_dir, experiment_name):
 
         # When saving in manifest, make it relative to src/
         src_dir = Path(__file__).parent.parent  # Go up from configs/ to src/
+        src_dir = Path(src_dir).resolve()
+        config_file = Path(config_file).resolve()
         relative_path = config_file.relative_to(src_dir)
 
         manifest['configs'].append({

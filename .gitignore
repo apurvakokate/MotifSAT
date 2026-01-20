@@ -1,4 +1,4 @@
-configs/tuning/
+src/configs/tuning/
 tuning_results/
 analysis_results/
 archive_prev_results/
