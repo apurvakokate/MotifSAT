@@ -1,0 +1,9 @@
+archive_prev_results/
+data/
+wandb/
+__pycache__/
+*.pt
+*.pth
+*.ckpt
+*.log
+.DS_Store
