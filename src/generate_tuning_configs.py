@@ -16,6 +16,8 @@ import yaml
 from pathlib import Path
 import json
 from datetime import datetime
+from pathlib import Path
+import os
 
 
 def generate_config_grid(base_config, param_grid):
@@ -210,12 +212,18 @@ def save_configs(configs, output_dir, experiment_name):
         with open(config_file, 'w') as f:
             yaml.safe_dump(config, f, sort_keys=False)
         
+        # Make path relative to src/ directory
+
+        # When saving in manifest, make it relative to src/
+        src_dir = Path(__file__).parent.parent  # Go up from configs/ to src/
+        relative_path = config_file.relative_to(src_dir)
+
         manifest['configs'].append({
             'config_id': config_id,
-            'file': str(config_file),
+            'file': str(relative_path),  # ← This will be configs/tuning/baseline/config_0001.yaml
             'params': config
         })
-    
+            
     # Save manifest
     manifest_file = experiment_dir / 'manifest.json'
     with open(manifest_file, 'w') as f:
@@ -287,7 +295,7 @@ def create_run_scripts(manifest, output_dir, datasets, models, folds, seeds):
                             # For each seed, create a python command
                             for seed in seeds:
                                 sf.write(f'# Seed {seed}\n')
-                                sf.write('python src/run_gsat.py \\\n')
+                                sf.write('python run_gsat.py \\\n')
                                 sf.write(f'  --dataset {dataset} \\\n')
                                 sf.write(f'  --backbone {model} \\\n')
                                 sf.write(f'  --fold {fold} \\\n')
