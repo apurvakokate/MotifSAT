@@ -26,71 +26,6 @@ from utils import get_local_config_name, get_model, get_data_loaders, write_stat
 
 from torch_geometric.utils import scatter  # or from torch_scatter import scatter
 
-def save_epoch_metrics(self, epoch, phase, loss_dict, att_auroc, precision, clf_acc, clf_roc):
-    """Save metrics for each epoch to track training progress."""
-    metrics_path = os.path.join(self.seed_dir, 'epoch_metrics.jsonl')
-    
-    metric_record = {
-        'epoch': epoch,
-        'phase': phase,
-        'loss': loss_dict['loss'],
-        'pred_loss': loss_dict['pred'],
-        'info_loss': loss_dict['info'],
-        'motif_loss': loss_dict['motif_consistency'],
-        'att_auroc': float(att_auroc) if att_auroc is not None else None,
-        'precision_at_k': float(precision) if precision is not None else None,
-        'clf_acc': float(clf_acc) if clf_acc is not None else None,
-        'clf_roc': float(clf_roc) if clf_roc is not None else None,
-        'learning_rate': get_lr(self.optimizer)
-    }
-    
-    with open(metrics_path, 'a') as f:
-        f.write(json.dumps(metric_record) + '\n')
-
-
-def save_attention_distributions(self, epoch, phase, att):
-    """Save attention weight distribution statistics."""
-    dist_path = os.path.join(self.seed_dir, 'attention_distributions.jsonl')
-    
-    att_np = att.cpu().numpy() if torch.is_tensor(att) else att
-    
-    # Calculate distribution metrics
-    dist_record = {
-        'epoch': epoch,
-        'phase': phase,
-        'mean': float(np.mean(att_np)),
-        'std': float(np.std(att_np)),
-        'median': float(np.median(att_np)),
-        'min': float(np.min(att_np)),
-        'max': float(np.max(att_np)),
-        'q25': float(np.percentile(att_np, 25)),
-        'q75': float(np.percentile(att_np, 75)),
-        # Measure how polarized weights are (near 0/1 vs 0.5)
-        'pct_near_0': float(np.mean(att_np < 0.1)),  # Percentage < 0.1
-        'pct_near_1': float(np.mean(att_np > 0.9)),  # Percentage > 0.9
-        'pct_middle': float(np.mean((att_np >= 0.4) & (att_np <= 0.6))),  # Percentage in [0.4, 0.6]
-        # Entropy as measure of uncertainty
-        'entropy': float(self._calculate_entropy(att_np))
-    }
-    
-    with open(dist_path, 'a') as f:
-        f.write(json.dumps(dist_record) + '\n')
-
-def save_final_metrics(self, metric_dict):
-    """Save final best metrics after training completes."""
-    final_metrics_path = os.path.join(self.seed_dir, 'final_metrics.json')
-    
-    with open(final_metrics_path, 'w') as f:
-        json.dump(metric_dict, f, indent=2)
-
-@staticmethod
-def _calculate_entropy(weights, num_bins=20):
-    """Calculate entropy of weight distribution."""
-    hist, _ = np.histogram(weights, bins=num_bins, range=(0, 1), density=True)
-    hist = hist / hist.sum()  # Normalize
-    hist = hist[hist > 0]  # Remove zero bins
-    return -np.sum(hist * np.log(hist))
-
 
 def motif_consistency_loss(att, nodes_to_motifs):
     """
@@ -335,6 +270,71 @@ class GSAT(nn.Module):
 
         with open(os.path.join(self.seed_dir, "experiment_summary.json"), "w") as f:
             json.dump(summary, f, indent=2)
+            
+    def save_epoch_metrics(self, epoch, phase, loss_dict, att_auroc, precision, clf_acc, clf_roc):
+        """Save metrics for each epoch to track training progress."""
+        metrics_path = os.path.join(self.seed_dir, 'epoch_metrics.jsonl')
+
+        metric_record = {
+            'epoch': epoch,
+            'phase': phase,
+            'loss': loss_dict['loss'],
+            'pred_loss': loss_dict['pred'],
+            'info_loss': loss_dict['info'],
+            'motif_loss': loss_dict['motif_consistency'],
+            'att_auroc': float(att_auroc) if att_auroc is not None else None,
+            'precision_at_k': float(precision) if precision is not None else None,
+            'clf_acc': float(clf_acc) if clf_acc is not None else None,
+            'clf_roc': float(clf_roc) if clf_roc is not None else None,
+            'learning_rate': get_lr(self.optimizer)
+        }
+
+        with open(metrics_path, 'a') as f:
+            f.write(json.dumps(metric_record) + '\n')
+
+
+    def save_attention_distributions(self, epoch, phase, att):
+        """Save attention weight distribution statistics."""
+        dist_path = os.path.join(self.seed_dir, 'attention_distributions.jsonl')
+
+        att_np = att.cpu().numpy() if torch.is_tensor(att) else att
+
+        # Calculate distribution metrics
+        dist_record = {
+            'epoch': epoch,
+            'phase': phase,
+            'mean': float(np.mean(att_np)),
+            'std': float(np.std(att_np)),
+            'median': float(np.median(att_np)),
+            'min': float(np.min(att_np)),
+            'max': float(np.max(att_np)),
+            'q25': float(np.percentile(att_np, 25)),
+            'q75': float(np.percentile(att_np, 75)),
+            # Measure how polarized weights are (near 0/1 vs 0.5)
+            'pct_near_0': float(np.mean(att_np < 0.1)),  # Percentage < 0.1
+            'pct_near_1': float(np.mean(att_np > 0.9)),  # Percentage > 0.9
+            'pct_middle': float(np.mean((att_np >= 0.4) & (att_np <= 0.6))),  # Percentage in [0.4, 0.6]
+            # Entropy as measure of uncertainty
+            'entropy': float(self._calculate_entropy(att_np))
+        }
+
+        with open(dist_path, 'a') as f:
+            f.write(json.dumps(dist_record) + '\n')
+
+    def save_final_metrics(self, metric_dict):
+        """Save final best metrics after training completes."""
+        final_metrics_path = os.path.join(self.seed_dir, 'final_metrics.json')
+
+        with open(final_metrics_path, 'w') as f:
+            json.dump(metric_dict, f, indent=2)
+            
+    @staticmethod
+    def _calculate_entropy(weights, num_bins=20):
+        """Calculate entropy of weight distribution."""
+        hist, _ = np.histogram(weights, bins=num_bins, range=(0, 1), density=True)
+        hist = hist / hist.sum()  # Normalize
+        hist = hist[hist > 0]  # Remove zero bins
+        return -np.sum(hist * np.log(hist))
 
     def __loss__(self, att, clf_logits, clf_labels, epoch, nodes_to_motifs):
         if not self.multi_label:

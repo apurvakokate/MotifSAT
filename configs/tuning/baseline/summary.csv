@@ -1,0 +1,5 @@
+pred_loss_coef,info_loss_coef,init_r,final_r,decay_r,decay_interval,tuning_id,motif_loss_coef
+1.0,1.0,0.9,0.1,0.1,10,config_0000,0.0
+1.0,1.0,0.9,0.1,0.1,10,config_0001,0.5
+1.0,1.0,0.9,0.1,0.1,10,config_0002,1.0
+1.0,1.0,0.9,0.1,0.1,10,config_0003,2.0

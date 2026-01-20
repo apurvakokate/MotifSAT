@@ -411,7 +411,7 @@ Available experiment types:
                         help='List of fold numbers for cross-validation')
     
     parser.add_argument('--seeds', nargs='+', type=int,
-                        default=[0, 1, 2],
+                        default=[0],
                         help='List of random seeds for multiple runs')
     
     parser.add_argument('--create_run_scripts', action='store_true',

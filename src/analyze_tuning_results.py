@@ -26,7 +26,7 @@ import seaborn as sns
 from typing import Dict, List, Tuple
 import warnings
 warnings.filterwarnings('ignore')
-
+import pdb
 
 class TuningResultsAnalyzer:
     """Comprehensive analyzer for tuning experiment results."""
@@ -291,6 +291,8 @@ class TuningResultsAnalyzer:
                 avg_motif_scores = split_nodes.groupby(['graph_idx', 'motif_index'])['score'].mean().reset_index()
                 avg_motif_scores.columns = ['graph_idx', 'motif_index', 'avg_node_score']
                 
+                split_impact = split_impact.rename(columns={'motif_idx': 'motif_index'})
+                
                 # Merge with impact data
                 merged = split_impact.merge(
                     avg_motif_scores,
@@ -519,7 +521,8 @@ class TuningResultsAnalyzer:
         print(f"Saved motif loss comparison to {output_path}")
         
         # Create visualization
-        self._plot_motif_loss_comparison(comparison_df)
+        if not comparison_df.empty:
+            self._plot_motif_loss_comparison(comparison_df)
         
         return comparison_df
     
@@ -799,9 +802,10 @@ class TuningResultsAnalyzer:
             # (ii) Model performance
             f.write("\n3.2. Model Prediction Performance\n")
             comparison_df = self.compare_with_without_motif_loss()
-            model_perf = comparison_df[comparison_df['metric'] == 'test_acc']
-            f.write(model_perf.to_string())
-            f.write("\n\n")
+            if not comparison_df.empty:
+                model_perf = comparison_df[comparison_df['metric'] == 'test_acc']
+                f.write(model_perf.to_string())
+                f.write("\n\n")
             
             # (iii) Explainer performance
             f.write("\n3.3. Explainer Performance (Pearson Correlation)\n")

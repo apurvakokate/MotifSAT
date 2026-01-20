@@ -1,0 +1,460 @@
+#!/usr/bin/env python3
+"""
+Generate configuration files for hyperparameter tuning experiments.
+
+This script creates a grid of hyperparameter combinations to systematically
+test the effect of loss coefficients and weight distribution parameters on
+model and explainer performance.
+
+Usage:
+    python generate_tuning_configs.py --output_dir configs/tuning --experiment_name baseline
+"""
+
+import argparse
+import itertools
+import yaml
+from pathlib import Path
+import json
+from datetime import datetime
+
+
+def generate_config_grid(base_config, param_grid):
+    """
+    Generate all combinations of parameters from the grid.
+    
+    Args:
+        base_config: Base configuration dictionary
+        param_grid: Dictionary of parameter names to lists of values
+        
+    Returns:
+        List of configuration dictionaries
+    """
+    configs = []
+    
+    # Get all parameter names and their values
+    param_names = list(param_grid.keys())
+    param_values = [param_grid[name] for name in param_names]
+    
+    # Generate all combinations
+    for idx, values in enumerate(itertools.product(*param_values)):
+        config = base_config.copy()
+        config['tuning_id'] = f'config_{idx:04d}'
+        
+        # Update with current parameter values
+        param_dict = dict(zip(param_names, values))
+        config.update(param_dict)
+        
+        configs.append(config)
+    
+    return configs
+
+
+def create_baseline_experiment():
+    """
+    Create baseline experiment: test with and without motif loss.
+    
+    Research Question: Does adding motif_consistency_loss improve performance?
+    """
+    base_config = {
+        'pred_loss_coef': 1.0,
+        'info_loss_coef': 1.0,
+        'init_r': 0.9,
+        'final_r': 0.1,
+        'decay_r': 0.1,
+        'decay_interval': 10,
+    }
+    
+    param_grid = {
+        'motif_loss_coef': [0.0, 0.5, 1.0, 2.0],  # Test without and with motif loss
+    }
+    
+    return generate_config_grid(base_config, param_grid)
+
+
+def create_loss_coefficient_tuning():
+    """
+    Tune loss coefficients while keeping weight distribution fixed.
+    
+    Research Question: What are the optimal loss coefficient ratios?
+    """
+    base_config = {
+        'init_r': 0.9,
+        'final_r': 0.1,
+        'decay_r': 0.1,
+        'decay_interval': 10,
+    }
+    
+    param_grid = {
+        'pred_loss_coef': [0.5, 1.0, 2.0],
+        'info_loss_coef': [0.5, 1.0, 2.0],
+        'motif_loss_coef': [0.0, 0.5, 1.0, 2.0, 5.0],
+    }
+    
+    return generate_config_grid(base_config, param_grid)
+
+
+def create_weight_distribution_tuning():
+    """
+    Tune weight distribution parameters while keeping loss coefficients fixed.
+    
+    Research Question: How do weight distribution parameters affect polarization?
+    """
+    base_config = {
+        'pred_loss_coef': 1.0,
+        'info_loss_coef': 1.0,
+        'motif_loss_coef': 1.0,
+    }
+    
+    param_grid = {
+        'init_r': [0.7, 0.9],  # Starting distribution
+        'final_r': [0.1, 0.3, 0.5],  # Final distribution
+        'decay_r': [0.05, 0.1, 0.2],  # Decay rate
+        'decay_interval': [5, 10, 15],  # Decay frequency
+    }
+    
+    return generate_config_grid(base_config, param_grid)
+
+
+def create_combined_tuning():
+    """
+    Fine-grained tuning of both loss coefficients and weight parameters.
+    
+    Research Question: What is the optimal combination of all hyperparameters?
+    """
+    base_config = {}
+    
+    param_grid = {
+        'pred_loss_coef': [0.5, 1.0],
+        'info_loss_coef': [0.5, 1.0],
+        'motif_loss_coef': [0.0, 1.0, 2.0],
+        'init_r': [0.8, 0.9],
+        'final_r': [0.1, 0.3],
+        'decay_r': [0.1],
+        'decay_interval': [10],
+    }
+    
+    return generate_config_grid(base_config, param_grid)
+
+
+def create_motif_loss_sensitivity():
+    """
+    Fine-grained sensitivity analysis of motif loss coefficient.
+    
+    Research Question: How sensitive is performance to motif_loss_coef?
+    """
+    base_config = {
+        'pred_loss_coef': 1.0,
+        'info_loss_coef': 1.0,
+        'init_r': 0.9,
+        'final_r': 0.1,
+        'decay_r': 0.1,
+        'decay_interval': 10,
+    }
+    
+    param_grid = {
+        'motif_loss_coef': [0.0, 0.1, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 5.0, 10.0],
+    }
+    
+    return generate_config_grid(base_config, param_grid)
+
+
+EXPERIMENT_TYPES = {
+    'baseline': {
+        'description': 'Test with and without motif loss (4 configs)',
+        'generator': create_baseline_experiment,
+    },
+    'loss_tuning': {
+        'description': 'Tune loss coefficients (3×3×5 = 45 configs)',
+        'generator': create_loss_coefficient_tuning,
+    },
+    'weight_tuning': {
+        'description': 'Tune weight distribution parameters (2×3×3×3 = 54 configs)',
+        'generator': create_weight_distribution_tuning,
+    },
+    'combined': {
+        'description': 'Combined tuning of all parameters (2×2×3×2×2×1×1 = 48 configs)',
+        'generator': create_combined_tuning,
+    },
+    'sensitivity': {
+        'description': 'Sensitivity analysis of motif_loss_coef (11 configs)',
+        'generator': create_motif_loss_sensitivity,
+    },
+}
+
+
+def save_configs(configs, output_dir, experiment_name):
+    """
+    Save configurations to files and create a manifest.
+    
+    Args:
+        configs: List of configuration dictionaries
+        output_dir: Directory to save configs
+        experiment_name: Name of the experiment
+    """
+    output_dir = Path(output_dir)
+    experiment_dir = output_dir / experiment_name
+    experiment_dir.mkdir(parents=True, exist_ok=True)
+    
+    manifest = {
+        'experiment_name': experiment_name,
+        'num_configs': len(configs),
+        'created_at': datetime.now().isoformat(),
+        'configs': []
+    }
+    
+    # Save individual config files
+    for config in configs:
+        config_id = config['tuning_id']
+        config_file = experiment_dir / f'{config_id}.yaml'
+        
+        with open(config_file, 'w') as f:
+            yaml.safe_dump(config, f, sort_keys=False)
+        
+        manifest['configs'].append({
+            'config_id': config_id,
+            'file': str(config_file),
+            'params': config
+        })
+    
+    # Save manifest
+    manifest_file = experiment_dir / 'manifest.json'
+    with open(manifest_file, 'w') as f:
+        json.dump(manifest, f, indent=2)
+    
+    # Save a summary table (CSV format)
+    summary_file = experiment_dir / 'summary.csv'
+    with open(summary_file, 'w') as f:
+        # Header
+        keys = configs[0].keys()
+        f.write(','.join(keys) + '\n')
+        
+        # Data rows
+        for config in configs:
+            values = [str(config[k]) for k in keys]
+            f.write(','.join(values) + '\n')
+    
+    print(f"Generated {len(configs)} configurations in {experiment_dir}")
+    print(f"  - Config files: {config_id}.yaml")
+    print(f"  - Manifest: {manifest_file}")
+    print(f"  - Summary: {summary_file}")
+    
+    return manifest
+
+
+def create_run_scripts(manifest, output_dir, datasets, models, folds, seeds):
+    """
+    Create shell scripts to run all experiments.
+    
+    Args:
+        manifest: Experiment manifest
+        output_dir: Directory containing configs
+        datasets: List of dataset names
+        models: List of model names
+        folds: List of fold numbers
+        seeds: List of random seeds
+    """
+    experiment_name = manifest['experiment_name']
+    experiment_dir = Path(output_dir) / experiment_name
+    
+    # Create master run script
+    master_script = experiment_dir / 'run_all.sh'
+    
+    with open(master_script, 'w') as f:
+        f.write('#!/bin/bash\n')
+        f.write('# Master script to run all tuning experiments\n')
+        f.write(f'# Experiment: {experiment_name}\n')
+        f.write(f'# Generated: {datetime.now().isoformat()}\n\n')
+        
+        for dataset in datasets:
+            for model in models:
+                for fold in folds:
+                    script_name = f'run_{dataset}_{model}_fold{fold}.sh'
+                    script_path = experiment_dir / script_name
+                    
+                    # Create individual dataset/model/fold script
+                    with open(script_path, 'w') as sf:
+                        sf.write('#!/bin/bash\n')
+                        sf.write(f'# Run {dataset} with {model} on fold {fold}\n\n')
+                        
+                        for config_info in manifest['configs']:
+                            config_id = config_info['config_id']
+                            config_file = config_info['file']
+                            params = config_info['params']
+                            
+                            sf.write(f'\n# Config: {config_id}\n')
+                            sf.write(f'# Params: {params}\n')
+                            
+                            # For each seed, create a python command
+                            for seed in seeds:
+                                sf.write(f'# Seed {seed}\n')
+                                sf.write('python src/run_gsat.py \\\n')
+                                sf.write(f'  --dataset {dataset} \\\n')
+                                sf.write(f'  --backbone {model} \\\n')
+                                sf.write(f'  --fold {fold} \\\n')
+                                sf.write(f'  --cuda 0 \\\n')
+                                sf.write(f'  --config {config_file}\n\n')
+                    
+                    # Make script executable
+                    script_path.chmod(0o755)
+                    
+                    # Add to master script
+                    f.write(f'echo "Running {dataset} with {model} on fold {fold}"\n')
+                    f.write(f'bash {script_name}\n\n')
+    
+    # Make master script executable
+    master_script.chmod(0o755)
+    print(f"\nCreated run scripts in {experiment_dir}")
+    print(f"  - Master script: {master_script}")
+
+
+def create_slurm_scripts(manifest, output_dir, datasets, models, folds):
+    """
+    Create SLURM batch scripts for HPC cluster.
+    
+    Args:
+        manifest: Experiment manifest
+        output_dir: Directory containing configs
+        datasets: List of dataset names
+        models: List of model names
+        folds: List of fold numbers
+    """
+    experiment_name = manifest['experiment_name']
+    experiment_dir = Path(output_dir) / experiment_name
+    slurm_dir = experiment_dir / 'slurm_scripts'
+    slurm_dir.mkdir(exist_ok=True)
+    
+    for dataset in datasets:
+        for model in models:
+            for fold in folds:
+                for config_info in manifest['configs']:
+                    config_id = config_info['config_id']
+                    config_file = config_info['file']
+                    params = config_info['params']
+                    
+                    job_name = f'{experiment_name}_{dataset}_{model}_fold{fold}_{config_id}'
+                    script_path = slurm_dir / f'{job_name}.sh'
+                    
+                    with open(script_path, 'w') as f:
+                        f.write('#!/bin/bash\n')
+                        f.write(f'#SBATCH --job-name={job_name}\n')
+                        f.write(f'#SBATCH --output=logs/{job_name}_%j.out\n')
+                        f.write(f'#SBATCH --error=logs/{job_name}_%j.err\n')
+                        f.write('#SBATCH --time=24:00:00\n')
+                        f.write('#SBATCH --partition=gpu\n')
+                        f.write('#SBATCH --gres=gpu:1\n')
+                        f.write('#SBATCH --cpus-per-task=4\n')
+                        f.write('#SBATCH --mem=32G\n\n')
+                        
+                        f.write('# Load modules\n')
+                        f.write('module load cuda/11.7\n')
+                        f.write('module load python/3.9\n\n')
+                        
+                        f.write('# Activate environment\n')
+                        f.write('source venv/bin/activate\n\n')
+                        
+                        f.write(f'# Config: {config_id}\n')
+                        f.write(f'# Params: {params}\n\n')
+                        
+                        f.write('python src/run_gsat.py \\\n')
+                        f.write(f'  --dataset {dataset} \\\n')
+                        f.write(f'  --backbone {model} \\\n')
+                        f.write(f'  --fold {fold} \\\n')
+                        f.write(f'  --cuda 0 \\\n')
+                        f.write(f'  --config {config_file}\n')
+                    
+                    script_path.chmod(0o755)
+    
+    # Create master SLURM submission script
+    submit_all = slurm_dir / 'submit_all.sh'
+    with open(submit_all, 'w') as f:
+        f.write('#!/bin/bash\n')
+        f.write('# Submit all SLURM jobs\n\n')
+        f.write('for script in slurm_scripts/*.sh; do\n')
+        f.write('  if [ "$script" != "slurm_scripts/submit_all.sh" ]; then\n')
+        f.write('    sbatch "$script"\n')
+        f.write('    sleep 1  # Rate limiting\n')
+        f.write('  fi\n')
+        f.write('done\n')
+    
+    submit_all.chmod(0o755)
+    print(f"\nCreated SLURM scripts in {slurm_dir}")
+    print(f"  - Submit script: {submit_all}")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='Generate tuning configuration files for GSAT experiments',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Available experiment types:
+""" + '\n'.join(f"  {name:15s} - {info['description']}" 
+                for name, info in EXPERIMENT_TYPES.items())
+    )
+    
+    parser.add_argument('--experiment', type=str, required=True,
+                        choices=list(EXPERIMENT_TYPES.keys()),
+                        help='Type of experiment to generate')
+    
+    parser.add_argument('--output_dir', type=str, default='configs/tuning',
+                        help='Directory to save configuration files')
+    
+    parser.add_argument('--datasets', nargs='+', 
+                        default=['Mutagenicity', 'hERG', 'BBBP', 'Benzene'],
+                        help='List of datasets to run experiments on')
+    
+    parser.add_argument('--models', nargs='+',
+                        default=['GIN', 'GCN', 'GAT', 'SAGE'],
+                        help='List of model architectures to test')
+    
+    parser.add_argument('--folds', nargs='+', type=int,
+                        default=[0, 1, 2, 3, 4],
+                        help='List of fold numbers for cross-validation')
+    
+    parser.add_argument('--seeds', nargs='+', type=int,
+                        default=[0],
+                        help='List of random seeds for multiple runs')
+    
+    parser.add_argument('--create_run_scripts', action='store_true',
+                        help='Create shell scripts to run all experiments')
+    
+    parser.add_argument('--create_slurm_scripts', action='store_true',
+                        help='Create SLURM batch scripts for HPC')
+    
+    args = parser.parse_args()
+    
+    # Generate configurations
+    print(f"\nGenerating {args.experiment} experiment configurations...")
+    exp_info = EXPERIMENT_TYPES[args.experiment]
+    print(f"Description: {exp_info['description']}")
+    
+    configs = exp_info['generator']()
+    
+    # Save configurations
+    manifest = save_configs(configs, args.output_dir, args.experiment)
+    
+    # Create run scripts if requested
+    if args.create_run_scripts:
+        create_run_scripts(manifest, args.output_dir, args.datasets, 
+                          args.models, args.folds, args.seeds)
+    
+    if args.create_slurm_scripts:
+        create_slurm_scripts(manifest, args.output_dir, args.datasets,
+                           args.models, args.folds)
+    
+    # Print summary
+    print("\n" + "="*80)
+    print("SUMMARY")
+    print("="*80)
+    print(f"Experiment: {args.experiment}")
+    print(f"Configurations: {len(configs)}")
+    print(f"Datasets: {len(args.datasets)} - {', '.join(args.datasets)}")
+    print(f"Models: {len(args.models)} - {', '.join(args.models)}")
+    print(f"Folds: {len(args.folds)} - {', '.join(map(str, args.folds))}")
+    print(f"Seeds: {len(args.seeds)} - {', '.join(map(str, args.seeds))}")
+    print(f"\nTotal experiments: {len(configs) * len(args.datasets) * len(args.models) * len(args.folds) * len(args.seeds)}")
+    print("="*80)
+
+
+if __name__ == '__main__':
+    main()
+
