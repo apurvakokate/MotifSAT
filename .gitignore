@@ -1,3 +1,5 @@
+tuning_results/
+analysis_results/
 archive_prev_results/
 data/
 wandb/
