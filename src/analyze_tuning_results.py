@@ -62,6 +62,48 @@ class TuningResultsAnalyzer:
         
         print(f"Successfully loaded {len(self.all_experiments)} experiments")
         return self.all_experiments
+
+    def _plot_interaction_heatmap(self, df, param1, param2, metric, 
+                               dataset, model, experiment_name):
+        """Create heatmap showing interaction between two parameters."""
+        
+        # Remove NaN
+        plot_data = df[[param1, param2, metric]].dropna()
+        
+        if len(plot_data) < 5:
+            return
+        
+        # Create pivot table
+        try:
+            pivot = plot_data.pivot_table(
+                values=metric, 
+                index=param1, 
+                columns=param2, 
+                aggfunc='mean'
+            )
+        except:
+            return
+        
+        if pivot.empty:
+            return
+        
+        # Create heatmap
+        fig, ax = plt.subplots(figsize=(10, 8))
+        
+        sns.heatmap(pivot, annot=True, fmt='.3f', cmap='RdYlGn', 
+                    ax=ax, cbar_kws={'label': metric})
+        
+        ax.set_title(f'{dataset} - {model}\n{param1} × {param2} Interaction')
+        ax.set_xlabel(param2)
+        ax.set_ylabel(param1)
+        
+        plt.tight_layout()
+        
+        exp_suffix = f'_{experiment_name}' if experiment_name else ''
+        filename = f'interaction_{dataset}_{model}_{param1}_{param2}{exp_suffix}.png'
+        plt.savefig(self.output_dir / filename, dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"Saved interaction plot: {filename}")
     
     def _load_experiment_data(self, exp_dir: Path) -> Dict:
         """Load all data from a single experiment directory."""
@@ -397,6 +439,231 @@ class TuningResultsAnalyzer:
         self._plot_weight_distributions(distribution_df)
         
         return distribution_df
+
+    def analyze_hyperparameter_effects(self, experiment_name=None):
+        """
+        Analyze how hyperparameters affect model performance.
+        
+        For each experiment type, shows:
+        - Main effects of each parameter
+        - Interaction effects between parameters
+        - Optimal parameter values
+        - Statistical significance
+        
+        Args:
+            experiment_name: Filter to specific experiment (e.g., 'weight_tuning')
+        """
+        print("\nAnalyzing hyperparameter effects...")
+        
+        if self.summary_df is None:
+            self.create_summary_dataframe()
+        
+        df = self.summary_df.copy()
+        
+        # Filter to specific experiment if requested
+        if experiment_name:
+            df = df[df['exp_dir'].str.contains(f'experiment_{experiment_name}')]
+            print(f"Filtered to experiment: {experiment_name}")
+        
+        # Identify which parameters vary (these are the ones being tuned)
+        param_columns = ['pred_loss_coef', 'info_loss_coef', 'motif_loss_coef',
+                        'init_r', 'final_r', 'decay_r', 'decay_interval']
+        
+        varying_params = []
+        for col in param_columns:
+            if col in df.columns and df[col].nunique() > 1:
+                varying_params.append(col)
+        
+        print(f"Parameters being tuned: {varying_params}")
+        
+        # Performance metrics to analyze
+        perf_metrics = ['valid_acc', 'test_acc', 'test_x_roc']
+        
+        results = []
+        
+        for dataset in df['dataset'].unique():
+            for model in df['model'].unique():
+                subset = df[(df['dataset'] == dataset) & (df['model'] == model)]
+                
+                if len(subset) < 3:  # Need enough data points
+                    continue
+                
+                for param in varying_params:
+                    for metric in perf_metrics:
+                        if metric not in subset.columns:
+                            continue
+                        
+                        # Remove NaN values
+                        valid_data = subset[[param, metric]].dropna()
+                        
+                        if len(valid_data) < 3:
+                            continue
+                        
+                        # Calculate correlation
+                        corr, p_value = stats.pearsonr(valid_data[param], valid_data[metric])
+                        
+                        # Calculate Spearman (rank-based, more robust)
+                        spearman_corr, spearman_p = stats.spearmanr(valid_data[param], valid_data[metric])
+                        
+                        # Find best parameter value
+                        best_idx = valid_data[metric].idxmax()
+                        best_param_value = valid_data.loc[best_idx, param]
+                        best_metric_value = valid_data.loc[best_idx, metric]
+                        
+                        # Calculate mean performance at each parameter value
+                        param_means = valid_data.groupby(param)[metric].agg(['mean', 'std', 'count'])
+                        
+                        results.append({
+                            'dataset': dataset,
+                            'model': model,
+                            'parameter': param,
+                            'metric': metric,
+                            'correlation': corr,
+                            'p_value': p_value,
+                            'spearman_corr': spearman_corr,
+                            'spearman_p': spearman_p,
+                            'significant': p_value < 0.05,
+                            'best_param_value': best_param_value,
+                            'best_metric_value': best_metric_value,
+                            'num_samples': len(valid_data),
+                        })
+        
+        results_df = pd.DataFrame(results)
+        
+        # Save results
+        output_path = self.output_dir / 'hyperparameter_effects.csv'
+        results_df.to_csv(output_path, index=False)
+        print(f"Saved hyperparameter effects to {output_path}")
+        
+        # Create visualizations
+        self._plot_hyperparameter_effects(df, varying_params, perf_metrics, experiment_name)
+        
+        return results_df
+
+    def _plot_hyperparameter_effects(self, df, varying_params, perf_metrics, experiment_name):
+        """Create plots showing hyperparameter effects."""
+        
+        # For each dataset and model combination
+        for dataset in df['dataset'].unique():
+            for model in df['model'].unique():
+                subset = df[(df['dataset'] == dataset) & (df['model'] == model)]
+                
+                if len(subset) < 3:
+                    continue
+                
+                # Create a figure with subplots for each parameter
+                n_params = len(varying_params)
+                n_metrics = len([m for m in perf_metrics if m in subset.columns])
+                
+                if n_params == 0 or n_metrics == 0:
+                    continue
+                
+                fig, axes = plt.subplots(n_metrics, n_params, 
+                                        figsize=(5*n_params, 4*n_metrics))
+                
+                if n_metrics == 1:
+                    axes = axes.reshape(1, -1)
+                if n_params == 1:
+                    axes = axes.reshape(-1, 1)
+                
+                fig.suptitle(f'{dataset} - {model}\nHyperparameter Effects', fontsize=16)
+                
+                for i, metric in enumerate(perf_metrics):
+                    if metric not in subset.columns:
+                        continue
+                        
+                    for j, param in enumerate(varying_params):
+                        ax = axes[i, j]
+                        
+                        # Remove NaN values
+                        plot_data = subset[[param, metric]].dropna()
+                        
+                        if len(plot_data) < 2:
+                            ax.text(0.5, 0.5, 'Insufficient data', 
+                                ha='center', va='center', transform=ax.transAxes)
+                            ax.set_title(f'{param} vs {metric}')
+                            continue
+                        
+                        # If parameter has few unique values, use boxplot
+                        if plot_data[param].nunique() <= 5:
+                            plot_data.boxplot(column=metric, by=param, ax=ax)
+                            ax.set_xlabel(param)
+                            ax.set_ylabel(metric)
+                            plt.sca(ax)
+                            plt.xticks(rotation=45)
+                        else:
+                            # Otherwise use scatter plot with trend line
+                            ax.scatter(plot_data[param], plot_data[metric], alpha=0.6)
+                            
+                            # Add trend line
+                            z = np.polyfit(plot_data[param], plot_data[metric], 1)
+                            p = np.poly1d(z)
+                            ax.plot(plot_data[param], p(plot_data[param]), 
+                                "r--", alpha=0.8, linewidth=2)
+                            
+                            # Add correlation
+                            corr, p_val = stats.pearsonr(plot_data[param], plot_data[metric])
+                            ax.text(0.05, 0.95, f'r={corr:.3f}\np={p_val:.3f}',
+                                transform=ax.transAxes, va='top',
+                                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+                            
+                            ax.set_xlabel(param)
+                            ax.set_ylabel(metric)
+                        
+                        ax.set_title(f'{param} vs {metric}')
+                        ax.grid(True, alpha=0.3)
+                
+                plt.tight_layout()
+                
+                # Save figure
+                exp_suffix = f'_{experiment_name}' if experiment_name else ''
+                filename = f'hyperparameter_effects_{dataset}_{model}{exp_suffix}.png'
+                plt.savefig(self.output_dir / filename, dpi=300, bbox_inches='tight')
+                plt.close()
+                print(f"Saved plot: {filename}")
+    def analyze_parameter_interactions(self, experiment_name=None):
+        """
+        Analyze interaction effects between parameters.
+        
+        Shows if combinations of parameters matter more than individual effects.
+        """
+        print("\nAnalyzing parameter interactions...")
+        
+        if self.summary_df is None:
+            self.create_summary_dataframe()
+        
+        df = self.summary_df.copy()
+        
+        # Filter to specific experiment if requested
+        if experiment_name:
+            df = df[df['exp_dir'].str.contains(f'experiment_{experiment_name}')]
+        
+        # Identify varying parameters
+        param_columns = ['pred_loss_coef', 'info_loss_coef', 'motif_loss_coef',
+                        'init_r', 'final_r', 'decay_r', 'decay_interval']
+        
+        varying_params = [col for col in param_columns 
+                        if col in df.columns and df[col].nunique() > 1]
+        
+        if len(varying_params) < 2:
+            print("Need at least 2 varying parameters for interaction analysis")
+            return
+        
+        # Create interaction heatmaps
+        for dataset in df['dataset'].unique():
+            for model in df['model'].unique():
+                subset = df[(df['dataset'] == dataset) & (df['model'] == model)]
+                
+                if len(subset) < 10:  # Need reasonable sample size
+                    continue
+                
+                # For each pair of parameters
+                for i, param1 in enumerate(varying_params):
+                    for param2 in varying_params[i+1:]:
+                        self._plot_interaction_heatmap(
+                            subset, param1, param2, 'test_acc',
+                            dataset, model, experiment_name
+                        )
     
     def find_best_configurations(self):
         """
@@ -865,6 +1132,13 @@ class TuningResultsAnalyzer:
         self.analyze_explainer_performance()
         self.analyze_weight_distribution()
         self.compare_with_without_motif_loss()
+
+        # Add after other analyses:
+        print("\n[Running hyperparameter effects analysis...]")
+        self.analyze_hyperparameter_effects()
+        
+        print("\n[Running parameter interaction analysis...]")
+        self.analyze_parameter_interactions()
         
         # Step 4: Generate report
         self.generate_comprehensive_report()
