@@ -226,12 +226,14 @@ class GSAT(nn.Module):
         
         # Create directory for saving scores. Add a tuning_id parameter to method_config for tracking experiments
         tuning_id = method_config.get('tuning_id', 'default')
+        experiment_name = method_config.get('experiment_name', 'default_experiment')
         timestamp = datetime.now().strftime('%m_%d_%Y-%H_%M_%S')
 
         self.seed_dir = os.path.join(
             "tuning_results",  # Base directory
             str(self.dataset_name),
             f'model_{self.model_name}',
+            f'experiment_{experiment_name}',
             f'tuning_{tuning_id}',
             f'pred{self.pred_loss_coef}_info{self.info_loss_coef}_motif{self.motif_loss_coef}',
             f'init{self.init_r}_final{self.final_r}_decay{self.decay_r}',

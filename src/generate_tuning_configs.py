@@ -206,6 +206,9 @@ def save_configs(configs, output_dir, experiment_name):
     
     # Save individual config files
     for config in configs:
+        # Add experiment name to config
+        config['experiment_name'] = experiment_name
+        
         config_id = config['tuning_id']
         config_file = experiment_dir / f'{config_id}.yaml'
         
