@@ -308,8 +308,12 @@ def create_run_scripts(manifest, output_dir, datasets, models, folds, seeds):
                     script_path.chmod(0o755)
                     
                     # Add to master script
+                    # Copy script to src/, run it, then delete it
+                    relative_script_path = f'configs/tuning/{experiment_name}/{script_name}'
                     f.write(f'echo "Running {dataset} with {model} on fold {fold}"\n')
-                    f.write(f'bash {script_name}\n\n')
+                    f.write(f'cp {relative_script_path} .\n')
+                    f.write(f'bash {script_name}\n')
+                    f.write(f'rm {script_name}\n\n')
     
     # Make master script executable
     master_script.chmod(0o755)
