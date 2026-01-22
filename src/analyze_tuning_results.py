@@ -45,9 +45,15 @@ class TuningResultsAnalyzer:
         self.epoch_metrics_df = None
         self.attention_dist_df = None
         
-    def collect_all_experiments(self):
-        """Recursively find all experiment directories and load their data."""
+    def collect_all_experiments(self, lightweight=False):
+        """Recursively find all experiment directories and load their data.
+        
+        Args:
+            lightweight: If True, only load summary data (much faster, less memory)
+        """
         print("Collecting all experiment results...")
+        if lightweight:
+            print("  [Lightweight mode: skipping large data files]")
         
         experiment_dirs = list(self.results_dir.rglob('experiment_summary.json'))
         print(f"Found {len(experiment_dirs)} experiments")
@@ -55,7 +61,7 @@ class TuningResultsAnalyzer:
         for summary_path in experiment_dirs:
             exp_dir = summary_path.parent
             try:
-                exp_data = self._load_experiment_data(exp_dir)
+                exp_data = self._load_experiment_data(exp_dir, lightweight=lightweight)
                 self.all_experiments.append(exp_data)
             except Exception as e:
                 print(f"Warning: Failed to load {exp_dir}: {e}")
@@ -105,20 +111,39 @@ class TuningResultsAnalyzer:
         plt.close()
         print(f"Saved interaction plot: {filename}")
     
-    def _load_experiment_data(self, exp_dir: Path) -> Dict:
-        """Load all data from a single experiment directory."""
+    def _load_experiment_data(self, exp_dir: Path, lightweight: bool = False) -> Dict:
+        """Load all data from a single experiment directory.
         
-        # Load summary
+        Args:
+            exp_dir: Path to experiment directory
+            lightweight: If True, only load summary and final metrics (skip large files)
+        """
+        
+        # Always load summary (small)
         with open(exp_dir / 'experiment_summary.json', 'r') as f:
             summary = json.load(f)
         
-        # Load final metrics
+        # Always load final metrics (small)
         final_metrics = {}
         final_metrics_path = exp_dir / 'final_metrics.json'
         if final_metrics_path.exists():
             with open(final_metrics_path, 'r') as f:
                 final_metrics = json.load(f)
         
+        # If lightweight mode, skip loading large files
+        if lightweight:
+            return {
+                'exp_dir': str(exp_dir),
+                'summary': summary,
+                'final_metrics': final_metrics,
+                'node_scores': [],
+                'masked_impact': [],
+                'masked_edge_impact': [],
+                'epoch_metrics': [],
+                'attention_dist': [],
+            }
+        
+        # Only load large files if not in lightweight mode
         # Load node scores
         node_scores = []
         node_scores_path = exp_dir / 'node_scores.jsonl'
@@ -1114,34 +1139,53 @@ class TuningResultsAnalyzer:
         
         print(f"\nSaved comprehensive report to {report_path}")
     
-    def run_full_analysis(self):
-        """Run all analysis steps."""
+    def run_full_analysis(self, lightweight=False):
+        """Run all analysis steps.
+        
+        Args:
+            lightweight: If True, only load summary data and skip detailed analyses
+        """
         print("\n" + "="*80)
         print("STARTING FULL ANALYSIS PIPELINE")
         print("="*80)
         
         # Step 1: Collect experiments
-        self.collect_all_experiments()
+        self.collect_all_experiments(lightweight=lightweight)
         
         # Step 2: Create summary
         self.create_summary_dataframe()
         
-        # Step 3: Run all analyses
+        # Step 3: Run analyses
         self.find_best_configurations()
-        self.analyze_within_motif_consistency()
-        self.analyze_explainer_performance()
-        self.analyze_weight_distribution()
         self.compare_with_without_motif_loss()
-
-        # Add after other analyses:
+        
+        # Hyperparameter analysis (works with summary data)
         print("\n[Running hyperparameter effects analysis...]")
         self.analyze_hyperparameter_effects()
         
         print("\n[Running parameter interaction analysis...]")
         self.analyze_parameter_interactions()
         
-        # Step 4: Generate report
-        self.generate_comprehensive_report()
+        # Only run detailed analyses if data is loaded
+        if not lightweight:
+            print("\n[Running within-motif consistency analysis...]")
+            self.analyze_within_motif_consistency()
+            
+            print("\n[Running explainer performance analysis...]")
+            self.analyze_explainer_performance()
+            
+            print("\n[Running weight distribution analysis...]")
+            self.analyze_weight_distribution()
+            
+            # Step 4: Generate report
+            self.generate_comprehensive_report()
+        else:
+            print("\n[Lightweight mode: Skipping detailed analyses]")
+            print("  - Skipped: within-motif consistency (requires node_scores)")
+            print("  - Skipped: explainer performance (requires masked_impact)")
+            print("  - Skipped: weight distribution (requires attention_dist)")
+            print("  - Skipped: comprehensive report")
+            print("\nTo run full analysis, remove --lightweight flag")
         
         print("\n" + "="*80)
         print("ANALYSIS COMPLETE")
@@ -1170,6 +1214,9 @@ def main():
     parser.add_argument('--models', nargs='+',
                         help='Filter by specific models (optional)')
     
+    parser.add_argument('--lightweight', action='store_true',
+                       help='Load only summary data (faster, less memory). Skips detailed analyses.')
+    
     args = parser.parse_args()
     
     # Create analyzer
@@ -1179,7 +1226,7 @@ def main():
     )
     
     # Run full analysis
-    analyzer.run_full_analysis()
+    analyzer.run_full_analysis(lightweight=args.lightweight)
 
 
 if __name__ == '__main__':
