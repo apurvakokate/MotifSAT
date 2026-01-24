@@ -225,21 +225,13 @@ class GSAT(nn.Module):
         self.multi_label = multi_label
         self.criterion = Criterion(num_class, multi_label, task_type)
         
-        # Create directory for saving scores. Add a tuning_id parameter to method_config for tracking experiments
+        # Use the deterministic log directory passed in (no timestamp!)
+        # This allows artifact checking to work properly
         tuning_id = method_config.get('tuning_id', 'default')
         experiment_name = method_config.get('experiment_name', 'default_experiment')
-        timestamp = datetime.now().strftime('%m_%d_%Y-%H_%M_%S')
-
-        self.seed_dir = os.path.join(
-            "tuning_results",  # Base directory
-            str(self.dataset_name),
-            f'model_{self.model_name}',
-            f'experiment_{experiment_name}',
-            f'tuning_{tuning_id}',
-            f'pred{self.pred_loss_coef}_info{self.info_loss_coef}_motif{self.motif_loss_coef}',
-            f'init{self.init_r}_final{self.final_r}_decay{self.decay_r}',
-            f'fold{self.fold}_seed{self.random_state}_{timestamp}'
-        )
+        
+        # Use model_dir as the base for all outputs (already deterministic from main())
+        self.seed_dir = str(model_dir)
         os.makedirs(self.seed_dir, exist_ok=True)
         # Save configs
         with open(os.path.join(self.seed_dir, "method_config.yaml"), "w") as f:
@@ -955,15 +947,21 @@ class ExtractorMLP(nn.Module):
 
 
 def check_artifacts_exist(log_dir, model_name, dataset_name, config_id, fold, seed):
-    """Check if training artifacts already exist to skip retraining."""
+    """
+    Check if training artifacts already exist to skip retraining.
+    Looks for key completion markers that indicate training finished successfully.
+    """
+    # Check for final checkpoint and metrics files
     checkpoint_patterns = [
-        log_dir / 'experiment_summary.json',
-        log_dir / 'final_metrics.json',
+        log_dir / 'final_metrics.json',  # Final metrics saved at end of training
+        log_dir / 'node_scores.jsonl',   # Attention scores saved at last epoch
+        log_dir / 'edge_scores.jsonl',   # Edge scores saved at last epoch
     ]
     
     exists = all(p.exists() for p in checkpoint_patterns)
     if exists:
-        print(f"[INFO] Artifacts found for {dataset_name}-{model_name}-fold{fold}-seed{seed}-{config_id}")
+        print(f"[INFO] ✓ Training already completed for {dataset_name}-{model_name}-fold{fold}-seed{seed}-{config_id}")
+        print(f"[INFO] ✓ Found artifacts in: {log_dir}")
         print(f"[INFO] Skipping training. Delete artifacts to retrain.")
     return exists
 
@@ -1197,7 +1195,6 @@ def main():
     data_dir = Path(global_config['data_dir'])
     num_seeds = global_config['num_seeds']
 
-    time = datetime.now().strftime("%m_%d_%Y-%H_%M_%S")
     device = torch.device(f'cuda:{cuda_id}' if cuda_id >= 0 else 'cpu')
 
     # If seed is specified via command line, use it; otherwise use range from config
@@ -1206,18 +1203,39 @@ def main():
     else:
         seeds_to_run = range(num_seeds)
 
+    # Create deterministic directory structure based on experiment parameters
+    # Extract key hyperparameters for directory naming
+    gsat_config = local_config.get('GSAT_config', {})
+    tuning_id = gsat_config.get('tuning_id', 'default')
+    pred_coef = gsat_config.get('pred_loss_coef', 1.0)
+    info_coef = gsat_config.get('info_loss_coef', 1.0)
+    motif_coef = gsat_config.get('motif_loss_coef', 0.0)
+    init_r = gsat_config.get('init_r', 0.9)
+    final_r = gsat_config.get('final_r', 0.7)
+    decay_r = gsat_config.get('decay_r', 0.1)
+    
+    # Create deterministic base directory (no timestamp!)
+    # Structure: dataset/model/fold_X/tuning_configID/pred_X_info_X_motif_X/seed_X
+    base_dir = data_dir / dataset_name / f'model_{model_name}' / f'fold_{fold}' / f'tuning_{tuning_id}'
+    config_subdir = f'pred{pred_coef}_info{info_coef}_motif{motif_coef}'
+    
     metric_dicts = []
     for random_state in seeds_to_run:
         print('=' * 80)
         print(f'STARTING SEED {random_state}')
         print('=' * 80)
-        log_dir = data_dir / f'{dataset_name}-fold{fold}' / 'logs' / (time + '-' + dataset_name + '-' + model_name + '-seed' + str(random_state) + '-' + method_name)
+        
+        # Deterministic log directory for this specific run
+        log_dir = base_dir / config_subdir / f'seed_{random_state}'
+        log_dir.mkdir(parents=True, exist_ok=True)
+        
         hparam_dict, metric_dict = train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_name, method_name, device, random_state, fold, task_type, args.use_motif_loss)
         metric_dicts.append(metric_dict)
 
-    log_dir = data_dir / f'{dataset_name}-fold{fold}' / 'logs' / (time + '-' + dataset_name + '-' + model_name + '-seed99-' + method_name + '-stat')
-    log_dir.mkdir(parents=True, exist_ok=True)
-    writer = Writer(log_dir=log_dir)
+    # Summary directory for aggregated statistics
+    summary_dir = base_dir / config_subdir / 'summary'
+    summary_dir.mkdir(parents=True, exist_ok=True)
+    writer = Writer(log_dir=summary_dir)
     write_stat_from_metric_dicts(hparam_dict, metric_dicts, writer)
 
 
