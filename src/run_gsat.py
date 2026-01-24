@@ -225,13 +225,20 @@ class GSAT(nn.Module):
         self.multi_label = multi_label
         self.criterion = Criterion(num_class, multi_label, task_type)
         
-        # Use the deterministic log directory passed in (no timestamp!)
-        # This allows artifact checking to work properly
+        # Create deterministic directory for saving scores (NO TIMESTAMP!)
         tuning_id = method_config.get('tuning_id', 'default')
         experiment_name = method_config.get('experiment_name', 'default_experiment')
-        
-        # Use model_dir as the base for all outputs (already deterministic from main())
-        self.seed_dir = str(model_dir)
+
+        self.seed_dir = os.path.join(
+            "tuning_results",  # Base directory
+            str(self.dataset_name),
+            f'model_{self.model_name}',
+            f'experiment_{experiment_name}',
+            f'tuning_{tuning_id}',
+            f'pred{self.pred_loss_coef}_info{self.info_loss_coef}_motif{self.motif_loss_coef}',
+            f'init{self.init_r}_final{self.final_r}_decay{self.decay_r}',
+            f'fold{self.fold}_seed{self.random_state}'  # NO TIMESTAMP!
+        )
         os.makedirs(self.seed_dir, exist_ok=True)
         # Save configs
         with open(os.path.join(self.seed_dir, "method_config.yaml"), "w") as f:
@@ -247,6 +254,7 @@ class GSAT(nn.Module):
             'fold': self.fold,
             'seed': self.random_state,
             'task_type': self.task_type,
+            'experiment_name': experiment_name,
             'tuning_id': tuning_id,
             'loss_coefficients': {
                 'pred_loss_coef': self.pred_loss_coef,
@@ -945,22 +953,27 @@ class ExtractorMLP(nn.Module):
         return att_log_logits
 
 
-def check_artifacts_exist(log_dir, model_name, dataset_name, config_id, fold, seed):
+def check_artifacts_exist(seed_dir):
     """
     Check if training artifacts already exist to skip retraining.
     Looks for key completion markers that indicate training finished successfully.
+    
+    Args:
+        seed_dir: Path to the seed directory (string or Path)
     """
+    seed_dir = Path(seed_dir)
+    
     # Check for final checkpoint and metrics files
     checkpoint_patterns = [
-        log_dir / 'final_metrics.json',  # Final metrics saved at end of training
-        log_dir / 'node_scores.jsonl',   # Attention scores saved at last epoch
-        log_dir / 'edge_scores.jsonl',   # Edge scores saved at last epoch
+        seed_dir / 'final_metrics.json',  # Final metrics saved at end of training
+        seed_dir / 'node_scores.jsonl',   # Attention scores saved at last epoch
+        seed_dir / 'edge_scores.jsonl',   # Edge scores saved at last epoch
     ]
     
     exists = all(p.exists() for p in checkpoint_patterns)
     if exists:
-        print(f"[INFO] ✓ Training already completed for {dataset_name}-{model_name}-fold{fold}-seed{seed}-{config_id}")
-        print(f"[INFO] ✓ Found artifacts in: {log_dir}")
+        print(f"[INFO] ✓ Training already completed")
+        print(f"[INFO] ✓ Found artifacts in: {seed_dir}")
         print(f"[INFO] Skipping training. Delete artifacts to retrain.")
     return exists
 
@@ -1025,16 +1038,37 @@ def calculate_explainer_performance(model, extractor, data_loader, device, epoch
 
 
 def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_name, method_name, device, random_state,  fold, task_type='classification', use_motif_loss = False):
+    # Build the deterministic seed_dir path to check for artifacts
+    gsat_config = local_config.get('GSAT_config', {})
+    tuning_id = gsat_config.get('tuning_id', 'default')
+    experiment_name = gsat_config.get('experiment_name', 'default_experiment')
+    pred_coef = gsat_config.get('pred_loss_coef', 1.0)
+    info_coef = gsat_config.get('info_loss_coef', 1.0)
+    motif_coef = gsat_config.get('motif_loss_coef', 0.0)
+    init_r = gsat_config.get('init_r', 0.9)
+    final_r = gsat_config.get('final_r', 0.7)
+    decay_r = gsat_config.get('decay_r', 0.1)
+    
+    seed_dir = os.path.join(
+        "tuning_results",
+        str(dataset_name),
+        f'model_{model_name}',
+        f'experiment_{experiment_name}',
+        f'tuning_{tuning_id}',
+        f'pred{pred_coef}_info{info_coef}_motif{motif_coef}',
+        f'init{init_r}_final{final_r}_decay{decay_r}',
+        f'fold{fold}_seed{random_state}'
+    )
+    
     # Check if artifacts already exist
-    config_id = local_config.get('GSAT_config', {}).get('tuning_id', 'default')
-    if check_artifacts_exist(log_dir, model_name, dataset_name, config_id, fold, random_state):
+    if check_artifacts_exist(seed_dir):
         # Load and return existing results
         try:
-            with open(log_dir / 'experiment_summary.json', 'r') as f:
+            with open(Path(seed_dir) / 'experiment_summary.json', 'r') as f:
                 summary = json.load(f)
-            with open(log_dir / 'final_metrics.json', 'r') as f:
+            with open(Path(seed_dir) / 'final_metrics.json', 'r') as f:
                 metric_dict = json.load(f)
-            print(f"[INFO] Loaded existing results from {log_dir}")
+            print(f"[INFO] Loaded existing results from {seed_dir}")
             return summary.get('hparams', {}), metric_dict
         except Exception as e:
             print(f"[WARNING] Failed to load existing results: {e}")
@@ -1049,7 +1083,7 @@ def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_nam
     
     # Initialize wandb
     wandb_project = f"GSAT-{dataset_name}"
-    wandb_name = f"{model_name}-fold{fold}-seed{random_state}-{config_id}"
+    wandb_name = f"{model_name}-fold{fold}-seed{random_state}-{tuning_id}"
     
     try:
         wandb.init(
@@ -1060,7 +1094,8 @@ def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_nam
                 'model': model_name,
                 'fold': fold,
                 'seed': random_state,
-                'config_id': config_id,
+                'tuning_id': tuning_id,
+                'experiment_name': experiment_name,
                 **local_config.get('GSAT_config', {}),
                 **local_config.get('model_config', {})
             },
@@ -1122,17 +1157,11 @@ def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_nam
     metric_dict = gsat.train(loaders, test_set, metric_dict, model_config.get('use_edge_attr', True))
     writer.add_hparams(hparam_dict=hparam_dict, metric_dict=metric_dict)
     
-    # Save artifacts
-    try:
-        with open(log_dir / 'experiment_summary.json', 'w') as f:
-            json.dump({'hparams': hparam_dict, 'config': local_config}, f, indent=2)
-        
-        with open(log_dir / 'final_metrics.json', 'w') as f:
-            json.dump(metric_dict, f, indent=2)
-        
-        print(f"[INFO] Saved artifacts to {log_dir}")
-    except Exception as e:
-        print(f"[WARNING] Failed to save artifacts: {e}")
+    # Note: Artifacts are saved automatically by GSAT class to seed_dir
+    # - experiment_summary.json (in GSAT.__init__)
+    # - final_metrics.json (in GSAT.save_final_metrics)
+    # - node_scores.jsonl and edge_scores.jsonl (at last epoch)
+    print(f"[INFO] All artifacts saved to {gsat.seed_dir}")
     
     # Finish wandb
     try:
@@ -1202,40 +1231,26 @@ def main():
     else:
         seeds_to_run = range(num_seeds)
 
-    # Create deterministic directory structure based on experiment parameters
-    # Extract key hyperparameters for directory naming
-    gsat_config = local_config.get('GSAT_config', {})
-    tuning_id = gsat_config.get('tuning_id', 'default')
-    pred_coef = gsat_config.get('pred_loss_coef', 1.0)
-    info_coef = gsat_config.get('info_loss_coef', 1.0)
-    motif_coef = gsat_config.get('motif_loss_coef', 0.0)
-    init_r = gsat_config.get('init_r', 0.9)
-    final_r = gsat_config.get('final_r', 0.7)
-    decay_r = gsat_config.get('decay_r', 0.1)
-    
-    # Create deterministic base directory (no timestamp!)
-    # Structure: dataset/model/fold_X/tuning_configID/pred_X_info_X_motif_X/seed_X
-    base_dir = data_dir / dataset_name / f'model_{model_name}' / f'fold_{fold}' / f'tuning_{tuning_id}'
-    config_subdir = f'pred{pred_coef}_info{info_coef}_motif{motif_coef}'
-    
     metric_dicts = []
     for random_state in seeds_to_run:
         print('=' * 80)
         print(f'STARTING SEED {random_state}')
         print('=' * 80)
         
-        # Deterministic log directory for this specific run
-        log_dir = base_dir / config_subdir / f'seed_{random_state}'
-        log_dir.mkdir(parents=True, exist_ok=True)
+        # log_dir is not used anymore since GSAT creates its own deterministic seed_dir
+        # Keeping for backward compatibility with pretrain_clf
+        log_dir = data_dir / f'{dataset_name}-fold{fold}' / 'logs' / f'{model_name}-seed{random_state}-{method_name}'
         
         hparam_dict, metric_dict = train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_name, method_name, device, random_state, fold, task_type, args.use_motif_loss)
         metric_dicts.append(metric_dict)
 
-    # Summary directory for aggregated statistics
-    summary_dir = base_dir / config_subdir / 'summary'
-    summary_dir.mkdir(parents=True, exist_ok=True)
-    writer = Writer(log_dir=summary_dir)
-    write_stat_from_metric_dicts(hparam_dict, metric_dicts, writer)
+    # Summary stats saved by analyze_tuning_results.py
+    # Individual runs are in tuning_results/, no need for additional summary here
+    if len(metric_dicts) > 1:
+        log_dir = data_dir / f'{dataset_name}-fold{fold}' / 'logs' / f'{model_name}-seed_summary-{method_name}'
+        log_dir.mkdir(parents=True, exist_ok=True)
+        writer = Writer(log_dir=log_dir)
+        write_stat_from_metric_dicts(hparam_dict, metric_dicts, writer)
 
 
 if __name__ == '__main__':
