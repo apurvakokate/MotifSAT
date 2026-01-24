@@ -259,8 +259,7 @@ class GSAT(nn.Module):
                 'decay_r': self.decay_r,
                 'decay_interval': self.decay_interval,
                 'fix_r': self.fix_r
-            },
-            'timestamp': timestamp
+            }
         }
 
         with open(os.path.join(self.seed_dir, "experiment_summary.json"), "w") as f:
