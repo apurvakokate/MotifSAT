@@ -1,8 +1,0 @@
-pred_loss_coef: 1.0
-info_loss_coef: 1.0
-init_r: 0.9
-final_r: 0.1
-decay_r: 0.1
-decay_interval: 10
-tuning_id: config_0003
-motif_loss_coef: 2.0

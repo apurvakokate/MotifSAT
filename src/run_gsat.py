@@ -19,6 +19,7 @@ from torch_geometric.utils import subgraph, is_undirected
 from ogb.graphproppred import Evaluator
 from sklearn.metrics import roc_auc_score, mean_squared_error
 from rdkit import Chem
+import wandb
 
 from pretrain_clf import train_clf_one_seed
 from utils import Writer, Criterion, MLP, visualize_a_graph, save_checkpoint, load_checkpoint, get_preds, get_lr, set_seed, process_data
@@ -468,6 +469,19 @@ class GSAT(nn.Module):
                 metric = metric.split('/')[-1]
                 self.writer.add_scalar(f'gsat_best/{metric}', value, epoch)
 
+            # Calculate explainer performance every 10 epochs (resource intensive)
+            if epoch % 10 == 0 and epoch > 0:
+                try:
+                    print(f"[INFO] Calculating explainer performance at epoch {epoch}")
+                    explainer_metrics = calculate_explainer_performance(
+                        self.clf, self.extractor, loaders['valid'], self.device, epoch, self.learn_edge_att
+                    )
+                    wandb.log(explainer_metrics)
+                    print(f"[INFO] Fidelity-: {explainer_metrics['explainer/fidelity_minus']:.4f}, "
+                          f"Fidelity+: {explainer_metrics['explainer/fidelity_plus']:.4f}")
+                except Exception as e:
+                    print(f"[WARNING] Failed to calculate explainer performance: {e}")
+
             # if self.num_viz_samples != 0 and (epoch % self.viz_interval == 0 or epoch == self.epochs - 1):
             #     if self.multi_label:
             #         raise NotImplementedError
@@ -655,6 +669,34 @@ class GSAT(nn.Module):
 
         eval_desc, att_auroc, precision, clf_acc, clf_roc = self.get_eval_score(epoch, phase, exp_labels, att, precision_at_k, clf_labels, clf_logits, batch)
         desc += eval_desc
+        
+        # Log to wandb (only when not batch)
+        if not batch:
+            try:
+                wandb_metrics = {
+                    f'{phase}/loss': loss_dict['loss'],
+                    f'{phase}/pred_loss': loss_dict['pred'],
+                    f'{phase}/info_loss': loss_dict['info'],
+                    f'{phase}/motif_loss': loss_dict.get('motif_consistency', 0),
+                    f'{phase}/att_auroc': att_auroc if att_auroc is not None else 0,
+                    f'{phase}/precision_k': precision if precision is not None else 0,
+                    'epoch': epoch,
+                }
+                
+                if self.task_type == 'regression':
+                    wandb_metrics[f'{phase}/mae'] = clf_acc if clf_acc is not None else 0
+                    wandb_metrics[f'{phase}/mse'] = clf_roc if clf_roc is not None else 0
+                else:
+                    wandb_metrics[f'{phase}/clf_acc'] = clf_acc if clf_acc is not None else 0
+                    wandb_metrics[f'{phase}/clf_roc'] = clf_roc if clf_roc is not None else 0
+                
+                if phase == 'train':
+                    wandb_metrics['learning_rate'] = get_lr(self.optimizer)
+                
+                wandb.log(wandb_metrics)
+            except Exception as e:
+                pass  # Silently fail if wandb is not initialized
+        
         return desc, att_auroc, precision, clf_acc, clf_roc, loss_dict['pred']
 
     def get_eval_score(self, epoch, phase, exp_labels, att, precision_at_k, clf_labels, clf_logits, batch):
@@ -677,13 +719,38 @@ class GSAT(nn.Module):
                 return f'clf_acc: {clf_acc:.3f}', None, None, None, None
 
         precision_at_k = np.mean(precision_at_k)
+        
+        # FIX: Calculate ROC-AUC properly for all datasets
         if self.task_type == 'regression':
             clf_roc = mse
         else:
-            clf_roc = 0
-        if 'ogb' in self.dataset_name:
-            evaluator = Evaluator(name='-'.join(self.dataset_name.split('_')))
-            clf_roc = evaluator.eval({'y_pred': clf_logits, 'y_true': clf_labels})['rocauc']
+            # Try to calculate ROC-AUC for binary/multi-class classification
+            try:
+                if 'ogb' in self.dataset_name:
+                    evaluator = Evaluator(name='-'.join(self.dataset_name.split('_')))
+                    clf_roc = evaluator.eval({'y_pred': clf_logits, 'y_true': clf_labels})['rocauc']
+                elif self.multi_label:
+                    # Multi-label classification
+                    clf_probs = torch.sigmoid(torch.tensor(clf_logits)).numpy()
+                    # Handle NaN values in labels for multi-label
+                    valid_mask = ~np.isnan(clf_labels)
+                    if valid_mask.any():
+                        clf_roc = roc_auc_score(clf_labels[valid_mask], clf_probs[valid_mask], average='micro')
+                    else:
+                        clf_roc = 0
+                elif len(np.unique(clf_labels)) == 2:
+                    # Binary classification
+                    clf_probs = torch.sigmoid(torch.tensor(clf_logits)).numpy()
+                    if clf_probs.ndim > 1 and clf_probs.shape[1] > 1:
+                        clf_probs = clf_probs[:, 1] if clf_probs.shape[1] == 2 else clf_probs.squeeze()
+                    clf_roc = roc_auc_score(clf_labels, clf_probs)
+                else:
+                    # Multi-class classification
+                    clf_probs = torch.softmax(torch.tensor(clf_logits), dim=1).numpy()
+                    clf_roc = roc_auc_score(clf_labels, clf_probs, multi_class='ovr', average='macro')
+            except Exception as e:
+                print(f"[WARNING] Could not calculate ROC-AUC for {phase}: {e}")
+                clf_roc = 0
 
         att_auroc, bkg_att_weights, signal_att_weights = 0, att, att
         if np.unique(exp_labels).shape[0] > 1:
@@ -874,13 +941,125 @@ class ExtractorMLP(nn.Module):
         return att_log_logits
 
 
+def check_artifacts_exist(log_dir, model_name, dataset_name, config_id, fold, seed):
+    """Check if training artifacts already exist to skip retraining."""
+    checkpoint_patterns = [
+        log_dir / 'experiment_summary.json',
+        log_dir / 'final_metrics.json',
+    ]
+    
+    exists = all(p.exists() for p in checkpoint_patterns)
+    if exists:
+        print(f"[INFO] Artifacts found for {dataset_name}-{model_name}-fold{fold}-seed{seed}-{config_id}")
+        print(f"[INFO] Skipping training. Delete artifacts to retrain.")
+    return exists
+
+
+def calculate_explainer_performance(model, extractor, data_loader, device, epoch, learn_edge_att=True):
+    """
+    Calculate explainer performance by comparing predictions:
+    1. Original graph vs graph with important regions removed (fidelity-)
+    2. Original graph vs only important regions kept (fidelity+)
+    
+    Returns metrics for wandb logging.
+    """
+    model.eval()
+    extractor.eval()
+    
+    fidelity_minus = []  # Prediction drop when removing important parts
+    fidelity_plus = []   # Prediction maintained with only important parts
+    
+    with torch.no_grad():
+        for data in data_loader:
+            data = data.to(device)
+            
+            # Get original prediction
+            orig_output, orig_emb = model(data.x, data.edge_index, data.batch, data.nodes_to_motifs)
+            orig_pred = torch.sigmoid(orig_output) if orig_output.shape[-1] == 1 else torch.softmax(orig_output, dim=1)
+            
+            # Get attention scores
+            att_log_logits = extractor(orig_emb, data.edge_index, data.batch)
+            att = att_log_logits.sigmoid()
+            
+            if learn_edge_att:
+                # Edge-level attention
+                num_edges = data.edge_index.size(1)
+                k = max(1, int(0.2 * num_edges))  # Keep top 20%
+                top_k_indices = torch.topk(att.squeeze(), k).indices
+                
+                # Create mask for important edges
+                important_mask = torch.zeros(num_edges, dtype=torch.bool, device=device)
+                important_mask[top_k_indices] = True
+                
+                # Fidelity- : Remove important edges
+                remaining_edges = data.edge_index[:, ~important_mask]
+                if remaining_edges.size(1) > 0:
+                    output_minus, _ = model(data.x, remaining_edges, data.batch, data.nodes_to_motifs)
+                    pred_minus = torch.sigmoid(output_minus) if output_minus.shape[-1] == 1 else torch.softmax(output_minus, dim=1)
+                    fidelity_minus.append((orig_pred - pred_minus).abs().mean().item())
+                
+                # Fidelity+ : Keep only important edges
+                important_edges = data.edge_index[:, important_mask]
+                if important_edges.size(1) > 0:
+                    output_plus, _ = model(data.x, important_edges, data.batch, data.nodes_to_motifs)
+                    pred_plus = torch.sigmoid(output_plus) if output_plus.shape[-1] == 1 else torch.softmax(output_plus, dim=1)
+                    fidelity_plus.append((orig_pred - pred_plus).abs().mean().item())
+    
+    metrics = {
+        'explainer/fidelity_minus': np.mean(fidelity_minus) if fidelity_minus else 0.0,
+        'explainer/fidelity_plus': np.mean(fidelity_plus) if fidelity_plus else 0.0,
+        'explainer/epoch': epoch
+    }
+    
+    return metrics
+
+
 def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_name, method_name, device, random_state,  fold, task_type='classification', use_motif_loss = False):
+    # Check if artifacts already exist
+    config_id = local_config.get('GSAT_config', {}).get('tuning_id', 'default')
+    if check_artifacts_exist(log_dir, model_name, dataset_name, config_id, fold, random_state):
+        # Load and return existing results
+        try:
+            with open(log_dir / 'experiment_summary.json', 'r') as f:
+                summary = json.load(f)
+            with open(log_dir / 'final_metrics.json', 'r') as f:
+                metric_dict = json.load(f)
+            print(f"[INFO] Loaded existing results from {log_dir}")
+            return summary.get('hparams', {}), metric_dict
+        except Exception as e:
+            print(f"[WARNING] Failed to load existing results: {e}")
+            print(f"[INFO] Proceeding with training...")
+    
     print('====================================')
     print('====================================')
     print(f'[INFO] Using device: {device}')
     print(f'[INFO] Using random_state: {random_state}')
     print(f'[INFO] Using dataset: {dataset_name}')
     print(f'[INFO] Using model: {model_name}')
+    
+    # Initialize wandb
+    wandb_project = f"GSAT-{dataset_name}"
+    wandb_name = f"{model_name}-fold{fold}-seed{random_state}-{config_id}"
+    
+    try:
+        wandb.init(
+            project=wandb_project,
+            name=wandb_name,
+            config={
+                'dataset': dataset_name,
+                'model': model_name,
+                'fold': fold,
+                'seed': random_state,
+                'config_id': config_id,
+                **local_config.get('GSAT_config', {}),
+                **local_config.get('model_config', {})
+            },
+            reinit=True
+        )
+        print(f"[INFO] Initialized wandb: {wandb_project}/{wandb_name}")
+    except Exception as e:
+        print(f"[WARNING] Failed to initialize wandb: {e}")
+        print(f"[INFO] Continuing without wandb...")
 
     set_seed(random_state)
 
@@ -932,6 +1111,25 @@ def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_nam
     gsat = GSAT(model, extractor, optimizer, scheduler, writer, device, log_dir, dataset_name, num_class, aux_info['multi_label'], random_state, method_config, shared_config, fold, task_type, datasets, masked_data_features)
     metric_dict = gsat.train(loaders, test_set, metric_dict, model_config.get('use_edge_attr', True))
     writer.add_hparams(hparam_dict=hparam_dict, metric_dict=metric_dict)
+    
+    # Save artifacts
+    try:
+        with open(log_dir / 'experiment_summary.json', 'w') as f:
+            json.dump({'hparams': hparam_dict, 'config': local_config}, f, indent=2)
+        
+        with open(log_dir / 'final_metrics.json', 'w') as f:
+            json.dump(metric_dict, f, indent=2)
+        
+        print(f"[INFO] Saved artifacts to {log_dir}")
+    except Exception as e:
+        print(f"[WARNING] Failed to save artifacts: {e}")
+    
+    # Finish wandb
+    try:
+        wandb.finish()
+    except:
+        pass
+    
     return hparam_dict, metric_dict
 
 
@@ -940,6 +1138,7 @@ def main():
     parser = argparse.ArgumentParser(description='Train GSAT')
     parser.add_argument('--dataset', type=str, help='dataset used')
     parser.add_argument('--fold', type=int, help='fold number to use')
+    parser.add_argument('--seed', type=int, default=None, help='random seed (overrides global config if provided)')
     parser.add_argument('--task', type=str, default='classification', choices=['classification', 'regression'], help='task type: classification or regression')
     parser.add_argument('--backbone', type=str, help='backbone model used')
     parser.add_argument(
@@ -988,8 +1187,14 @@ def main():
     time = datetime.now().strftime("%m_%d_%Y-%H_%M_%S")
     device = torch.device(f'cuda:{cuda_id}' if cuda_id >= 0 else 'cpu')
 
+    # If seed is specified via command line, use it; otherwise use range from config
+    if args.seed is not None:
+        seeds_to_run = [args.seed]
+    else:
+        seeds_to_run = range(num_seeds)
+
     metric_dicts = []
-    for random_state in range(num_seeds):
+    for random_state in seeds_to_run:
         print('=' * 80)
         print(f'STARTING SEED {random_state}')
         print('=' * 80)

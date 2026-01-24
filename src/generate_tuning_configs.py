@@ -252,7 +252,8 @@ def save_configs(configs, output_dir, experiment_name):
 
 def create_run_scripts(manifest, output_dir, datasets, models, folds, seeds):
     """
-    Create shell scripts to run all experiments.
+    Create shell scripts to run all experiments - parallelized by dataset.
+    Scripts will be placed in src/ directory for easy execution from HPC.
     
     Args:
         manifest: Experiment manifest
@@ -264,10 +265,43 @@ def create_run_scripts(manifest, output_dir, datasets, models, folds, seeds):
     """
     experiment_name = manifest['experiment_name']
     experiment_dir = Path(output_dir) / experiment_name
+    src_dir = Path('.')  # Current directory (src/) for run scripts
     
-    # Create master run script
-    master_script = experiment_dir / 'run_all.sh'
+    # Create individual scripts for each dataset (for parallel execution)
+    for dataset in datasets:
+        dataset_script = src_dir / f'run_{dataset}.sh'
+        
+        with open(dataset_script, 'w') as f:
+            f.write('#!/bin/bash\n')
+            f.write(f'# Run all experiments for {dataset}\n')
+            f.write(f'# Experiment: {experiment_name}\n')
+            f.write(f'# Generated: {datetime.now().isoformat()}\n\n')
+            
+            for model in models:
+                for fold in folds:
+                    for config_info in manifest['configs']:
+                        config_id = config_info['config_id']
+                        config_file = config_info['file']
+                        params = config_info['params']
+                        
+                        f.write(f'\n# Config: {config_id} - Model: {model} - Fold: {fold}\n')
+                        f.write(f'# Params: {params}\n')
+                        
+                        for seed in seeds:
+                            f.write(f'# Seed {seed}\n')
+                            f.write('python run_gsat.py \\\n')
+                            f.write(f'  --dataset {dataset} \\\n')
+                            f.write(f'  --backbone {model} \\\n')
+                            f.write(f'  --fold {fold} \\\n')
+                            f.write(f'  --seed {seed} \\\n')
+                            f.write(f'  --cuda 0 \\\n')
+                            f.write(f'  --config {config_file}\n\n')
+        
+        dataset_script.chmod(0o755)
+        print(f"Created: {dataset_script}")
     
+    # Create master script in src/ that runs all dataset scripts
+    master_script = src_dir / 'run_all.sh'
     with open(master_script, 'w') as f:
         f.write('#!/bin/bash\n')
         f.write('# Master script to run all tuning experiments\n')
@@ -275,54 +309,17 @@ def create_run_scripts(manifest, output_dir, datasets, models, folds, seeds):
         f.write(f'# Generated: {datetime.now().isoformat()}\n\n')
         
         for dataset in datasets:
-            for model in models:
-                for fold in folds:
-                    script_name = f'run_{dataset}_{model}_fold{fold}.sh'
-                    script_path = experiment_dir / script_name
-                    
-                    # Create individual dataset/model/fold script
-                    with open(script_path, 'w') as sf:
-                        sf.write('#!/bin/bash\n')
-                        sf.write(f'# Run {dataset} with {model} on fold {fold}\n\n')
-                        
-                        for config_info in manifest['configs']:
-                            config_id = config_info['config_id']
-                            config_file = config_info['file']
-                            params = config_info['params']
-                            
-                            sf.write(f'\n# Config: {config_id}\n')
-                            sf.write(f'# Params: {params}\n')
-                            
-                            # For each seed, create a python command
-                            for seed in seeds:
-                                sf.write(f'# Seed {seed}\n')
-                                sf.write('python run_gsat.py \\\n')
-                                sf.write(f'  --dataset {dataset} \\\n')
-                                sf.write(f'  --backbone {model} \\\n')
-                                sf.write(f'  --fold {fold} \\\n')
-                                sf.write(f'  --cuda 0 \\\n')
-                                sf.write(f'  --config {config_file}\n\n')
-                    
-                    # Make script executable
-                    script_path.chmod(0o755)
-                    
-                    # Add to master script
-                    # Copy script to src/, run it, then delete it
-                    relative_script_path = f'configs/tuning/{experiment_name}/{script_name}'
-                    f.write(f'echo "Running {dataset} with {model} on fold {fold}"\n')
-                    f.write(f'cp {relative_script_path} .\n')
-                    f.write(f'bash {script_name}\n')
-                    f.write(f'rm {script_name}\n\n')
+            f.write(f'echo "Starting experiments for {dataset}"\n')
+            f.write(f'bash run_{dataset}.sh\n\n')
     
-    # Make master script executable
     master_script.chmod(0o755)
-    print(f"\nCreated run scripts in {experiment_dir}")
-    print(f"  - Master script: {master_script}")
+    print(f"\nCreated master script: {master_script}")
+    print(f"Run individual datasets in parallel using: bash run_<dataset>.sh or sbatch")
 
 
-def create_slurm_scripts(manifest, output_dir, datasets, models, folds):
+def create_slurm_scripts(manifest, output_dir, datasets, models, folds, seeds):
     """
-    Create SLURM batch scripts for HPC cluster.
+    Create SLURM batch scripts for HPC cluster - one job per dataset for parallel execution.
     
     Args:
         manifest: Experiment manifest
@@ -330,68 +327,79 @@ def create_slurm_scripts(manifest, output_dir, datasets, models, folds):
         datasets: List of dataset names
         models: List of model names
         folds: List of fold numbers
+        seeds: List of random seeds
     """
     experiment_name = manifest['experiment_name']
     experiment_dir = Path(output_dir) / experiment_name
     slurm_dir = experiment_dir / 'slurm_scripts'
     slurm_dir.mkdir(exist_ok=True)
     
+    # Create one SLURM script per dataset (for parallel job submission)
     for dataset in datasets:
-        for model in models:
-            for fold in folds:
-                for config_info in manifest['configs']:
-                    config_id = config_info['config_id']
-                    config_file = config_info['file']
-                    params = config_info['params']
-                    
-                    job_name = f'{experiment_name}_{dataset}_{model}_fold{fold}_{config_id}'
-                    script_path = slurm_dir / f'{job_name}.sh'
-                    
-                    with open(script_path, 'w') as f:
-                        f.write('#!/bin/bash\n')
-                        f.write(f'#SBATCH --job-name={job_name}\n')
-                        f.write(f'#SBATCH --output=logs/{job_name}_%j.out\n')
-                        f.write(f'#SBATCH --error=logs/{job_name}_%j.err\n')
-                        f.write('#SBATCH --time=24:00:00\n')
-                        f.write('#SBATCH --partition=gpu\n')
-                        f.write('#SBATCH --gres=gpu:1\n')
-                        f.write('#SBATCH --cpus-per-task=4\n')
-                        f.write('#SBATCH --mem=32G\n\n')
+        job_name = f'{experiment_name}_{dataset}'
+        script_path = slurm_dir / f'{job_name}.sh'
+        
+        with open(script_path, 'w') as f:
+            f.write('#!/bin/bash\n')
+            f.write(f'#SBATCH --job-name={job_name}\n')
+            f.write(f'#SBATCH --output=logs/{job_name}_%j.out\n')
+            f.write(f'#SBATCH --error=logs/{job_name}_%j.err\n')
+            f.write('#SBATCH --time=72:00:00\n')
+            f.write('#SBATCH --partition=gpu\n')
+            f.write('#SBATCH --gres=gpu:1\n')
+            f.write('#SBATCH --cpus-per-task=8\n')
+            f.write('#SBATCH --mem=64G\n\n')
+            
+            f.write('# Load modules\n')
+            f.write('module load cuda/11.7\n')
+            f.write('module load python/3.9\n\n')
+            
+            f.write('# Activate environment\n')
+            f.write('source ~/venv/bin/activate\n\n')
+            
+            f.write('# Ensure we are in src directory\n')
+            f.write('# SLURM typically starts in submission directory, but adding safeguard\n')
+            f.write('SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"\n')
+            f.write('cd "$SCRIPT_DIR"/../../..\n\n')
+            
+            # Add all experiments for this dataset
+            for model in models:
+                for fold in folds:
+                    for config_info in manifest['configs']:
+                        config_id = config_info['config_id']
+                        config_file = config_info['file']
+                        params = config_info['params']
                         
-                        f.write('# Load modules\n')
-                        f.write('module load cuda/11.7\n')
-                        f.write('module load python/3.9\n\n')
+                        f.write(f'\n# Config: {config_id} - Model: {model} - Fold: {fold}\n')
+                        f.write(f'# Params: {params}\n')
                         
-                        f.write('# Activate environment\n')
-                        f.write('source venv/bin/activate\n\n')
-                        
-                        f.write(f'# Config: {config_id}\n')
-                        f.write(f'# Params: {params}\n\n')
-                        
-                        f.write('python src/run_gsat.py \\\n')
-                        f.write(f'  --dataset {dataset} \\\n')
-                        f.write(f'  --backbone {model} \\\n')
-                        f.write(f'  --fold {fold} \\\n')
-                        f.write(f'  --cuda 0 \\\n')
-                        f.write(f'  --config {config_file}\n')
-                    
-                    script_path.chmod(0o755)
+                        for seed in seeds:
+                            f.write(f'echo "Running {dataset} - {model} - fold {fold} - seed {seed} - {config_id}"\n')
+                            f.write('python run_gsat.py \\\n')
+                            f.write(f'  --dataset {dataset} \\\n')
+                            f.write(f'  --backbone {model} \\\n')
+                            f.write(f'  --fold {fold} \\\n')
+                            f.write(f'  --seed {seed} \\\n')
+                            f.write(f'  --cuda 0 \\\n')
+                            f.write(f'  --config {config_file}\n\n')
+        
+        script_path.chmod(0o755)
     
-    # Create master SLURM submission script
+    # Create submission script
     submit_all = slurm_dir / 'submit_all.sh'
     with open(submit_all, 'w') as f:
         f.write('#!/bin/bash\n')
-        f.write('# Submit all SLURM jobs\n\n')
-        f.write('for script in slurm_scripts/*.sh; do\n')
-        f.write('  if [ "$script" != "slurm_scripts/submit_all.sh" ]; then\n')
-        f.write('    sbatch "$script"\n')
-        f.write('    sleep 1  # Rate limiting\n')
-        f.write('  fi\n')
-        f.write('done\n')
+        f.write('# Submit all SLURM jobs (one per dataset for parallel execution)\n\n')
+        
+        for dataset in datasets:
+            job_name = f'{experiment_name}_{dataset}'
+            f.write(f'echo "Submitting job for {dataset}"\n')
+            f.write(f'sbatch slurm_scripts/{job_name}.sh\n')
+            f.write('sleep 1\n\n')
     
     submit_all.chmod(0o755)
     print(f"\nCreated SLURM scripts in {slurm_dir}")
-    print(f"  - Submit script: {submit_all}")
+    print(f"Submit all jobs: bash {submit_all}")
 
 
 def main():
@@ -452,7 +460,7 @@ Available experiment types:
     
     if args.create_slurm_scripts:
         create_slurm_scripts(manifest, args.output_dir, args.datasets,
-                           args.models, args.folds)
+                           args.models, args.folds, args.seeds)
     
     # Print summary
     print("\n" + "="*80)
