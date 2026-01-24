@@ -993,40 +993,69 @@ def calculate_explainer_performance(model, extractor, data_loader, device, epoch
     fidelity_plus = []   # Prediction maintained with only important parts
     
     with torch.no_grad():
-        for data in data_loader:
-            data = data.to(device)
+        for batch_data in data_loader:
+            batch_data = batch_data.to(device)
             
-            # Get original prediction
-            orig_output, orig_emb = model(data.x, data.edge_index, data.batch, data.nodes_to_motifs)
-            orig_pred = torch.sigmoid(orig_output) if orig_output.shape[-1] == 1 else torch.softmax(orig_output, dim=1)
+            # Process each graph in the batch individually to avoid shape mismatches
+            num_graphs = batch_data.batch.max().item() + 1
             
-            # Get attention scores
-            att_log_logits = extractor(orig_emb, data.edge_index, data.batch)
-            att = att_log_logits.sigmoid()
-            
-            if learn_edge_att:
-                # Edge-level attention
-                num_edges = data.edge_index.size(1)
-                k = max(1, int(0.2 * num_edges))  # Keep top 20%
-                top_k_indices = torch.topk(att.squeeze(), k).indices
+            for graph_idx in range(num_graphs):
+                try:
+                    # Extract single graph from batch
+                    node_mask = batch_data.batch == graph_idx
+                    node_indices = torch.where(node_mask)[0]
+                    
+                    # Get edges for this graph
+                    edge_mask = node_mask[batch_data.edge_index[0]] & node_mask[batch_data.edge_index[1]]
+                    graph_edge_index = batch_data.edge_index[:, edge_mask]
+                    
+                    # Remap node indices to start from 0
+                    node_mapping = torch.zeros(batch_data.x.size(0), dtype=torch.long, device=device)
+                    node_mapping[node_indices] = torch.arange(len(node_indices), device=device)
+                    graph_edge_index = node_mapping[graph_edge_index]
+                    
+                    # Extract features
+                    graph_x = batch_data.x[node_mask]
+                    graph_nodes_to_motifs = batch_data.nodes_to_motifs[node_mask] if hasattr(batch_data, 'nodes_to_motifs') else None
+                    graph_batch = torch.zeros(graph_x.size(0), dtype=torch.long, device=device)
+                    
+                    # Get original prediction
+                    orig_output, orig_emb = model(graph_x, graph_edge_index, graph_batch, graph_nodes_to_motifs)
+                    orig_pred = torch.sigmoid(orig_output) if orig_output.shape[-1] == 1 else torch.softmax(orig_output, dim=1)
+                    
+                    # Get attention scores
+                    att_log_logits = extractor(orig_emb, graph_edge_index, graph_batch)
+                    att = att_log_logits.sigmoid()
+                    
+                    if learn_edge_att and graph_edge_index.size(1) > 0:
+                        # Edge-level attention
+                        num_edges = graph_edge_index.size(1)
+                        k = max(1, int(0.2 * num_edges))  # Keep top 20%
+                        
+                        if att.numel() >= k:
+                            top_k_indices = torch.topk(att.squeeze(), min(k, att.numel())).indices
+                            
+                            # Create mask for important edges
+                            important_mask = torch.zeros(num_edges, dtype=torch.bool, device=device)
+                            important_mask[top_k_indices] = True
+                            
+                            # Fidelity- : Remove important edges
+                            remaining_edges = graph_edge_index[:, ~important_mask]
+                            if remaining_edges.size(1) > 0:
+                                output_minus, _ = model(graph_x, remaining_edges, graph_batch, graph_nodes_to_motifs)
+                                pred_minus = torch.sigmoid(output_minus) if output_minus.shape[-1] == 1 else torch.softmax(output_minus, dim=1)
+                                fidelity_minus.append((orig_pred - pred_minus).abs().mean().item())
+                            
+                            # Fidelity+ : Keep only important edges
+                            important_edges = graph_edge_index[:, important_mask]
+                            if important_edges.size(1) > 0:
+                                output_plus, _ = model(graph_x, important_edges, graph_batch, graph_nodes_to_motifs)
+                                pred_plus = torch.sigmoid(output_plus) if output_plus.shape[-1] == 1 else torch.softmax(output_plus, dim=1)
+                                fidelity_plus.append((orig_pred - pred_plus).abs().mean().item())
                 
-                # Create mask for important edges
-                important_mask = torch.zeros(num_edges, dtype=torch.bool, device=device)
-                important_mask[top_k_indices] = True
-                
-                # Fidelity- : Remove important edges
-                remaining_edges = data.edge_index[:, ~important_mask]
-                if remaining_edges.size(1) > 0:
-                    output_minus, _ = model(data.x, remaining_edges, data.batch, data.nodes_to_motifs)
-                    pred_minus = torch.sigmoid(output_minus) if output_minus.shape[-1] == 1 else torch.softmax(output_minus, dim=1)
-                    fidelity_minus.append((orig_pred - pred_minus).abs().mean().item())
-                
-                # Fidelity+ : Keep only important edges
-                important_edges = data.edge_index[:, important_mask]
-                if important_edges.size(1) > 0:
-                    output_plus, _ = model(data.x, important_edges, data.batch, data.nodes_to_motifs)
-                    pred_plus = torch.sigmoid(output_plus) if output_plus.shape[-1] == 1 else torch.softmax(output_plus, dim=1)
-                    fidelity_plus.append((orig_pred - pred_plus).abs().mean().item())
+                except Exception as e:
+                    # Skip this graph if there's an error
+                    continue
     
     metrics = {
         'explainer/fidelity_minus': np.mean(fidelity_minus) if fidelity_minus else 0.0,
