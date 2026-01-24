@@ -731,7 +731,12 @@ class GSAT(nn.Module):
                     clf_roc = evaluator.eval({'y_pred': clf_logits, 'y_true': clf_labels})['rocauc']
                 elif self.multi_label:
                     # Multi-label classification
-                    clf_probs = torch.sigmoid(torch.tensor(clf_logits)).numpy()
+                    # Convert to tensor if needed, then apply sigmoid
+                    if isinstance(clf_logits, np.ndarray):
+                        clf_logits_tensor = torch.from_numpy(clf_logits)
+                    else:
+                        clf_logits_tensor = clf_logits
+                    clf_probs = torch.sigmoid(clf_logits_tensor).numpy()
                     # Handle NaN values in labels for multi-label
                     valid_mask = ~np.isnan(clf_labels)
                     if valid_mask.any():
@@ -740,13 +745,21 @@ class GSAT(nn.Module):
                         clf_roc = 0
                 elif len(np.unique(clf_labels)) == 2:
                     # Binary classification
-                    clf_probs = torch.sigmoid(torch.tensor(clf_logits)).numpy()
+                    if isinstance(clf_logits, np.ndarray):
+                        clf_logits_tensor = torch.from_numpy(clf_logits)
+                    else:
+                        clf_logits_tensor = clf_logits
+                    clf_probs = torch.sigmoid(clf_logits_tensor).numpy()
                     if clf_probs.ndim > 1 and clf_probs.shape[1] > 1:
                         clf_probs = clf_probs[:, 1] if clf_probs.shape[1] == 2 else clf_probs.squeeze()
                     clf_roc = roc_auc_score(clf_labels, clf_probs)
                 else:
                     # Multi-class classification
-                    clf_probs = torch.softmax(torch.tensor(clf_logits), dim=1).numpy()
+                    if isinstance(clf_logits, np.ndarray):
+                        clf_logits_tensor = torch.from_numpy(clf_logits)
+                    else:
+                        clf_logits_tensor = clf_logits
+                    clf_probs = torch.softmax(clf_logits_tensor, dim=1).numpy()
                     clf_roc = roc_auc_score(clf_labels, clf_probs, multi_class='ovr', average='macro')
             except Exception as e:
                 print(f"[WARNING] Could not calculate ROC-AUC for {phase}: {e}")
