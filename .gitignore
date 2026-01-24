@@ -11,3 +11,4 @@ __pycache__/
 *.ckpt
 *.log
 .DS_Store
+.cursorrules
