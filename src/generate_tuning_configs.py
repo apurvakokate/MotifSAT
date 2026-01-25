@@ -327,7 +327,7 @@ def create_run_scripts(manifest, output_dir, datasets, models, folds, seeds):
     print(f"Run individual datasets in parallel using: bash run_<dataset>.sh or sbatch")
 
 
-def create_slurm_scripts(manifest, output_dir, datasets, models, folds, seeds):
+def create_slurm_scripts(manifest, output_dir, datasets, models, folds, seeds, base_path=None):
     """
     Create SLURM batch scripts for HPC cluster - one job per dataset for parallel execution.
     
@@ -338,11 +338,17 @@ def create_slurm_scripts(manifest, output_dir, datasets, models, folds, seeds):
         models: List of model names
         folds: List of fold numbers
         seeds: List of random seeds
+        base_path: Absolute base path for HPC (e.g., /nfs/stak/users/kokatea/hpc-share/ChemIntuit/MotifSAT)
+                   If None, uses relative paths
     """
     experiment_name = manifest['experiment_name']
     experiment_dir = Path(output_dir) / experiment_name
     slurm_dir = experiment_dir / 'slurm_scripts'
     slurm_dir.mkdir(exist_ok=True)
+    
+    # Default base path if not provided
+    if base_path is None:
+        base_path = '/nfs/stak/users/kokatea/hpc-share/ChemIntuit/MotifSAT'
     
     # Create one SLURM script per dataset (for parallel job submission)
     for dataset in datasets:
@@ -366,10 +372,13 @@ def create_slurm_scripts(manifest, output_dir, datasets, models, folds, seeds):
             f.write('# Activate the desired environment\n')
             f.write('conda activate l2xgnn\n\n')
             
-            f.write('# Ensure we are in src directory\n')
-            f.write('# SLURM typically starts in submission directory, but adding safeguard\n')
-            f.write('SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"\n')
-            f.write('cd "$SCRIPT_DIR"/../../..\n\n')
+            f.write('# Set absolute paths for HPC\n')
+            f.write(f'export BASE_PATH="{base_path}"\n')
+            f.write('export RESULTS_DIR="${BASE_PATH}/tuning_results"\n')
+            f.write('export WANDB_DIR="${BASE_PATH}/wandb"\n\n')
+            
+            f.write('# Navigate to src directory\n')
+            f.write(f'cd {base_path}/src\n\n')
             
             f.write('# Organization: Fold -> Architecture -> Config -> Seed\n\n')
             
@@ -460,6 +469,10 @@ Available experiment types:
     parser.add_argument('--create_slurm_scripts', action='store_true',
                         help='Create SLURM batch scripts for HPC')
     
+    parser.add_argument('--hpc_base_path', type=str,
+                        default='/nfs/stak/users/kokatea/hpc-share/ChemIntuit/MotifSAT',
+                        help='Absolute base path for HPC cluster (for SLURM scripts)')
+    
     args = parser.parse_args()
     
     # Generate configurations
@@ -479,7 +492,8 @@ Available experiment types:
     
     if args.create_slurm_scripts:
         create_slurm_scripts(manifest, args.output_dir, args.datasets,
-                           args.models, args.folds, args.seeds)
+                           args.models, args.folds, args.seeds, 
+                           base_path=args.hpc_base_path)
     
     # Print summary
     print("\n" + "="*80)

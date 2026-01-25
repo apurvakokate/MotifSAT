@@ -229,8 +229,11 @@ class GSAT(nn.Module):
         tuning_id = method_config.get('tuning_id', 'default')
         experiment_name = method_config.get('experiment_name', 'default_experiment')
 
+        # Use environment variable if set (for HPC), otherwise use relative path
+        results_base = os.environ.get('RESULTS_DIR', '../tuning_results')
+        
         self.seed_dir = os.path.join(
-            "../tuning_results",  # Base directory (one level up from src/)
+            results_base,  # Base directory
             str(self.dataset_name),
             f'model_{self.model_name}',
             f'experiment_{experiment_name}',
@@ -1080,8 +1083,11 @@ def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_nam
     final_r = gsat_config.get('final_r', 0.7)
     decay_r = gsat_config.get('decay_r', 0.1)
     
+    # Use environment variable if set (for HPC), otherwise use relative path
+    results_base = os.environ.get('RESULTS_DIR', '../tuning_results')
+    
     seed_dir = os.path.join(
-        "../tuning_results",
+        results_base,
         str(dataset_name),
         f'model_{model_name}',
         f'experiment_{experiment_name}',
@@ -1117,10 +1123,13 @@ def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_nam
     wandb_name = f"{model_name}-fold{fold}-seed{random_state}-{tuning_id}"
     
     try:
+        # Use environment variable if set (for HPC), otherwise use relative path
+        wandb_dir = os.environ.get('WANDB_DIR', '../wandb')
+        
         wandb.init(
             project=wandb_project,
             name=wandb_name,
-            dir='../wandb',  # Store wandb logs one level up from src/
+            dir=wandb_dir,  # Store wandb logs (uses env var on HPC)
             config={
                 'dataset': dataset_name,
                 'model': model_name,
