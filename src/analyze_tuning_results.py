@@ -576,11 +576,19 @@ class TuningResultsAnalyzer:
                         'model': summary['model'],
                         'fold': summary['fold'],
                         'seed': summary['seed'],
+                        # Loss coefficients
+                        'pred_loss_coef': summary['loss_coefficients']['pred_loss_coef'],
+                        'info_loss_coef': summary['loss_coefficients']['info_loss_coef'],
                         'motif_loss_coef': summary['loss_coefficients']['motif_loss_coef'],
+                        # Weight distribution parameters
                         'init_r': summary['weight_distribution_params']['init_r'],
                         'final_r': summary['weight_distribution_params']['final_r'],
+                        'decay_r': summary['weight_distribution_params']['decay_r'],
+                        'decay_interval': summary['weight_distribution_params']['decay_interval'],
+                        # Phase and epoch
                         'phase': stat['phase'],
                         'epoch': stat['epoch'],
+                        # Distribution statistics
                         'mean': stat['mean'],
                         'std': stat['std'],
                         'entropy': stat['entropy'],
@@ -610,11 +618,19 @@ class TuningResultsAnalyzer:
                     'model': summary['model'],
                     'fold': summary['fold'],
                     'seed': summary['seed'],
+                    # Loss coefficients
+                    'pred_loss_coef': summary['loss_coefficients']['pred_loss_coef'],
+                    'info_loss_coef': summary['loss_coefficients']['info_loss_coef'],
                     'motif_loss_coef': summary['loss_coefficients']['motif_loss_coef'],
+                    # Weight distribution parameters
                     'init_r': summary['weight_distribution_params']['init_r'],
                     'final_r': summary['weight_distribution_params']['final_r'],
+                    'decay_r': summary['weight_distribution_params']['decay_r'],
+                    'decay_interval': summary['weight_distribution_params']['decay_interval'],
+                    # Phase and epoch
                     'phase': row['phase'],
                     'epoch': row['epoch'],
+                    # Distribution statistics
                     'mean': row['mean'],
                     'std': row['std'],
                     'entropy': row['entropy'],
@@ -1333,7 +1349,8 @@ class TuningResultsAnalyzer:
         fig, axes = plt.subplots(2, 2, figsize=(14, 10))
         fig.suptitle('Attention Weight Distribution Analysis', fontsize=16)
         
-        test_data = distribution_df[distribution_df['phase'] == 'test ']
+        # Fix: Remove trailing space from 'test ' - should be 'test'
+        test_data = distribution_df[distribution_df['phase'].str.strip() == 'test']
         
         # Polarization score
         ax = axes[0, 0]

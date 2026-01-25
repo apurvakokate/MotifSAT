@@ -268,6 +268,7 @@ def create_run_scripts(manifest, output_dir, datasets, models, folds, seeds):
     src_dir = Path('.')  # Current directory (src/) for run scripts
     
     # Create individual scripts for each dataset (for parallel execution)
+    # Prioritize: Fold -> Model (Architecture) -> Config -> Seed
     for dataset in datasets:
         dataset_script = src_dir / f'run_{dataset}.sh'
         
@@ -275,17 +276,26 @@ def create_run_scripts(manifest, output_dir, datasets, models, folds, seeds):
             f.write('#!/bin/bash\n')
             f.write(f'# Run all experiments for {dataset}\n')
             f.write(f'# Experiment: {experiment_name}\n')
+            f.write(f'# Organization: Fold -> Architecture -> Config -> Seed\n')
             f.write(f'# Generated: {datetime.now().isoformat()}\n\n')
             
-            for model in models:
-                for fold in folds:
+            # Prioritize fold first, then model (architecture)
+            for fold in folds:
+                f.write(f'\n{"="*80}\n')
+                f.write(f'# FOLD {fold}\n')
+                f.write(f'{"="*80}\n\n')
+                
+                for model in models:
+                    f.write(f'\n{"-"*80}\n')
+                    f.write(f'# Architecture: {model}\n')
+                    f.write(f'{"-"*80}\n\n')
+                    
                     for config_info in manifest['configs']:
                         config_id = config_info['config_id']
                         config_file = config_info['file']
                         params = config_info['params']
                         
-                        f.write(f'\n# Config: {config_id} - Model: {model} - Fold: {fold}\n')
-                        f.write(f'# Params: {params}\n')
+                        f.write(f'\n# Config: {config_id} | Params: {params}\n')
                         
                         for seed in seeds:
                             f.write(f'# Seed {seed}\n')
@@ -362,19 +372,29 @@ def create_slurm_scripts(manifest, output_dir, datasets, models, folds, seeds):
             f.write('SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"\n')
             f.write('cd "$SCRIPT_DIR"/../../..\n\n')
             
+            f.write('# Organization: Fold -> Architecture -> Config -> Seed\n\n')
+            
             # Add all experiments for this dataset
-            for model in models:
-                for fold in folds:
+            # Prioritize fold first, then model (architecture)
+            for fold in folds:
+                f.write(f'\n{"="*80}\n')
+                f.write(f'# FOLD {fold}\n')
+                f.write(f'{"="*80}\n\n')
+                
+                for model in models:
+                    f.write(f'\n{"-"*80}\n')
+                    f.write(f'# Architecture: {model}\n')
+                    f.write(f'{"-"*80}\n\n')
+                    
                     for config_info in manifest['configs']:
                         config_id = config_info['config_id']
                         config_file = config_info['file']
                         params = config_info['params']
                         
-                        f.write(f'\n# Config: {config_id} - Model: {model} - Fold: {fold}\n')
-                        f.write(f'# Params: {params}\n')
+                        f.write(f'\n# Config: {config_id} | Params: {params}\n')
                         
                         for seed in seeds:
-                            f.write(f'echo "Running {dataset} - {model} - fold {fold} - seed {seed} - {config_id}"\n')
+                            f.write(f'echo "Running {dataset} - fold {fold} - {model} - {config_id} - seed {seed}"\n')
                             f.write('python run_gsat.py \\\n')
                             f.write(f'  --dataset {dataset} \\\n')
                             f.write(f'  --backbone {model} \\\n')
