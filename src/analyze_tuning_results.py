@@ -19,8 +19,8 @@ Memory Optimization:
 - Weight distribution analysis uses pre-computed statistics (no full data loading)
 
 Usage:
-    python analyze_tuning_results.py --results_dir tuning_results --output_dir analysis_results
-    python analyze_tuning_results.py --results_dir tuning_results --output_dir analysis_results --lightweight
+    python analyze_tuning_results.py --results_dir ../tuning_results --output_dir ../analysis_results
+    python analyze_tuning_results.py --results_dir ../tuning_results --output_dir ../analysis_results --lightweight
 """
 
 import argparse
@@ -1642,11 +1642,11 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
     
-    parser.add_argument('--results_dir', type=str, default='tuning_results',
-                        help='Directory containing tuning results')
+    parser.add_argument('--results_dir', type=str, default='../tuning_results',
+                        help='Directory containing tuning results (relative to src/)')
     
-    parser.add_argument('--output_dir', type=str, default='analysis_results',
-                        help='Directory to save analysis outputs')
+    parser.add_argument('--output_dir', type=str, default='../analysis_results',
+                        help='Directory to save analysis outputs (relative to src/)')
     
     parser.add_argument('--datasets', nargs='+',
                         help='Filter by specific datasets (optional)')

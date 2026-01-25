@@ -41,7 +41,7 @@ cd configs/tuning/baseline && bash run_all.sh
 
 # Analyze results
 python analyze_tuning_results.py \
-  --results_dir tuning_results --output_dir analysis_results
+  --results_dir ../tuning_results --output_dir ../analysis_results
 ```
 
 ---
@@ -78,7 +78,7 @@ python analyze_tuning_results.py \
 ### RQ 1: Best Model and Explainer Performance
 **Question**: What is the best model and explainer performance for datasets Mutagenicity, hERG, BBBP, Benzene?
 
-**Answer Location**: `analysis_results/best_configurations.csv`
+**Answer Location**: `../analysis_results/best_configurations.csv`
 
 ---
 
@@ -87,28 +87,28 @@ python analyze_tuning_results.py \
 #### (i) Score Consistency Within Motifs
 **Question**: Does motif_consistency_loss make scores consistent within nodes in the motif?
 
-**Answer Location**: `analysis_results/within_motif_consistency.csv`
+**Answer Location**: `../analysis_results/within_motif_consistency.csv`
 
 **Metric**: `avg_variance` (lower = more consistent)
 
 #### (ii) Model Prediction Performance
 **Question**: How does this affect model prediction performance?
 
-**Answer Location**: `analysis_results/motif_loss_comparison.csv`
+**Answer Location**: `../analysis_results/motif_loss_comparison.csv`
 
 **Metrics**: `test_acc`, `p_value`, `cohens_d`
 
 #### (iii) Explainer Performance
 **Question**: How does this affect the explainer performance (Pearson correlation)?
 
-**Answer Location**: `analysis_results/explainer_performance.csv`
+**Answer Location**: `../analysis_results/explainer_performance.csv`
 
 **Metric**: `pearson_corr` (higher = better)
 
 #### (iv) Weight Distribution
 **Question**: What is the distribution of node weights? Near 0/1 or 0.5?
 
-**Answer Location**: `analysis_results/weight_distributions.csv`
+**Answer Location**: `../analysis_results/weight_distributions.csv`
 
 **Metrics**: 
 - `polarization_score` (higher = more decisive)
@@ -140,7 +140,7 @@ You need to modify `src/run_gsat.py` with **9 changes**:
 
 ### After Running Experiments
 ```
-tuning_results/
+../tuning_results/  (one level up from src/)
 └── {dataset}/
     └── model_{model}/
         └── tuning_{id}/
@@ -159,7 +159,7 @@ tuning_results/
 
 ### After Running Analysis
 ```
-analysis_results/
+../analysis_results/  (one level up from src/)
 ├── analysis_report.txt              # Comprehensive text report
 ├── summary_all_experiments.csv      # All experiments
 ├── best_configurations.csv          # RQ 1
@@ -292,7 +292,7 @@ python src/run_gsat.py \
   --cuda 0
 
 # Verify output files
-ls -la tuning_results/Mutagenicity/
+ls -la ../tuning_results/Mutagenicity/
 ```
 
 ### Step 4: Run Pilot (1-2 days)
@@ -311,11 +311,11 @@ bash run_all.sh
 ### Step 5: Analyze (15 minutes)
 ```bash
 python analyze_tuning_results.py \
-  --results_dir tuning_results \
-  --output_dir analysis_results
+  --results_dir ../tuning_results \
+  --output_dir ../analysis_results
 
 # Review results
-cat analysis_results/analysis_report.txt
+cat ../analysis_results/analysis_report.txt
 ```
 
 ---
