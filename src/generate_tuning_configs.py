@@ -354,18 +354,17 @@ def create_slurm_scripts(manifest, output_dir, datasets, models, folds, seeds):
             f.write(f'#SBATCH --job-name={job_name}\n')
             f.write(f'#SBATCH --output=logs/{job_name}_%j.out\n')
             f.write(f'#SBATCH --error=logs/{job_name}_%j.err\n')
-            f.write('#SBATCH --time=72:00:00\n')
+            f.write('#SBATCH --time=2-00:00:00\n')
             f.write('#SBATCH --partition=gpu\n')
             f.write('#SBATCH --gres=gpu:1\n')
             f.write('#SBATCH --cpus-per-task=8\n')
             f.write('#SBATCH --mem=64G\n\n')
             
-            f.write('# Load modules\n')
-            f.write('module load cuda/11.7\n')
-            f.write('module load python/3.9\n\n')
+            f.write('# Initialize Conda\n')
+            f.write('source ~/hpc-share/anaconda3/etc/profile.d/conda.sh\n\n')
             
-            f.write('# Activate environment\n')
-            f.write('source ~/venv/bin/activate\n\n')
+            f.write('# Activate the desired environment\n')
+            f.write('conda activate l2xgnn\n\n')
             
             f.write('# Ensure we are in src directory\n')
             f.write('# SLURM typically starts in submission directory, but adding safeguard\n')
