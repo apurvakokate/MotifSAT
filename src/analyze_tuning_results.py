@@ -224,9 +224,18 @@ class TuningResultsAnalyzer:
                 
                 # Final metrics
                 'best_epoch': final_metrics.get('metric/best_clf_epoch', np.nan),
+                # Model performance metrics (main metric is either acc or roc depending on dataset)
                 'train_acc': final_metrics.get('metric/best_clf_train', np.nan),
                 'valid_acc': final_metrics.get('metric/best_clf_valid', np.nan),
                 'test_acc': final_metrics.get('metric/best_clf_test', np.nan),
+                # Model performance - specific metrics
+                'train_clf_acc': final_metrics.get('metric/best_clf_acc_train', np.nan),
+                'valid_clf_acc': final_metrics.get('metric/best_clf_acc_valid', np.nan),
+                'test_clf_acc': final_metrics.get('metric/best_clf_acc_test', np.nan),
+                'train_clf_roc': final_metrics.get('metric/best_clf_roc_train', np.nan),
+                'valid_clf_roc': final_metrics.get('metric/best_clf_roc_valid', np.nan),
+                'test_clf_roc': final_metrics.get('metric/best_clf_roc_test', np.nan),
+                # Explainer performance metrics (attention-based)
                 'train_x_roc': final_metrics.get('metric/best_x_roc_train', np.nan),
                 'valid_x_roc': final_metrics.get('metric/best_x_roc_valid', np.nan),
                 'test_x_roc': final_metrics.get('metric/best_x_roc_test', np.nan),
@@ -467,18 +476,20 @@ class TuningResultsAnalyzer:
 
     def analyze_hyperparameter_effects(self, experiment_name=None):
         """
-        Analyze how hyperparameters affect model performance.
+        Analyze how hyperparameters affect validation performance.
         
         For each experiment type, shows:
-        - Main effects of each parameter
+        - Main effects of each parameter on validation metrics
         - Interaction effects between parameters
         - Optimal parameter values
         - Statistical significance
         
+        Plots: Val AUROC (performance), Val Acc, and Val Att-AUROC (explainer)
+        
         Args:
             experiment_name: Filter to specific experiment (e.g., 'weight_tuning')
         """
-        print("\nAnalyzing hyperparameter effects...")
+        print("\nAnalyzing hyperparameter effects on validation metrics...")
         
         if self.summary_df is None:
             self.create_summary_dataframe()
@@ -501,8 +512,8 @@ class TuningResultsAnalyzer:
         
         print(f"Parameters being tuned: {varying_params}")
         
-        # Performance metrics to analyze
-        perf_metrics = ['valid_acc', 'test_acc', 'test_x_roc']
+        # VALIDATION metrics to analyze (as requested by user)
+        perf_metrics = ['valid_clf_roc', 'valid_clf_acc', 'valid_x_roc']
         
         results = []
         
@@ -556,12 +567,18 @@ class TuningResultsAnalyzer:
         results_df = pd.DataFrame(results)
         
         # Save results
-        output_path = self.output_dir / 'hyperparameter_effects.csv'
+        output_path = self.output_dir / 'hyperparameter_effects_validation.csv'
         results_df.to_csv(output_path, index=False)
         print(f"Saved hyperparameter effects to {output_path}")
         
-        # Create visualizations
+        # Create visualizations with validation metrics
         self._plot_hyperparameter_effects(df, varying_params, perf_metrics, experiment_name)
+        
+        # Also create overview and cross-dataset plots
+        self._plot_validation_overview_by_dataset(df, perf_metrics)
+        
+        # Save best configs based on validation metrics
+        self._save_best_validation_configs_all(df)
         
         return results_df
 
@@ -646,13 +663,245 @@ class TuningResultsAnalyzer:
                 plt.savefig(self.output_dir / filename, dpi=300, bbox_inches='tight')
                 plt.close()
                 print(f"Saved plot: {filename}")
+    
+    def _plot_validation_overview_by_dataset(self, df, perf_metrics):
+        """Create overview plots for validation metrics by dataset and model."""
+        print("\nCreating validation metrics overview plots...")
+        
+        # Map metric names to readable labels
+        metric_labels = {
+            'valid_clf_roc': 'Val AUROC (Performance)',
+            'valid_clf_acc': 'Val Accuracy',
+            'valid_x_roc': 'Val Att-AUROC (Explainer)'
+        }
+        
+        for dataset in df['dataset'].unique():
+            dataset_df = df[df['dataset'] == dataset]
+            
+            if len(dataset_df) < 2:
+                continue
+            
+            n_metrics = len([m for m in perf_metrics if m in dataset_df.columns])
+            if n_metrics == 0:
+                continue
+            
+            fig, axes = plt.subplots(1, n_metrics, figsize=(7*n_metrics, 6))
+            
+            if n_metrics == 1:
+                axes = [axes]
+            
+            fig.suptitle(f'{dataset} - Validation Metrics Overview', fontsize=16, fontweight='bold')
+            
+            for ax_idx, metric_col in enumerate(perf_metrics):
+                if metric_col not in dataset_df.columns:
+                    continue
+                
+                ax = axes[ax_idx]
+                metric_name = metric_labels.get(metric_col, metric_col)
+                
+                # Box plot by model
+                models = dataset_df['model'].unique()
+                data_by_model = [dataset_df[dataset_df['model'] == m][metric_col].dropna() 
+                                for m in models]
+                
+                # Filter out empty data
+                models_filtered = [m for m, d in zip(models, data_by_model) if len(d) > 0]
+                data_filtered = [d for d in data_by_model if len(d) > 0]
+                
+                if not data_filtered:
+                    continue
+                
+                bp = ax.boxplot(data_filtered, labels=models_filtered, patch_artist=True)
+                
+                # Color the boxes
+                colors = plt.cm.Set3(np.linspace(0, 1, len(models_filtered)))
+                for patch, color in zip(bp['boxes'], colors):
+                    patch.set_facecolor(color)
+                
+                # Add scatter of individual points
+                for i, (model, data) in enumerate(zip(models_filtered, data_filtered), 1):
+                    y = data.values
+                    x = np.random.normal(i, 0.04, size=len(y))
+                    ax.scatter(x, y, alpha=0.4, s=30, color='black')
+                
+                ax.set_xlabel('Model', fontsize=12)
+                ax.set_ylabel(metric_name, fontsize=12)
+                ax.set_title(metric_name, fontsize=13, fontweight='bold')
+                ax.grid(True, alpha=0.3, axis='y')
+                
+                # Add mean values as text
+                for i, data in enumerate(data_filtered, 1):
+                    if len(data) > 0:
+                        mean_val = data.mean()
+                        ax.text(i, ax.get_ylim()[1] * 0.98, f'μ={mean_val:.3f}',
+                               ha='center', va='top', fontsize=9,
+                               bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.3))
+            
+            plt.tight_layout()
+            filename = f'validation_overview_{dataset}.png'
+            plt.savefig(self.output_dir / filename, dpi=300, bbox_inches='tight')
+            plt.close()
+            print(f"  Saved: {filename}")
+        
+        # Cross-dataset comparison
+        n_metrics = len([m for m in perf_metrics if m in df.columns])
+        if n_metrics == 0:
+            return
+        
+        fig, axes = plt.subplots(1, n_metrics, figsize=(8*n_metrics, 6))
+        
+        if n_metrics == 1:
+            axes = [axes]
+        
+        fig.suptitle('Cross-Dataset Validation Metrics Comparison', 
+                    fontsize=16, fontweight='bold')
+        
+        datasets = df['dataset'].unique()
+        
+        for ax_idx, metric_col in enumerate(perf_metrics):
+            if metric_col not in df.columns:
+                continue
+            
+            ax = axes[ax_idx]
+            metric_name = metric_labels.get(metric_col, metric_col)
+            
+            # Prepare data for each dataset
+            data_by_dataset = []
+            labels = []
+            
+            for dataset in datasets:
+                dataset_data = df[df['dataset'] == dataset][metric_col].dropna()
+                if len(dataset_data) > 0:
+                    data_by_dataset.append(dataset_data.values)
+                    labels.append(f'{dataset}\n(n={len(dataset_data)})')
+            
+            if not data_by_dataset:
+                continue
+            
+            # Create box plot
+            bp = ax.boxplot(data_by_dataset, labels=labels, patch_artist=True)
+            
+            # Color boxes
+            colors = plt.cm.Set2(np.linspace(0, 1, len(data_by_dataset)))
+            for patch, color in zip(bp['boxes'], colors):
+                patch.set_facecolor(color)
+            
+            # Add scatter of individual points
+            for i, data in enumerate(data_by_dataset, 1):
+                y = data
+                x = np.random.normal(i, 0.04, size=len(y))
+                ax.scatter(x, y, alpha=0.3, s=20, color='black')
+            
+            ax.set_ylabel(metric_name, fontsize=12, fontweight='bold')
+            ax.set_title(metric_name, fontsize=13)
+            ax.grid(True, alpha=0.3, axis='y')
+            plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right')
+            
+            # Add mean line
+            all_means = [np.mean(data) for data in data_by_dataset]
+            overall_mean = np.mean(all_means)
+            ax.axhline(y=overall_mean, color='red', linestyle='--', 
+                      linewidth=2, alpha=0.5, label=f'Overall μ={overall_mean:.3f}')
+            ax.legend(loc='best', fontsize=9)
+        
+        plt.tight_layout()
+        filename = 'validation_cross_dataset_comparison.png'
+        plt.savefig(self.output_dir / filename, dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"  Saved: {filename}")
+    
+    def _save_best_validation_configs_all(self, df):
+        """Save best configurations for all datasets based on validation metrics."""
+        print("\nSaving best validation configurations...")
+        
+        results = []
+        
+        for dataset in df['dataset'].unique():
+            dataset_df = df[df['dataset'] == dataset]
+            
+            for model in dataset_df['model'].unique():
+                model_df = dataset_df[dataset_df['model'] == model]
+                
+                # Best by valid_clf_acc
+                if 'valid_clf_acc' in model_df.columns and model_df['valid_clf_acc'].notna().any():
+                    best_acc_idx = model_df['valid_clf_acc'].idxmax()
+                    best_acc_row = model_df.loc[best_acc_idx]
+                    
+                    results.append({
+                        'dataset': dataset,
+                        'model': model,
+                        'optimization_target': 'valid_clf_acc',
+                        'valid_clf_acc': best_acc_row.get('valid_clf_acc', np.nan),
+                        'valid_clf_roc': best_acc_row.get('valid_clf_roc', np.nan),
+                        'valid_x_roc': best_acc_row.get('valid_x_roc', np.nan),
+                        'test_clf_acc': best_acc_row.get('test_clf_acc', np.nan),
+                        'test_clf_roc': best_acc_row.get('test_clf_roc', np.nan),
+                        'test_x_roc': best_acc_row.get('test_x_roc', np.nan),
+                        'pred_loss_coef': best_acc_row.get('pred_loss_coef', np.nan),
+                        'info_loss_coef': best_acc_row.get('info_loss_coef', np.nan),
+                        'motif_loss_coef': best_acc_row.get('motif_loss_coef', np.nan),
+                        'init_r': best_acc_row.get('init_r', np.nan),
+                        'final_r': best_acc_row.get('final_r', np.nan),
+                    })
+                
+                # Best by valid_clf_roc
+                if 'valid_clf_roc' in model_df.columns and model_df['valid_clf_roc'].notna().any():
+                    best_roc_idx = model_df['valid_clf_roc'].idxmax()
+                    best_roc_row = model_df.loc[best_roc_idx]
+                    
+                    results.append({
+                        'dataset': dataset,
+                        'model': model,
+                        'optimization_target': 'valid_clf_roc',
+                        'valid_clf_acc': best_roc_row.get('valid_clf_acc', np.nan),
+                        'valid_clf_roc': best_roc_row.get('valid_clf_roc', np.nan),
+                        'valid_x_roc': best_roc_row.get('valid_x_roc', np.nan),
+                        'test_clf_acc': best_roc_row.get('test_clf_acc', np.nan),
+                        'test_clf_roc': best_roc_row.get('test_clf_roc', np.nan),
+                        'test_x_roc': best_roc_row.get('test_x_roc', np.nan),
+                        'pred_loss_coef': best_roc_row.get('pred_loss_coef', np.nan),
+                        'info_loss_coef': best_roc_row.get('info_loss_coef', np.nan),
+                        'motif_loss_coef': best_roc_row.get('motif_loss_coef', np.nan),
+                        'init_r': best_roc_row.get('init_r', np.nan),
+                        'final_r': best_roc_row.get('final_r', np.nan),
+                    })
+                
+                # Best by valid_x_roc
+                if 'valid_x_roc' in model_df.columns and model_df['valid_x_roc'].notna().any():
+                    best_xroc_idx = model_df['valid_x_roc'].idxmax()
+                    best_xroc_row = model_df.loc[best_xroc_idx]
+                    
+                    results.append({
+                        'dataset': dataset,
+                        'model': model,
+                        'optimization_target': 'valid_x_roc',
+                        'valid_clf_acc': best_xroc_row.get('valid_clf_acc', np.nan),
+                        'valid_clf_roc': best_xroc_row.get('valid_clf_roc', np.nan),
+                        'valid_x_roc': best_xroc_row.get('valid_x_roc', np.nan),
+                        'test_clf_acc': best_xroc_row.get('test_clf_acc', np.nan),
+                        'test_clf_roc': best_xroc_row.get('test_clf_roc', np.nan),
+                        'test_x_roc': best_xroc_row.get('test_x_roc', np.nan),
+                        'pred_loss_coef': best_xroc_row.get('pred_loss_coef', np.nan),
+                        'info_loss_coef': best_xroc_row.get('info_loss_coef', np.nan),
+                        'motif_loss_coef': best_xroc_row.get('motif_loss_coef', np.nan),
+                        'init_r': best_xroc_row.get('init_r', np.nan),
+                        'final_r': best_xroc_row.get('final_r', np.nan),
+                    })
+        
+        if results:
+            results_df = pd.DataFrame(results)
+            filename = 'best_validation_configs_all.csv'
+            results_df.to_csv(self.output_dir / filename, index=False)
+            print(f"  Saved: {filename}")
+    
     def analyze_parameter_interactions(self, experiment_name=None):
         """
-        Analyze interaction effects between parameters.
+        Analyze interaction effects between parameters on VALIDATION metrics.
         
         Shows if combinations of parameters matter more than individual effects.
+        Creates heatmaps for all three validation metrics.
         """
-        print("\nAnalyzing parameter interactions...")
+        print("\nAnalyzing parameter interactions on validation metrics...")
         
         if self.summary_df is None:
             self.create_summary_dataframe()
@@ -674,7 +923,10 @@ class TuningResultsAnalyzer:
             print("Need at least 2 varying parameters for interaction analysis")
             return
         
-        # Create interaction heatmaps
+        # VALIDATION metrics for interaction analysis
+        val_metrics = ['valid_clf_roc', 'valid_clf_acc', 'valid_x_roc']
+        
+        # Create interaction heatmaps for each validation metric
         for dataset in df['dataset'].unique():
             for model in df['model'].unique():
                 subset = df[(df['dataset'] == dataset) & (df['model'] == model)]
@@ -682,13 +934,15 @@ class TuningResultsAnalyzer:
                 if len(subset) < 10:  # Need reasonable sample size
                     continue
                 
-                # For each pair of parameters
+                # For each pair of parameters and each validation metric
                 for i, param1 in enumerate(varying_params):
                     for param2 in varying_params[i+1:]:
-                        self._plot_interaction_heatmap(
-                            subset, param1, param2, 'test_acc',
-                            dataset, model, experiment_name
-                        )
+                        for metric in val_metrics:
+                            if metric in subset.columns and subset[metric].notna().sum() > 5:
+                                self._plot_interaction_heatmap(
+                                    subset, param1, param2, metric,
+                                    dataset, model, experiment_name
+                                )
     
     def find_best_configurations(self):
         """
@@ -1159,11 +1413,11 @@ class TuningResultsAnalyzer:
         self.find_best_configurations()
         self.compare_with_without_motif_loss()
         
-        # Hyperparameter analysis (works with summary data)
-        print("\n[Running hyperparameter effects analysis...]")
+        # Hyperparameter analysis with integrated validation metrics plots
+        print("\n[Analyzing hyperparameter effects on validation metrics...]")
         self.analyze_hyperparameter_effects()
         
-        print("\n[Running parameter interaction analysis...]")
+        print("\n[Analyzing parameter interactions on validation metrics...]")
         self.analyze_parameter_interactions()
         
         # Only run detailed analyses if data is loaded

@@ -459,6 +459,8 @@ class GSAT(nn.Module):
 
                 metric_dict = {'metric/best_clf_epoch': epoch, 'metric/best_clf_valid_loss': valid_res[4],
                                'metric/best_clf_train': train_res[main_metric_idx], 'metric/best_clf_valid': valid_res[main_metric_idx], 'metric/best_clf_test': test_res[main_metric_idx],
+                               'metric/best_clf_acc_train': train_res[2], 'metric/best_clf_acc_valid': valid_res[2], 'metric/best_clf_acc_test': test_res[2],
+                               'metric/best_clf_roc_train': train_res[3], 'metric/best_clf_roc_valid': valid_res[3], 'metric/best_clf_roc_test': test_res[3],
                                'metric/best_x_roc_train': train_res[0], 'metric/best_x_roc_valid': valid_res[0], 'metric/best_x_roc_test': test_res[0],
                                'metric/best_x_precision_train': train_res[1], 'metric/best_x_precision_valid': valid_res[1], 'metric/best_x_precision_test': test_res[1]}
                 save_checkpoint(self.clf, self.model_dir, model_name='gsat_clf_epoch_' + str(epoch))
