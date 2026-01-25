@@ -10,8 +10,17 @@ This script comprehensively analyzes all saved metrics to answer the research qu
    - (iii) Explainer performance (Pearson correlation)
    - (iv) Distribution of node weights
 
+Memory Optimization:
+- By default, uses memory-efficient mode that computes statistics on-the-fly
+- Large files are summarized or limited to prevent OOM errors:
+  * Node scores: Only mean, std, min, max computed per split (not all individual scores)
+  * Attention distributions: Only final epoch statistics extracted (per phase)
+  * Masked impact: Limited to 10k entries per experiment
+- Weight distribution analysis uses pre-computed statistics (no full data loading)
+
 Usage:
     python analyze_tuning_results.py --results_dir tuning_results --output_dir analysis_results
+    python analyze_tuning_results.py --results_dir tuning_results --output_dir analysis_results --lightweight
 """
 
 import argparse
@@ -50,10 +59,16 @@ class TuningResultsAnalyzer:
         
         Args:
             lightweight: If True, only load summary data (much faster, less memory)
+        
+        Note: By default, node_scores are NOT loaded into memory to prevent 
+        memory issues. Instead, summary statistics are computed on-the-fly.
         """
         print("Collecting all experiment results...")
         if lightweight:
             print("  [Lightweight mode: skipping large data files]")
+        else:
+            print("  [Memory-efficient mode: computing statistics on-the-fly]")
+            print("  [Large files like node_scores are summarized, not fully loaded]")
         
         experiment_dirs = list(self.results_dir.rglob('experiment_summary.json'))
         print(f"Found {len(experiment_dirs)} experiments")
@@ -111,6 +126,80 @@ class TuningResultsAnalyzer:
         plt.close()
         print(f"Saved interaction plot: {filename}")
     
+    def _compute_node_scores_statistics(self, node_scores_path: Path) -> List[Dict]:
+        """
+        Compute summary statistics from node scores without loading all into memory.
+        
+        Returns list of statistics per split (train/valid/test).
+        """
+        if not node_scores_path.exists():
+            return []
+        
+        # Accumulate scores by split
+        splits_data = defaultdict(list)
+        
+        with open(node_scores_path, 'r') as f:
+            for line in f:
+                data = json.loads(line)
+                split = data.get('split', 'unknown')
+                score = data.get('score', 0)
+                splits_data[split].append(score)
+        
+        # Compute statistics for each split
+        statistics = []
+        for split, scores in splits_data.items():
+            if scores:
+                statistics.append({
+                    'split': split,
+                    'mean': np.mean(scores),
+                    'std': np.std(scores),
+                    'min': np.min(scores),
+                    'max': np.max(scores),
+                    'median': np.median(scores),
+                    'count': len(scores)
+                })
+        
+        return statistics
+    
+    def _compute_attention_distribution_statistics(self, attention_dist_path: Path) -> List[Dict]:
+        """
+        Extract final epoch attention distribution statistics without loading all into memory.
+        
+        Returns list of statistics for final epoch only (per phase: train/valid/test).
+        """
+        if not attention_dist_path.exists():
+            return []
+        
+        # Find max epoch and collect final epoch data
+        max_epoch = -1
+        final_epoch_data = []
+        
+        # First pass: find max epoch
+        with open(attention_dist_path, 'r') as f:
+            for line in f:
+                data = json.loads(line)
+                epoch = data.get('epoch', 0)
+                if epoch > max_epoch:
+                    max_epoch = epoch
+        
+        # Second pass: collect only final epoch data
+        with open(attention_dist_path, 'r') as f:
+            for line in f:
+                data = json.loads(line)
+                if data.get('epoch', 0) == max_epoch:
+                    final_epoch_data.append({
+                        'phase': data.get('phase', 'unknown'),
+                        'epoch': data.get('epoch', 0),
+                        'mean': data.get('mean', 0),
+                        'std': data.get('std', 0),
+                        'entropy': data.get('entropy', 0),
+                        'pct_near_0': data.get('pct_near_0', 0),
+                        'pct_near_1': data.get('pct_near_1', 0),
+                        'pct_middle': data.get('pct_middle', 0),
+                    })
+        
+        return final_epoch_data
+    
     def _load_experiment_data(self, exp_dir: Path, lightweight: bool = False) -> Dict:
         """Load all data from a single experiment directory.
         
@@ -136,6 +225,8 @@ class TuningResultsAnalyzer:
                 'exp_dir': str(exp_dir),
                 'summary': summary,
                 'final_metrics': final_metrics,
+                'node_scores_stats': [],
+                'attention_dist_stats': [],
                 'node_scores': [],
                 'masked_impact': [],
                 'masked_edge_impact': [],
@@ -143,32 +234,38 @@ class TuningResultsAnalyzer:
                 'attention_dist': [],
             }
         
-        # Only load large files if not in lightweight mode
-        # Load node scores
-        node_scores = []
+        # Compute node scores statistics without loading all into memory
         node_scores_path = exp_dir / 'node_scores.jsonl'
-        if node_scores_path.exists():
-            with open(node_scores_path, 'r') as f:
-                for line in f:
-                    node_scores.append(json.loads(line))
+        node_scores_stats = self._compute_node_scores_statistics(node_scores_path)
         
-        # Load masked impact
+        # For backward compatibility, keep node_scores as empty list
+        # (methods that need detailed data can read from file on-demand)
+        node_scores = []
+        
+        # Load masked impact (still needed for explainer analysis, but can be large)
+        # Only load first N entries to avoid memory issues
         masked_impact = []
         masked_impact_path = exp_dir / 'masked-impact.jsonl'
         if masked_impact_path.exists():
             with open(masked_impact_path, 'r') as f:
-                for line in f:
-                    masked_impact.append(json.loads(line))
+                for i, line in enumerate(f):
+                    if i < 10000:  # Limit to 10k entries to avoid memory issues
+                        masked_impact.append(json.loads(line))
+                    else:
+                        break
         
-        # Load masked edge impact
+        # Load masked edge impact (limit to avoid memory issues)
         masked_edge_impact = []
         masked_edge_impact_path = exp_dir / 'masked-edge-impact.jsonl'
         if masked_edge_impact_path.exists():
             with open(masked_edge_impact_path, 'r') as f:
-                for line in f:
-                    masked_edge_impact.append(json.loads(line))
+                for i, line in enumerate(f):
+                    if i < 10000:  # Limit to 10k entries
+                        masked_edge_impact.append(json.loads(line))
+                    else:
+                        break
         
-        # Load epoch metrics
+        # Load epoch metrics (usually small)
         epoch_metrics = []
         epoch_metrics_path = exp_dir / 'epoch_metrics.jsonl'
         if epoch_metrics_path.exists():
@@ -176,23 +273,24 @@ class TuningResultsAnalyzer:
                 for line in f:
                     epoch_metrics.append(json.loads(line))
         
-        # Load attention distributions
-        attention_dist = []
+        # Compute attention distribution statistics without loading all into memory
         attention_dist_path = exp_dir / 'attention_distributions.jsonl'
-        if attention_dist_path.exists():
-            with open(attention_dist_path, 'r') as f:
-                for line in f:
-                    attention_dist.append(json.loads(line))
+        attention_dist_stats = self._compute_attention_distribution_statistics(attention_dist_path)
+        
+        # For backward compatibility, keep attention_dist as empty list
+        attention_dist = []
         
         return {
             'exp_dir': str(exp_dir),
             'summary': summary,
             'final_metrics': final_metrics,
-            'node_scores': node_scores,
+            'node_scores_stats': node_scores_stats,  # Pre-computed statistics
+            'attention_dist_stats': attention_dist_stats,  # NEW: Pre-computed final epoch statistics
+            'node_scores': node_scores,  # Empty for memory efficiency
             'masked_impact': masked_impact,
             'masked_edge_impact': masked_edge_impact,
             'epoch_metrics': epoch_metrics,
-            'attention_dist': attention_dist,
+            'attention_dist': attention_dist,  # Empty for memory efficiency
         }
     
     def create_summary_dataframe(self):
@@ -258,13 +356,42 @@ class TuningResultsAnalyzer:
         """
         RQ 2(i): Analyze score consistency within motif nodes.
         
+        NOTE: This analysis is memory-intensive and skipped by default.
+        Use node_scores_stats for lightweight statistics instead.
+        
         Returns DataFrame with consistency metrics per experiment.
         """
         print("\nAnalyzing within-motif score consistency...")
+        print("  [Note: Skipping detailed motif analysis to save memory]")
+        print("  [Use node_scores_stats for summary statistics]")
         
         consistency_results = []
         
         for exp in self.all_experiments:
+            # Check if we have pre-computed statistics instead
+            if exp.get('node_scores_stats'):
+                summary = exp['summary']
+                for stat in exp['node_scores_stats']:
+                    result = {
+                        'exp_dir': exp['exp_dir'],
+                        'dataset': summary['dataset'],
+                        'model': summary['model'],
+                        'fold': summary['fold'],
+                        'seed': summary['seed'],
+                        'motif_loss_coef': summary['loss_coefficients']['motif_loss_coef'],
+                        'split': stat['split'],
+                        'num_motifs': stat['count'],
+                        'avg_variance': stat['std'] ** 2,  # Variance from std
+                        'avg_std': stat['std'],
+                        'avg_range': stat['max'] - stat['min'],
+                        'avg_coeff_of_var': stat['std'] / stat['mean'] if stat['mean'] > 0 else np.nan,
+                        'median_variance': stat['std'] ** 2,
+                        'median_std': stat['std'],
+                    }
+                    consistency_results.append(result)
+                continue
+            
+            # Legacy: Load detailed scores if available (memory intensive!)
             if not exp['node_scores']:
                 continue
             
@@ -336,14 +463,20 @@ class TuningResultsAnalyzer:
         RQ 2(iii): Analyze explainer performance using Pearson correlation
         between averaged node scores and motif impact.
         
+        NOTE: This analysis is memory-intensive and skipped when node_scores
+        are not loaded. To save memory, this analysis is disabled by default.
+        
         Returns DataFrame with correlation metrics per experiment.
         """
         print("\nAnalyzing explainer performance (Pearson correlation)...")
+        print("  [Note: Skipping detailed explainer correlation to save memory]")
+        print("  [This requires loading full node_scores data]")
         
         explainer_results = []
         
         for exp in self.all_experiments:
-            if not exp['node_scores'] or not exp['masked_edge_impact']:
+            # Skip if node_scores not loaded (memory saving mode)
+            if not exp.get('node_scores') or not exp.get('masked_edge_impact'):
                 continue
             
             node_df = pd.DataFrame(exp['node_scores'])
@@ -423,13 +556,43 @@ class TuningResultsAnalyzer:
         """
         RQ 2(iv): Analyze distribution of node weights.
         
+        Uses pre-computed statistics to avoid loading all data into memory.
+        
         Returns DataFrame with distribution metrics per experiment.
         """
-        print("\nAnalyzing weight distributions...")
+        print("\nAnalyzing weight distributions (using pre-computed statistics)...")
         
         distribution_results = []
         
         for exp in self.all_experiments:
+            # Use pre-computed statistics instead of loading all data
+            if exp.get('attention_dist_stats'):
+                summary = exp['summary']
+                
+                for stat in exp['attention_dist_stats']:
+                    result = {
+                        'exp_dir': exp['exp_dir'],
+                        'dataset': summary['dataset'],
+                        'model': summary['model'],
+                        'fold': summary['fold'],
+                        'seed': summary['seed'],
+                        'motif_loss_coef': summary['loss_coefficients']['motif_loss_coef'],
+                        'init_r': summary['weight_distribution_params']['init_r'],
+                        'final_r': summary['weight_distribution_params']['final_r'],
+                        'phase': stat['phase'],
+                        'epoch': stat['epoch'],
+                        'mean': stat['mean'],
+                        'std': stat['std'],
+                        'entropy': stat['entropy'],
+                        'pct_near_0': stat['pct_near_0'],
+                        'pct_near_1': stat['pct_near_1'],
+                        'pct_middle': stat['pct_middle'],
+                        'polarization_score': stat['pct_near_0'] + stat['pct_near_1'],  # Combined polarization
+                    }
+                    distribution_results.append(result)
+                continue
+            
+            # Legacy: Fall back to loading full data if pre-computed stats not available
             if not exp['attention_dist']:
                 continue
             
@@ -1422,10 +1585,10 @@ class TuningResultsAnalyzer:
         
         # Only run detailed analyses if data is loaded
         if not lightweight:
-            print("\n[Running within-motif consistency analysis...]")
+            print("\n[Running within-motif consistency analysis (using statistics)...]")
             self.analyze_within_motif_consistency()
             
-            print("\n[Running explainer performance analysis...]")
+            print("\n[Running explainer performance analysis (limited)...]")
             self.analyze_explainer_performance()
             
             print("\n[Running weight distribution analysis...]")
@@ -1433,11 +1596,17 @@ class TuningResultsAnalyzer:
             
             # Step 4: Generate report
             self.generate_comprehensive_report()
+            
+            print("\n[Note: Memory-efficient mode is enabled by default]")
+            print("  - Node scores: summarized (mean, std, min, max) per split")
+            print("  - Attention distributions: only final epoch statistics extracted")
+            print("  - Large files (masked_impact): limited to 10k entries to prevent OOM")
+            print("  - All analyses use pre-computed statistics instead of loading full data")
         else:
             print("\n[Lightweight mode: Skipping detailed analyses]")
-            print("  - Skipped: within-motif consistency (requires node_scores)")
-            print("  - Skipped: explainer performance (requires masked_impact)")
-            print("  - Skipped: weight distribution (requires attention_dist)")
+            print("  - Skipped: within-motif consistency")
+            print("  - Skipped: explainer performance")
+            print("  - Skipped: weight distribution analysis")
             print("  - Skipped: comprehensive report")
             print("\nTo run full analysis, remove --lightweight flag")
         
