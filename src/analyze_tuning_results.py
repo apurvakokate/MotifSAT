@@ -19,8 +19,14 @@ Memory Optimization:
 - Weight distribution analysis uses pre-computed statistics (no full data loading)
 
 Usage:
+    # Analyze all experiments
     python analyze_tuning_results.py --results_dir ../tuning_results --output_dir ../analysis_results
-    python analyze_tuning_results.py --results_dir ../tuning_results --output_dir ../analysis_results --lightweight
+    
+    # Analyze specific experiment (saves to ../analysis_results/loss_tuning/)
+    python analyze_tuning_results.py --experiment loss_tuning
+    
+    # Lightweight mode (faster, less memory)
+    python analyze_tuning_results.py --experiment loss_tuning --lightweight
 """
 
 import argparse
@@ -40,9 +46,16 @@ import pdb
 class TuningResultsAnalyzer:
     """Comprehensive analyzer for tuning experiment results."""
     
-    def __init__(self, results_dir: Path, output_dir: Path):
+    def __init__(self, results_dir: Path, output_dir: Path, experiment_name: str = None):
         self.results_dir = Path(results_dir)
-        self.output_dir = Path(output_dir)
+        self.experiment_name = experiment_name
+        
+        # Update output directory to include experiment name if provided
+        if experiment_name:
+            self.output_dir = Path(output_dir) / experiment_name
+        else:
+            self.output_dir = Path(output_dir)
+        
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
         # Data containers
@@ -64,6 +77,8 @@ class TuningResultsAnalyzer:
         memory issues. Instead, summary statistics are computed on-the-fly.
         """
         print("Collecting all experiment results...")
+        if self.experiment_name:
+            print(f"  [Filtering by experiment: {self.experiment_name}]")
         if lightweight:
             print("  [Lightweight mode: skipping large data files]")
         else:
@@ -71,7 +86,17 @@ class TuningResultsAnalyzer:
             print("  [Large files like node_scores are summarized, not fully loaded]")
         
         experiment_dirs = list(self.results_dir.rglob('experiment_summary.json'))
-        print(f"Found {len(experiment_dirs)} experiments")
+        print(f"Found {len(experiment_dirs)} total experiment directories")
+        
+        # Filter by experiment name if provided
+        if self.experiment_name:
+            filtered_dirs = []
+            for summary_path in experiment_dirs:
+                # Check if path contains experiment_{experiment_name}
+                if f'experiment_{self.experiment_name}' in str(summary_path):
+                    filtered_dirs.append(summary_path)
+            experiment_dirs = filtered_dirs
+            print(f"Filtered to {len(experiment_dirs)} experiments matching '{self.experiment_name}'")
         
         for summary_path in experiment_dirs:
             exp_dir = summary_path.parent
@@ -651,6 +676,9 @@ class TuningResultsAnalyzer:
         # Create visualizations
         self._plot_weight_distributions(distribution_df)
         
+        # Create violin plots showing hyperparameter effects on attention weights
+        self.plot_attention_weights_violin(distribution_df)
+        
         return distribution_df
 
     def analyze_hyperparameter_effects(self, experiment_name=None):
@@ -679,6 +707,11 @@ class TuningResultsAnalyzer:
         if experiment_name:
             df = df[df['exp_dir'].str.contains(f'experiment_{experiment_name}')]
             print(f"Filtered to experiment: {experiment_name}")
+        
+        # Check if DataFrame is empty or missing required columns
+        if df.empty or 'dataset' not in df.columns or 'model' not in df.columns:
+            print("  [Skipping hyperparameter effects - no data available]")
+            return
         
         # Identify which parameters vary (these are the ones being tuned)
         param_columns = ['pred_loss_coef', 'info_loss_coef', 'motif_loss_coef',
@@ -847,6 +880,11 @@ class TuningResultsAnalyzer:
         """Create overview plots for validation metrics by dataset and model."""
         print("\nCreating validation metrics overview plots...")
         
+        # Check if DataFrame is empty or missing required columns
+        if df.empty or 'dataset' not in df.columns:
+            print("  [Skipping validation overview plots - no data available]")
+            return
+        
         # Map metric names to readable labels
         metric_labels = {
             'valid_clf_roc': 'Val AUROC (Performance)',
@@ -993,6 +1031,11 @@ class TuningResultsAnalyzer:
         """Save best configurations for all datasets based on validation metrics."""
         print("\nSaving best validation configurations...")
         
+        # Check if DataFrame is empty or missing required columns
+        if df.empty or 'dataset' not in df.columns:
+            print("  [Skipping best configs - no data available]")
+            return
+        
         results = []
         
         for dataset in df['dataset'].unique():
@@ -1090,6 +1133,11 @@ class TuningResultsAnalyzer:
         # Filter to specific experiment if requested
         if experiment_name:
             df = df[df['exp_dir'].str.contains(f'experiment_{experiment_name}')]
+        
+        # Check if DataFrame is empty or missing required columns
+        if df.empty or 'dataset' not in df.columns or 'model' not in df.columns:
+            print("  [Skipping parameter interactions - no data available]")
+            return
         
         # Identify varying parameters
         param_columns = ['pred_loss_coef', 'info_loss_coef', 'motif_loss_coef',
@@ -1253,6 +1301,11 @@ class TuningResultsAnalyzer:
     
     def _plot_consistency_vs_motif_loss(self, consistency_df):
         """Plot within-motif consistency vs motif loss coefficient."""
+        # Check if DataFrame is empty or missing required columns
+        if consistency_df.empty or 'dataset' not in consistency_df.columns or 'split' not in consistency_df.columns:
+            print("  [Skipping consistency plots - no data available]")
+            return
+        
         fig, axes = plt.subplots(2, 2, figsize=(14, 10))
         fig.suptitle('Within-Motif Score Consistency vs Motif Loss Coefficient', fontsize=16)
         
@@ -1292,6 +1345,11 @@ class TuningResultsAnalyzer:
     
     def _plot_explainer_performance(self, explainer_df):
         """Plot explainer performance metrics."""
+        # Check if DataFrame is empty or missing required columns
+        if explainer_df.empty or 'split' not in explainer_df.columns:
+            print("  [Skipping explainer performance plots - no data available]")
+            return
+        
         fig, axes = plt.subplots(1, 2, figsize=(14, 6))
         fig.suptitle('Explainer Performance: Correlation between Node Scores and Motif Impact', fontsize=14)
         
@@ -1344,8 +1402,133 @@ class TuningResultsAnalyzer:
         plt.close()
         print(f"Saved plot: explainer_performance.png")
     
+    def plot_attention_weights_violin(self, distribution_df):
+        """
+        Create violin plots showing how explainer attention weights change 
+        with different hyperparameters.
+        """
+        print("\nCreating violin plots for attention weights vs hyperparameters...")
+        
+        if distribution_df.empty:
+            print("  No distribution data available")
+            return
+        
+        # Use test data
+        test_data = distribution_df[distribution_df['phase'].str.strip() == 'test']
+        
+        if test_data.empty:
+            print("  No test phase data available")
+            return
+        
+        # Identify varying hyperparameters
+        param_columns = ['pred_loss_coef', 'info_loss_coef', 'motif_loss_coef',
+                        'init_r', 'final_r', 'decay_r', 'decay_interval']
+        
+        varying_params = []
+        for col in param_columns:
+            if col in test_data.columns and test_data[col].nunique() > 1:
+                varying_params.append(col)
+        
+        if not varying_params:
+            print("  No varying hyperparameters found")
+            return
+        
+        print(f"  Creating violin plots for: {varying_params}")
+        
+        # Metrics to plot
+        metrics = ['mean', 'std', 'entropy', 'polarization_score']
+        metric_labels = {
+            'mean': 'Mean Attention Weight',
+            'std': 'Std Dev of Attention Weights',
+            'entropy': 'Entropy of Attention Distribution',
+            'polarization_score': 'Polarization Score (% near 0 + % near 1)'
+        }
+        
+        # Create violin plots for each dataset
+        for dataset in test_data['dataset'].unique():
+            dataset_data = test_data[test_data['dataset'] == dataset]
+            
+            if len(dataset_data) < 3:
+                continue
+            
+            # Create subplots: rows = metrics, cols = hyperparameters
+            n_metrics = len(metrics)
+            n_params = len(varying_params)
+            
+            fig, axes = plt.subplots(n_metrics, n_params, 
+                                    figsize=(5*n_params, 4*n_metrics))
+            
+            if n_metrics == 1:
+                axes = axes.reshape(1, -1)
+            if n_params == 1:
+                axes = axes.reshape(-1, 1)
+            
+            fig.suptitle(f'{dataset} - Attention Weight Distribution vs Hyperparameters', 
+                        fontsize=16, fontweight='bold')
+            
+            for i, metric in enumerate(metrics):
+                for j, param in enumerate(varying_params):
+                    ax = axes[i, j]
+                    
+                    # Prepare data
+                    plot_data = dataset_data[[param, metric, 'model']].dropna()
+                    
+                    if len(plot_data) < 2:
+                        ax.text(0.5, 0.5, 'Insufficient data', 
+                               ha='center', va='center', transform=ax.transAxes)
+                        continue
+                    
+                    # Convert param to string for categorical plotting
+                    plot_data[param] = plot_data[param].astype(str)
+                    
+                    try:
+                        # Create violin plot
+                        unique_params = sorted(plot_data[param].unique())
+                        positions = range(len(unique_params))
+                        
+                        violin_parts = ax.violinplot(
+                            [plot_data[plot_data[param] == val][metric].values 
+                             for val in unique_params],
+                            positions=positions,
+                            showmeans=True,
+                            showmedians=True
+                        )
+                        
+                        # Color the violins
+                        for pc in violin_parts['bodies']:
+                            pc.set_facecolor('skyblue')
+                            pc.set_alpha(0.7)
+                        
+                        ax.set_xticks(positions)
+                        ax.set_xticklabels(unique_params, rotation=45, ha='right')
+                        ax.set_xlabel(param, fontweight='bold')
+                        ax.set_ylabel(metric_labels[metric], fontweight='bold')
+                        ax.grid(True, alpha=0.3, axis='y')
+                        
+                        # Add sample counts
+                        for pos, val in enumerate(unique_params):
+                            n_samples = len(plot_data[plot_data[param] == val])
+                            ax.text(pos, ax.get_ylim()[0], f'n={n_samples}',
+                                   ha='center', va='top', fontsize=8)
+                    
+                    except Exception as e:
+                        ax.text(0.5, 0.5, f'Error: {str(e)}', 
+                               ha='center', va='center', transform=ax.transAxes,
+                               fontsize=8)
+            
+            plt.tight_layout()
+            filename = f'attention_weights_violin_{dataset}.png'
+            plt.savefig(self.output_dir / filename, dpi=300, bbox_inches='tight')
+            plt.close()
+            print(f"  Saved: {filename}")
+    
     def _plot_weight_distributions(self, distribution_df):
         """Plot weight distribution characteristics."""
+        # Check if DataFrame is empty or missing required columns
+        if distribution_df.empty or 'phase' not in distribution_df.columns:
+            print("  [Skipping weight distribution plots - no data available]")
+            return
+        
         fig, axes = plt.subplots(2, 2, figsize=(14, 10))
         fig.suptitle('Attention Weight Distribution Analysis', fontsize=16)
         
@@ -1443,6 +1626,11 @@ class TuningResultsAnalyzer:
     
     def _plot_motif_loss_comparison(self, comparison_df):
         """Plot comparison of with/without motif loss."""
+        # Check if DataFrame is empty or missing required columns
+        if comparison_df.empty or 'metric' not in comparison_df.columns:
+            print("  [Skipping motif loss comparison plots - no data available]")
+            return
+        
         fig, axes = plt.subplots(1, 3, figsize=(18, 6))
         fig.suptitle('Effect of Motif Consistency Loss on Performance', fontsize=16)
         
@@ -1646,7 +1834,11 @@ def main():
                         help='Directory containing tuning results (relative to src/)')
     
     parser.add_argument('--output_dir', type=str, default='../analysis_results',
-                        help='Directory to save analysis outputs (relative to src/)')
+                        help='Base directory to save analysis outputs (relative to src/)')
+    
+    parser.add_argument('--experiment', type=str, default=None,
+                        help='Filter by specific experiment name (e.g., loss_tuning, weight_tuning). '
+                             'Results will be saved to output_dir/experiment/')
     
     parser.add_argument('--datasets', nargs='+',
                         help='Filter by specific datasets (optional)')
@@ -1662,7 +1854,8 @@ def main():
     # Create analyzer
     analyzer = TuningResultsAnalyzer(
         results_dir=Path(args.results_dir),
-        output_dir=Path(args.output_dir)
+        output_dir=Path(args.output_dir),
+        experiment_name=args.experiment
     )
     
     # Run full analysis
