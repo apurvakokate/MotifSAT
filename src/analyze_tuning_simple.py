@@ -64,6 +64,11 @@ def extract_experiment_metrics(exp_dir: Path) -> dict:
         'polarization': np.nan,
         'mean': np.nan,
         'std': np.nan,
+        'min': np.nan,
+        'max': np.nan,
+        'median': np.nan,
+        'q25': np.nan,
+        'q75': np.nan,
     }
     
     if attention_path.exists() and best_epoch >= 0:
@@ -81,6 +86,11 @@ def extract_experiment_metrics(exp_dir: Path) -> dict:
                     )
                     attention_metrics['mean'] = data.get('mean', np.nan)
                     attention_metrics['std'] = data.get('std', np.nan)
+                    attention_metrics['min'] = data.get('min', np.nan)
+                    attention_metrics['max'] = data.get('max', np.nan)
+                    attention_metrics['median'] = data.get('median', np.nan)
+                    attention_metrics['q25'] = data.get('q25', np.nan)
+                    attention_metrics['q75'] = data.get('q75', np.nan)
                     break
     
     # Construct result dictionary
@@ -120,6 +130,12 @@ def extract_experiment_metrics(exp_dir: Path) -> dict:
         'attention_entropy': attention_metrics['entropy'],
         'attention_mean': attention_metrics['mean'],
         'attention_std': attention_metrics['std'],
+        'attention_min': attention_metrics['min'],
+        'attention_max': attention_metrics['max'],
+        'attention_median': attention_metrics['median'],
+        'attention_q25': attention_metrics['q25'],
+        'attention_q75': attention_metrics['q75'],
+        'attention_range': attention_metrics['max'] - attention_metrics['min'] if not np.isnan(attention_metrics['max']) and not np.isnan(attention_metrics['min']) else np.nan,
         'attention_pct_near_0': attention_metrics['pct_near_0'],
         'attention_pct_near_1': attention_metrics['pct_near_1'],
         'attention_pct_middle': attention_metrics['pct_middle'],
@@ -208,8 +224,8 @@ def plot_comparison_figure(df: pd.DataFrame, dataset: str, model: str, output_di
         print(f"    Showing top 30 configs (out of {len(subset)})")
         subset = subset.head(30)
     
-    # Create figure with 3 subplots
-    fig, axes = plt.subplots(3, 1, figsize=(max(12, len(subset) * 0.5), 12))
+    # Create figure with 5 subplots
+    fig, axes = plt.subplots(5, 1, figsize=(max(12, len(subset) * 0.5), 18))
     fig.suptitle(f'{dataset} - {model}\nHyperparameter Comparison', 
                  fontsize=16, fontweight='bold')
     
@@ -229,7 +245,9 @@ def plot_comparison_figure(df: pd.DataFrame, dataset: str, model: str, output_di
         ('valid_clf_acc' if 'valid_clf_acc' in subset.columns else 'valid_acc', 
          'Validation Accuracy', 'green'),
         (metric_col, 'Validation AUROC', 'blue'),
-        ('attention_entropy', 'Attention Entropy\n(Explanation Quality)', 'orange'),
+        ('attention_entropy', 'Attention Entropy\n(Spread)', 'orange'),
+        ('attention_max', 'Attention Max\n(Peak Importance)', 'red'),
+        ('attention_range', 'Attention Range (Max-Min)\n(Discrimination)', 'purple'),
     ]
     
     for ax, (metric, title, color) in zip(axes, metrics):
@@ -292,24 +310,30 @@ def plot_aggregated_comparison(df: pd.DataFrame, output_dir: Path):
     
     # Create figure for each varying parameter
     for param in varying_params:
-        fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-        fig.suptitle(f'Effect of {param} on Performance', fontsize=16, fontweight='bold')
+        fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+        fig.suptitle(f'Effect of {param} on Performance & Explanation Quality', 
+                     fontsize=16, fontweight='bold')
+        axes = axes.flatten()
         
         # Group by parameter value and compute statistics
         grouped = df.groupby(param).agg({
             'valid_clf_acc': ['mean', 'std', 'count'],
             'valid_clf_roc': ['mean', 'std', 'count'],
             'attention_entropy': ['mean', 'std', 'count'],
+            'attention_max': ['mean', 'std', 'count'],
+            'attention_min': ['mean', 'std', 'count'],
+            'attention_range': ['mean', 'std', 'count'],
         }).reset_index()
+        
+        x = grouped[param].values
         
         # Plot 1: Validation Accuracy
         ax = axes[0]
-        x = grouped[param].values
         y = grouped[('valid_clf_acc', 'mean')].values
         yerr = grouped[('valid_clf_acc', 'std')].values
         ax.errorbar(x, y, yerr=yerr, marker='o', capsize=5, linewidth=2, markersize=8)
-        ax.set_xlabel(param, fontsize=12, fontweight='bold')
-        ax.set_ylabel('Validation Accuracy', fontsize=12, fontweight='bold')
+        ax.set_xlabel(param, fontsize=11, fontweight='bold')
+        ax.set_ylabel('Validation Accuracy', fontsize=11, fontweight='bold')
         ax.set_title('Validation Accuracy', fontsize=11)
         ax.grid(alpha=0.3)
         
@@ -318,8 +342,8 @@ def plot_aggregated_comparison(df: pd.DataFrame, output_dir: Path):
         y = grouped[('valid_clf_roc', 'mean')].values
         yerr = grouped[('valid_clf_roc', 'std')].values
         ax.errorbar(x, y, yerr=yerr, marker='o', capsize=5, linewidth=2, markersize=8, color='blue')
-        ax.set_xlabel(param, fontsize=12, fontweight='bold')
-        ax.set_ylabel('Validation AUROC', fontsize=12, fontweight='bold')
+        ax.set_xlabel(param, fontsize=11, fontweight='bold')
+        ax.set_ylabel('Validation AUROC', fontsize=11, fontweight='bold')
         ax.set_title('Validation AUROC', fontsize=11)
         ax.grid(alpha=0.3)
         
@@ -328,9 +352,39 @@ def plot_aggregated_comparison(df: pd.DataFrame, output_dir: Path):
         y = grouped[('attention_entropy', 'mean')].values
         yerr = grouped[('attention_entropy', 'std')].values
         ax.errorbar(x, y, yerr=yerr, marker='o', capsize=5, linewidth=2, markersize=8, color='orange')
-        ax.set_xlabel(param, fontsize=12, fontweight='bold')
-        ax.set_ylabel('Attention Entropy', fontsize=12, fontweight='bold')
-        ax.set_title('Attention Entropy (Explanation Quality)', fontsize=11)
+        ax.set_xlabel(param, fontsize=11, fontweight='bold')
+        ax.set_ylabel('Attention Entropy', fontsize=11, fontweight='bold')
+        ax.set_title('Attention Entropy (Spread)', fontsize=11)
+        ax.grid(alpha=0.3)
+        
+        # Plot 4: Attention Max
+        ax = axes[3]
+        y = grouped[('attention_max', 'mean')].values
+        yerr = grouped[('attention_max', 'std')].values
+        ax.errorbar(x, y, yerr=yerr, marker='o', capsize=5, linewidth=2, markersize=8, color='red')
+        ax.set_xlabel(param, fontsize=11, fontweight='bold')
+        ax.set_ylabel('Attention Max', fontsize=11, fontweight='bold')
+        ax.set_title('Max Attention Value (Peak Importance)', fontsize=11)
+        ax.grid(alpha=0.3)
+        
+        # Plot 5: Attention Min
+        ax = axes[4]
+        y = grouped[('attention_min', 'mean')].values
+        yerr = grouped[('attention_min', 'std')].values
+        ax.errorbar(x, y, yerr=yerr, marker='o', capsize=5, linewidth=2, markersize=8, color='green')
+        ax.set_xlabel(param, fontsize=11, fontweight='bold')
+        ax.set_ylabel('Attention Min', fontsize=11, fontweight='bold')
+        ax.set_title('Min Attention Value', fontsize=11)
+        ax.grid(alpha=0.3)
+        
+        # Plot 6: Attention Range
+        ax = axes[5]
+        y = grouped[('attention_range', 'mean')].values
+        yerr = grouped[('attention_range', 'std')].values
+        ax.errorbar(x, y, yerr=yerr, marker='o', capsize=5, linewidth=2, markersize=8, color='purple')
+        ax.set_xlabel(param, fontsize=11, fontweight='bold')
+        ax.set_ylabel('Attention Range', fontsize=11, fontweight='bold')
+        ax.set_title('Attention Range (Max-Min) = Discrimination', fontsize=11)
         ax.grid(alpha=0.3)
         
         plt.tight_layout()
@@ -381,6 +435,9 @@ def identify_best_configs(df: pd.DataFrame, output_dir: Path):
                     'valid_roc': row[roc_col],
                     'valid_acc': row.get('valid_clf_acc', row.get('valid_acc', np.nan)),
                     'attention_entropy': row['attention_entropy'],
+                    'attention_max': row.get('attention_max', np.nan),
+                    'attention_min': row.get('attention_min', np.nan),
+                    'attention_range': row.get('attention_range', np.nan),
                     'combined_score': row['combined_score'],
                     'pred_loss_coef': row['pred_loss_coef'],
                     'info_loss_coef': row['info_loss_coef'],
@@ -408,7 +465,11 @@ def identify_best_configs(df: pd.DataFrame, output_dir: Path):
             print(f"  Config: {row['tuning_id']}")
             print(f"  Val AUROC: {row['valid_roc']:.4f}")
             print(f"  Val Acc: {row['valid_acc']:.4f}")
-            print(f"  Attention Entropy: {row['attention_entropy']:.4f}")
+            print(f"  Attention Metrics:")
+            print(f"    Entropy: {row['attention_entropy']:.4f} (spread)")
+            print(f"    Max: {row['attention_max']:.4f} (peak importance)")
+            print(f"    Min: {row['attention_min']:.4f}")
+            print(f"    Range: {row['attention_range']:.4f} (discrimination)")
             print(f"  Hyperparameters:")
             print(f"    pred_loss_coef={row['pred_loss_coef']}, info_loss_coef={row['info_loss_coef']}, motif_loss_coef={row['motif_loss_coef']}")
             print(f"    init_r={row['init_r']}, final_r={row['final_r']}, decay_r={row['decay_r']}, decay_interval={row['decay_interval']}")
