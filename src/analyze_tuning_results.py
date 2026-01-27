@@ -1306,42 +1306,52 @@ class TuningResultsAnalyzer:
             print("  [Skipping consistency plots - no data available]")
             return
         
-        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-        fig.suptitle('Within-Motif Score Consistency vs Motif Loss Coefficient', fontsize=16)
-        
         metrics = ['avg_variance', 'avg_std', 'avg_range', 'avg_coeff_of_var']
         titles = ['Average Variance', 'Average Std Dev', 'Average Range', 'Coefficient of Variation']
         
-        for ax, metric, title in zip(axes.flat, metrics, titles):
-            for dataset in consistency_df['dataset'].unique():
-                data = consistency_df[
-                    (consistency_df['dataset'] == dataset) & 
-                    (consistency_df['split'] == 'test')
+        # Create separate plots for each dataset-architecture combination
+        for dataset in consistency_df['dataset'].unique():
+            dataset_data = consistency_df[consistency_df['dataset'] == dataset]
+            
+            for model in dataset_data['model'].unique():
+                model_data = dataset_data[
+                    (dataset_data['model'] == model) & 
+                    (dataset_data['split'] == 'test')
                 ]
                 
-                if len(data) > 0:
-                    # Aggregate by motif_loss_coef
-                    agg = data.groupby('motif_loss_coef')[metric].agg(['mean', 'std']).reset_index()
+                if len(model_data) == 0:
+                    continue
+                
+                fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+                fig.suptitle(f'{dataset} - {model}\nWithin-Motif Score Consistency vs Motif Loss Coefficient', 
+                           fontsize=16, fontweight='bold')
+                
+                for ax, metric, title in zip(axes.flat, metrics, titles):
+                    if len(model_data) > 0 and metric in model_data.columns:
+                        # Aggregate by motif_loss_coef
+                        agg = model_data.groupby('motif_loss_coef')[metric].agg(['mean', 'std']).reset_index()
+                        
+                        if len(agg) > 0:
+                            ax.errorbar(
+                                agg['motif_loss_coef'], 
+                                agg['mean'], 
+                                yerr=agg['std'],
+                                marker='o', 
+                                label=f'{dataset} - {model}',
+                                capsize=5
+                            )
                     
-                    ax.errorbar(
-                        agg['motif_loss_coef'], 
-                        agg['mean'], 
-                        yerr=agg['std'],
-                        marker='o', 
-                        label=dataset,
-                        capsize=5
-                    )
-            
-            ax.set_xlabel('Motif Loss Coefficient')
-            ax.set_ylabel(title)
-            ax.set_title(title)
-            ax.legend()
-            ax.grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        plt.savefig(self.output_dir / 'consistency_vs_motif_loss.png', dpi=300, bbox_inches='tight')
-        plt.close()
-        print(f"Saved plot: consistency_vs_motif_loss.png")
+                    ax.set_xlabel('Motif Loss Coefficient')
+                    ax.set_ylabel(title)
+                    ax.set_title(title)
+                    ax.legend()
+                    ax.grid(True, alpha=0.3)
+                
+                plt.tight_layout()
+                filename = f'consistency_vs_motif_loss_{dataset}_{model}.png'
+                plt.savefig(self.output_dir / filename, dpi=300, bbox_inches='tight')
+                plt.close()
+                print(f"  Saved: {filename}")
     
     def _plot_explainer_performance(self, explainer_df):
         """Plot explainer performance metrics."""
@@ -1350,57 +1360,69 @@ class TuningResultsAnalyzer:
             print("  [Skipping explainer performance plots - no data available]")
             return
         
-        fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-        fig.suptitle('Explainer Performance: Correlation between Node Scores and Motif Impact', fontsize=14)
-        
         test_data = explainer_df[explainer_df['split'] == 'test']
         
-        # Pearson correlation
+        # Create separate plots for each dataset-architecture combination
         for dataset in test_data['dataset'].unique():
-            data = test_data[test_data['dataset'] == dataset]
-            agg = data.groupby('motif_loss_coef')['pearson_corr'].agg(['mean', 'std']).reset_index()
+            dataset_data = test_data[test_data['dataset'] == dataset]
             
-            axes[0].errorbar(
-                agg['motif_loss_coef'],
-                agg['mean'],
-                yerr=agg['std'],
-                marker='o',
-                label=dataset,
-                capsize=5
-            )
-        
-        axes[0].set_xlabel('Motif Loss Coefficient')
-        axes[0].set_ylabel('Pearson Correlation')
-        axes[0].set_title('Pearson Correlation')
-        axes[0].legend()
-        axes[0].grid(True, alpha=0.3)
-        axes[0].axhline(y=0, color='r', linestyle='--', alpha=0.3)
-        
-        # Spearman correlation
-        for dataset in test_data['dataset'].unique():
-            data = test_data[test_data['dataset'] == dataset]
-            agg = data.groupby('motif_loss_coef')['spearman_corr'].agg(['mean', 'std']).reset_index()
-            
-            axes[1].errorbar(
-                agg['motif_loss_coef'],
-                agg['mean'],
-                yerr=agg['std'],
-                marker='o',
-                label=dataset,
-                capsize=5
-            )
-        
-        axes[1].set_xlabel('Motif Loss Coefficient')
-        axes[1].set_ylabel('Spearman Correlation')
-        axes[1].set_title('Spearman Correlation (Rank-based)')
-        axes[1].legend()
-        axes[1].grid(True, alpha=0.3)
-        axes[1].axhline(y=0, color='r', linestyle='--', alpha=0.3)
-        
-        plt.tight_layout()
-        plt.savefig(self.output_dir / 'explainer_performance.png', dpi=300, bbox_inches='tight')
-        plt.close()
-        print(f"Saved plot: explainer_performance.png")
+            for model in dataset_data['model'].unique():
+                model_data = dataset_data[dataset_data['model'] == model]
+                
+                if len(model_data) == 0:
+                    continue
+                
+                fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+                fig.suptitle(f'{dataset} - {model}\nExplainer Performance: Correlation between Node Scores and Motif Impact', 
+                           fontsize=14, fontweight='bold')
+                
+                # Pearson correlation
+                if 'pearson_corr' in model_data.columns:
+                    agg = model_data.groupby('motif_loss_coef')['pearson_corr'].agg(['mean', 'std']).reset_index()
+                    
+                    if len(agg) > 0:
+                        axes[0].errorbar(
+                            agg['motif_loss_coef'],
+                            agg['mean'],
+                            yerr=agg['std'],
+                            marker='o',
+                            label=f'{dataset} - {model}',
+                            capsize=5
+                        )
+                
+                axes[0].set_xlabel('Motif Loss Coefficient')
+                axes[0].set_ylabel('Pearson Correlation')
+                axes[0].set_title('Pearson Correlation')
+                axes[0].legend()
+                axes[0].grid(True, alpha=0.3)
+                axes[0].axhline(y=0, color='r', linestyle='--', alpha=0.3)
+                
+                # Spearman correlation
+                if 'spearman_corr' in model_data.columns:
+                    agg = model_data.groupby('motif_loss_coef')['spearman_corr'].agg(['mean', 'std']).reset_index()
+                    
+                    if len(agg) > 0:
+                        axes[1].errorbar(
+                            agg['motif_loss_coef'],
+                            agg['mean'],
+                            yerr=agg['std'],
+                            marker='o',
+                            label=f'{dataset} - {model}',
+                            capsize=5
+                        )
+                
+                axes[1].set_xlabel('Motif Loss Coefficient')
+                axes[1].set_ylabel('Spearman Correlation')
+                axes[1].set_title('Spearman Correlation (Rank-based)')
+                axes[1].legend()
+                axes[1].grid(True, alpha=0.3)
+                axes[1].axhline(y=0, color='r', linestyle='--', alpha=0.3)
+                
+                plt.tight_layout()
+                filename = f'explainer_performance_{dataset}_{model}.png'
+                plt.savefig(self.output_dir / filename, dpi=300, bbox_inches='tight')
+                plt.close()
+                print(f"  Saved: {filename}")
     
     def plot_attention_weights_violin(self, distribution_df):
         """
@@ -1444,83 +1466,87 @@ class TuningResultsAnalyzer:
             'polarization_score': 'Polarization Score (% near 0 + % near 1)'
         }
         
-        # Create violin plots for each dataset
+        # Create violin plots for each dataset-architecture combination
         for dataset in test_data['dataset'].unique():
             dataset_data = test_data[test_data['dataset'] == dataset]
             
-            if len(dataset_data) < 3:
-                continue
-            
-            # Create subplots: rows = metrics, cols = hyperparameters
-            n_metrics = len(metrics)
-            n_params = len(varying_params)
-            
-            fig, axes = plt.subplots(n_metrics, n_params, 
-                                    figsize=(5*n_params, 4*n_metrics))
-            
-            if n_metrics == 1:
-                axes = axes.reshape(1, -1)
-            if n_params == 1:
-                axes = axes.reshape(-1, 1)
-            
-            fig.suptitle(f'{dataset} - Attention Weight Distribution vs Hyperparameters', 
-                        fontsize=16, fontweight='bold')
-            
-            for i, metric in enumerate(metrics):
-                for j, param in enumerate(varying_params):
-                    ax = axes[i, j]
-                    
-                    # Prepare data
-                    plot_data = dataset_data[[param, metric, 'model']].dropna()
-                    
-                    if len(plot_data) < 2:
-                        ax.text(0.5, 0.5, 'Insufficient data', 
-                               ha='center', va='center', transform=ax.transAxes)
-                        continue
-                    
-                    # Convert param to string for categorical plotting
-                    plot_data[param] = plot_data[param].astype(str)
-                    
-                    try:
-                        # Create violin plot
-                        unique_params = sorted(plot_data[param].unique())
-                        positions = range(len(unique_params))
+            # Separate by architecture (model)
+            for model in dataset_data['model'].unique():
+                model_data = dataset_data[dataset_data['model'] == model]
+                
+                if len(model_data) < 3:
+                    continue
+                
+                # Create subplots: rows = metrics, cols = hyperparameters
+                n_metrics = len(metrics)
+                n_params = len(varying_params)
+                
+                fig, axes = plt.subplots(n_metrics, n_params, 
+                                        figsize=(5*n_params, 4*n_metrics))
+                
+                if n_metrics == 1:
+                    axes = axes.reshape(1, -1)
+                if n_params == 1:
+                    axes = axes.reshape(-1, 1)
+                
+                fig.suptitle(f'{dataset} - {model} - Attention Weight Distribution vs Hyperparameters', 
+                            fontsize=16, fontweight='bold')
+                
+                for i, metric in enumerate(metrics):
+                    for j, param in enumerate(varying_params):
+                        ax = axes[i, j]
                         
-                        violin_parts = ax.violinplot(
-                            [plot_data[plot_data[param] == val][metric].values 
-                             for val in unique_params],
-                            positions=positions,
-                            showmeans=True,
-                            showmedians=True
-                        )
+                        # Prepare data
+                        plot_data = model_data[[param, metric]].dropna()
                         
-                        # Color the violins
-                        for pc in violin_parts['bodies']:
-                            pc.set_facecolor('skyblue')
-                            pc.set_alpha(0.7)
+                        if len(plot_data) < 2:
+                            ax.text(0.5, 0.5, 'Insufficient data', 
+                                   ha='center', va='center', transform=ax.transAxes)
+                            continue
                         
-                        ax.set_xticks(positions)
-                        ax.set_xticklabels(unique_params, rotation=45, ha='right')
-                        ax.set_xlabel(param, fontweight='bold')
-                        ax.set_ylabel(metric_labels[metric], fontweight='bold')
-                        ax.grid(True, alpha=0.3, axis='y')
+                        # Convert param to string for categorical plotting
+                        plot_data[param] = plot_data[param].astype(str)
                         
-                        # Add sample counts
-                        for pos, val in enumerate(unique_params):
-                            n_samples = len(plot_data[plot_data[param] == val])
-                            ax.text(pos, ax.get_ylim()[0], f'n={n_samples}',
-                                   ha='center', va='top', fontsize=8)
-                    
-                    except Exception as e:
-                        ax.text(0.5, 0.5, f'Error: {str(e)}', 
-                               ha='center', va='center', transform=ax.transAxes,
-                               fontsize=8)
-            
-            plt.tight_layout()
-            filename = f'attention_weights_violin_{dataset}.png'
-            plt.savefig(self.output_dir / filename, dpi=300, bbox_inches='tight')
-            plt.close()
-            print(f"  Saved: {filename}")
+                        try:
+                            # Create violin plot
+                            unique_params = sorted(plot_data[param].unique())
+                            positions = range(len(unique_params))
+                            
+                            violin_parts = ax.violinplot(
+                                [plot_data[plot_data[param] == val][metric].values 
+                                 for val in unique_params],
+                                positions=positions,
+                                showmeans=True,
+                                showmedians=True
+                            )
+                            
+                            # Color the violins
+                            for pc in violin_parts['bodies']:
+                                pc.set_facecolor('skyblue')
+                                pc.set_alpha(0.7)
+                            
+                            ax.set_xticks(positions)
+                            ax.set_xticklabels(unique_params, rotation=45, ha='right')
+                            ax.set_xlabel(param, fontweight='bold')
+                            ax.set_ylabel(metric_labels[metric], fontweight='bold')
+                            ax.grid(True, alpha=0.3, axis='y')
+                            
+                            # Add sample counts
+                            for pos, val in enumerate(unique_params):
+                                n_samples = len(plot_data[plot_data[param] == val])
+                                ax.text(pos, ax.get_ylim()[0], f'n={n_samples}',
+                                       ha='center', va='top', fontsize=8)
+                        
+                        except Exception as e:
+                            ax.text(0.5, 0.5, f'Error: {str(e)}', 
+                                   ha='center', va='center', transform=ax.transAxes,
+                                   fontsize=8)
+                
+                plt.tight_layout()
+                filename = f'attention_weights_violin_{dataset}_{model}.png'
+                plt.savefig(self.output_dir / filename, dpi=300, bbox_inches='tight')
+                plt.close()
+                print(f"  Saved: {filename}")
     
     def _plot_weight_distributions(self, distribution_df):
         """Plot weight distribution characteristics."""
@@ -1529,100 +1555,112 @@ class TuningResultsAnalyzer:
             print("  [Skipping weight distribution plots - no data available]")
             return
         
-        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-        fig.suptitle('Attention Weight Distribution Analysis', fontsize=16)
-        
         # Fix: Remove trailing space from 'test ' - should be 'test'
         test_data = distribution_df[distribution_df['phase'].str.strip() == 'test']
         
-        # Polarization score
-        ax = axes[0, 0]
+        # Create separate plots for each dataset-architecture combination
         for dataset in test_data['dataset'].unique():
-            data = test_data[test_data['dataset'] == dataset]
-            agg = data.groupby('motif_loss_coef')['polarization_score'].agg(['mean', 'std']).reset_index()
+            dataset_data = test_data[test_data['dataset'] == dataset]
             
-            ax.errorbar(
-                agg['motif_loss_coef'],
-                agg['mean'],
-                yerr=agg['std'],
-                marker='o',
-                label=dataset,
-                capsize=5
-            )
-        
-        ax.set_xlabel('Motif Loss Coefficient')
-        ax.set_ylabel('Polarization Score (% near 0 + % near 1)')
-        ax.set_title('Weight Polarization')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        
-        # Entropy
-        ax = axes[0, 1]
-        for dataset in test_data['dataset'].unique():
-            data = test_data[test_data['dataset'] == dataset]
-            agg = data.groupby('motif_loss_coef')['entropy'].agg(['mean', 'std']).reset_index()
-            
-            ax.errorbar(
-                agg['motif_loss_coef'],
-                agg['mean'],
-                yerr=agg['std'],
-                marker='o',
-                label=dataset,
-                capsize=5
-            )
-        
-        ax.set_xlabel('Motif Loss Coefficient')
-        ax.set_ylabel('Entropy')
-        ax.set_title('Weight Distribution Entropy')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        
-        # Percentage in middle
-        ax = axes[1, 0]
-        for dataset in test_data['dataset'].unique():
-            data = test_data[test_data['dataset'] == dataset]
-            agg = data.groupby('motif_loss_coef')['pct_middle'].agg(['mean', 'std']).reset_index()
-            
-            ax.errorbar(
-                agg['motif_loss_coef'],
-                agg['mean'],
-                yerr=agg['std'],
-                marker='o',
-                label=dataset,
-                capsize=5
-            )
-        
-        ax.set_xlabel('Motif Loss Coefficient')
-        ax.set_ylabel('% Weights in [0.4, 0.6]')
-        ax.set_title('Percentage of Uncertain Weights')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        
-        # Standard deviation
-        ax = axes[1, 1]
-        for dataset in test_data['dataset'].unique():
-            data = test_data[test_data['dataset'] == dataset]
-            agg = data.groupby('motif_loss_coef')['std'].agg(['mean', 'std']).reset_index()
-            
-            ax.errorbar(
-                agg['motif_loss_coef'],
-                agg['mean'],
-                yerr=agg['std'],
-                marker='o',
-                label=dataset,
-                capsize=5
-            )
-        
-        ax.set_xlabel('Motif Loss Coefficient')
-        ax.set_ylabel('Standard Deviation')
-        ax.set_title('Weight Standard Deviation')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        plt.savefig(self.output_dir / 'weight_distributions.png', dpi=300, bbox_inches='tight')
-        plt.close()
-        print(f"Saved plot: weight_distributions.png")
+            for model in dataset_data['model'].unique():
+                model_data = dataset_data[dataset_data['model'] == model]
+                
+                if len(model_data) == 0:
+                    continue
+                
+                fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+                fig.suptitle(f'{dataset} - {model}\nAttention Weight Distribution Analysis', 
+                           fontsize=16, fontweight='bold')
+                
+                # Polarization score
+                ax = axes[0, 0]
+                if 'polarization_score' in model_data.columns:
+                    agg = model_data.groupby('motif_loss_coef')['polarization_score'].agg(['mean', 'std']).reset_index()
+                    
+                    if len(agg) > 0:
+                        ax.errorbar(
+                            agg['motif_loss_coef'],
+                            agg['mean'],
+                            yerr=agg['std'],
+                            marker='o',
+                            label=f'{dataset} - {model}',
+                            capsize=5
+                        )
+                
+                ax.set_xlabel('Motif Loss Coefficient')
+                ax.set_ylabel('Polarization Score (% near 0 + % near 1)')
+                ax.set_title('Weight Polarization')
+                ax.legend()
+                ax.grid(True, alpha=0.3)
+                
+                # Entropy
+                ax = axes[0, 1]
+                if 'entropy' in model_data.columns:
+                    agg = model_data.groupby('motif_loss_coef')['entropy'].agg(['mean', 'std']).reset_index()
+                    
+                    if len(agg) > 0:
+                        ax.errorbar(
+                            agg['motif_loss_coef'],
+                            agg['mean'],
+                            yerr=agg['std'],
+                            marker='o',
+                            label=f'{dataset} - {model}',
+                            capsize=5
+                        )
+                
+                ax.set_xlabel('Motif Loss Coefficient')
+                ax.set_ylabel('Entropy')
+                ax.set_title('Weight Distribution Entropy')
+                ax.legend()
+                ax.grid(True, alpha=0.3)
+                
+                # Percentage in middle
+                ax = axes[1, 0]
+                if 'pct_middle' in model_data.columns:
+                    agg = model_data.groupby('motif_loss_coef')['pct_middle'].agg(['mean', 'std']).reset_index()
+                    
+                    if len(agg) > 0:
+                        ax.errorbar(
+                            agg['motif_loss_coef'],
+                            agg['mean'],
+                            yerr=agg['std'],
+                            marker='o',
+                            label=f'{dataset} - {model}',
+                            capsize=5
+                        )
+                
+                ax.set_xlabel('Motif Loss Coefficient')
+                ax.set_ylabel('% Weights in [0.4, 0.6]')
+                ax.set_title('Percentage of Uncertain Weights')
+                ax.legend()
+                ax.grid(True, alpha=0.3)
+                
+                # Standard deviation
+                ax = axes[1, 1]
+                if 'std' in model_data.columns:
+                    agg = model_data.groupby('motif_loss_coef')['std'].agg(['mean', 'std']).reset_index()
+                    
+                    if len(agg) > 0:
+                        ax.errorbar(
+                            agg['motif_loss_coef'],
+                            agg['mean'],
+                            yerr=agg['std'],
+                            marker='o',
+                            label=f'{dataset} - {model}',
+                            capsize=5
+                        )
+                
+                ax.set_xlabel('Motif Loss Coefficient')
+                ax.set_ylabel('Standard Deviation')
+                ax.set_title('Weight Standard Deviation')
+                ax.legend()
+                ax.grid(True, alpha=0.3)
+                
+                plt.tight_layout()
+                filename = f'weight_distributions_{dataset}_{model}.png'
+                plt.savefig(self.output_dir / filename, dpi=300, bbox_inches='tight')
+                plt.close()
+                print(f"  Saved: {filename}")
     
     def _plot_motif_loss_comparison(self, comparison_df):
         """Plot comparison of with/without motif loss."""
@@ -1631,45 +1669,60 @@ class TuningResultsAnalyzer:
             print("  [Skipping motif loss comparison plots - no data available]")
             return
         
-        fig, axes = plt.subplots(1, 3, figsize=(18, 6))
-        fig.suptitle('Effect of Motif Consistency Loss on Performance', fontsize=16)
-        
         metrics = ['test_acc', 'test_x_roc', 'test_x_precision']
         titles = ['Model Performance (Test Acc)', 'Explainer ROC-AUC', 'Explainer Precision']
         
-        for ax, metric, title in zip(axes, metrics, titles):
-            metric_data = comparison_df[comparison_df['metric'] == metric]
+        # Create separate plots for each dataset
+        for dataset in comparison_df['dataset'].unique():
+            dataset_data = comparison_df[comparison_df['dataset'] == dataset]
             
-            x = np.arange(len(metric_data))
-            width = 0.35
+            if len(dataset_data) == 0:
+                continue
             
-            labels = [f"{row['dataset']}\n{row['model']}" for _, row in metric_data.iterrows()]
+            fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+            fig.suptitle(f'{dataset}\nEffect of Motif Consistency Loss on Performance', 
+                       fontsize=16, fontweight='bold')
             
-            ax.bar(x - width/2, metric_data['without_motif_mean'], width,
-                   label='Without Motif Loss', yerr=metric_data['without_motif_std'],
-                   capsize=5, alpha=0.8)
+            for ax, metric, title in zip(axes, metrics, titles):
+                metric_data = dataset_data[dataset_data['metric'] == metric]
+                
+                if len(metric_data) == 0:
+                    ax.text(0.5, 0.5, 'No data', ha='center', va='center', transform=ax.transAxes)
+                    ax.set_title(title)
+                    continue
+                
+                x = np.arange(len(metric_data))
+                width = 0.35
+                
+                # Labels just show model since dataset is in the suptitle
+                labels = [f"{row['model']}" for _, row in metric_data.iterrows()]
+                
+                ax.bar(x - width/2, metric_data['without_motif_mean'], width,
+                       label='Without Motif Loss', yerr=metric_data['without_motif_std'],
+                       capsize=5, alpha=0.8)
+                
+                ax.bar(x + width/2, metric_data['with_motif_mean'], width,
+                       label='With Motif Loss', yerr=metric_data['with_motif_std'],
+                       capsize=5, alpha=0.8)
+                
+                # Mark significant differences
+                for i, (_, row) in enumerate(metric_data.iterrows()):
+                    if row['significant']:
+                        y_pos = max(row['with_motif_mean'], row['without_motif_mean']) + row['with_motif_std']
+                        ax.text(i, y_pos, '*', ha='center', va='bottom', fontsize=16)
+                
+                ax.set_ylabel(title)
+                ax.set_title(title)
+                ax.set_xticks(x)
+                ax.set_xticklabels(labels, rotation=45, ha='right', fontsize=10)
+                ax.legend()
+                ax.grid(True, alpha=0.3, axis='y')
             
-            ax.bar(x + width/2, metric_data['with_motif_mean'], width,
-                   label='With Motif Loss', yerr=metric_data['with_motif_std'],
-                   capsize=5, alpha=0.8)
-            
-            # Mark significant differences
-            for i, (_, row) in enumerate(metric_data.iterrows()):
-                if row['significant']:
-                    y_pos = max(row['with_motif_mean'], row['without_motif_mean']) + row['with_motif_std']
-                    ax.text(i, y_pos, '*', ha='center', va='bottom', fontsize=16)
-            
-            ax.set_ylabel(title)
-            ax.set_title(title)
-            ax.set_xticks(x)
-            ax.set_xticklabels(labels, rotation=45, ha='right', fontsize=8)
-            ax.legend()
-            ax.grid(True, alpha=0.3, axis='y')
-        
-        plt.tight_layout()
-        plt.savefig(self.output_dir / 'motif_loss_comparison.png', dpi=300, bbox_inches='tight')
-        plt.close()
-        print(f"Saved plot: motif_loss_comparison.png")
+            plt.tight_layout()
+            filename = f'motif_loss_comparison_{dataset}.png'
+            plt.savefig(self.output_dir / filename, dpi=300, bbox_inches='tight')
+            plt.close()
+            print(f"  Saved: {filename}")
     
     def generate_comprehensive_report(self):
         """Generate a comprehensive analysis report."""
