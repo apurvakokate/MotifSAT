@@ -60,10 +60,10 @@ def create_baseline_experiment():
     base_config = {
         'pred_loss_coef': 1.0,
         'info_loss_coef': 1.0,
-        'init_r': 0.9,
-        'final_r': 0.1,
-        'decay_r': 0.1,
-        'decay_interval': 10,
+        'init_r': 0.7,
+        'final_r': 0.3,
+        'decay_r': 0.2,
+        'decay_interval': 5,
     }
     
     param_grid = {
