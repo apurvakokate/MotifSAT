@@ -1785,16 +1785,16 @@ class TuningResultsAnalyzer:
         print("\n[Analyzing hyperparameter effects on validation metrics...]")
         self.analyze_hyperparameter_effects()
         
-        print("\n[Analyzing parameter interactions on validation metrics...]")
-        self.analyze_parameter_interactions()
+        # print("\n[Analyzing parameter interactions on validation metrics...]")
+        # self.analyze_parameter_interactions()
         
         # Only run detailed analyses if data is loaded
         if not lightweight:
             print("\n[Running within-motif consistency analysis (using statistics)...]")
             self.analyze_within_motif_consistency()
             
-            print("\n[Running explainer performance analysis (limited)...]")
-            self.analyze_explainer_performance()
+            # print("\n[Running explainer performance analysis (limited)...]")
+            # self.analyze_explainer_performance()
             
             print("\n[Running weight distribution analysis...]")
             self.analyze_weight_distribution()
