@@ -102,13 +102,48 @@ def export_ogb_dataset(dataset_name: str, data_dir: Path, output_dir: Path):
         split_idx = dataset.get_idx_split()
         print(f"  Train: {len(split_idx['train'])}, Valid: {len(split_idx['valid'])}, Test: {len(split_idx['test'])}")
         
-        # Check if dataset has SMILES
-        if not hasattr(dataset, 'smiles'):
-            print(f"\n✗ Error: Dataset {dataset_name} does not have SMILES attribute")
-            print("   This dataset may not be a molecular dataset.")
-            return False
+        # Check for SMILES - try multiple methods
+        smiles_data = None
         
-        print(f"✓ Dataset has {len(dataset.smiles)} SMILES strings")
+        # Method 1: Direct attribute
+        if hasattr(dataset, 'smiles'):
+            smiles_data = dataset.smiles
+            print(f"✓ Dataset has {len(smiles_data)} SMILES strings (via .smiles attribute)")
+        
+        # Method 2: Check in graphs dict (some OGB versions)
+        elif hasattr(dataset, 'graphs') and isinstance(dataset.graphs, dict):
+            if 'smiles' in dataset.graphs:
+                smiles_data = dataset.graphs['smiles']
+                print(f"✓ Dataset has {len(smiles_data)} SMILES strings (via .graphs['smiles'])")
+        
+        # Method 3: Load from mapping directory
+        if smiles_data is None:
+            try:
+                import pandas as pd
+                mapping_dir = data_dir / dataset_name.replace('-', '_') / 'mapping'
+                smiles_file = mapping_dir / 'mol.csv.gz'
+                if smiles_file.exists():
+                    df_mapping = pd.read_csv(smiles_file)
+                    if 'smiles' in df_mapping.columns:
+                        smiles_data = df_mapping['smiles'].tolist()
+                        print(f"✓ Dataset has {len(smiles_data)} SMILES strings (loaded from mapping/mol.csv.gz)")
+            except Exception as e:
+                pass
+        
+        # If still no SMILES found
+        if smiles_data is None:
+            print(f"\n✗ Error: Could not find SMILES for dataset {dataset_name}")
+            print("   Tried:")
+            print("     • dataset.smiles attribute")
+            print("     • dataset.graphs['smiles']")
+            print("     • mapping/mol.csv.gz file")
+            print(f"\n   Dataset attributes: {[a for a in dir(dataset) if not a.startswith('_')][:15]}")
+            print(f"\n   This may indicate:")
+            print("     • OGB version is too old (need >= 1.3.0)")
+            print("     • Dataset is corrupted")
+            print("     • Not a molecular dataset")
+            print(f"\n   Check OGB version: python -c \"import ogb; print(ogb.__version__)\"")
+            return False
         
         # Extract SMILES and labels
         print("\nExtracting SMILES and labels...")
@@ -121,9 +156,9 @@ def export_ogb_dataset(dataset_name: str, data_dir: Path, output_dir: Path):
             for idx in tqdm(indices, desc=f"  {split_name:5s}"):
                 idx = int(idx)
                 
-                # Get SMILES from dataset.smiles list
+                # Get SMILES using smiles_data (works with all methods)
                 try:
-                    smiles = dataset.smiles[idx]
+                    smiles = smiles_data[idx]
                     if not smiles or smiles == '':
                         print(f"    Warning: Empty SMILES at idx {idx}, skipping...")
                         continue
