@@ -25,6 +25,36 @@ except ImportError:
     print("  pip install ogb torch pandas")
     exit(1)
 
+# Patch for OGB bug with NaN in metadata
+def patch_ogb_metadata():
+    """
+    Patch OGB to handle NaN values in metadata.
+    
+    This fixes the error: 'float' object has no attribute 'split'
+    which occurs when metadata contains NaN instead of empty string.
+    """
+    import ogb.graphproppred.dataset_pyg as ogb_pyg
+    original_process = ogb_pyg.PygGraphPropPredDataset.process
+    
+    def patched_process(self):
+        # Fix NaN values in meta_info before processing
+        if hasattr(self, 'meta_info'):
+            for key in ['additional node files', 'additional edge files']:
+                if key in self.meta_info:
+                    value = self.meta_info[key]
+                    # Replace NaN with empty string
+                    if isinstance(value, float) and value != value:  # Check for NaN
+                        self.meta_info[key] = ''
+        return original_process(self)
+    
+    ogb_pyg.PygGraphPropPredDataset.process = patched_process
+
+# Apply patch
+try:
+    patch_ogb_metadata()
+except:
+    pass  # If patching fails, continue anyway
+
 
 def export_ogb_dataset(dataset_name: str, data_dir: Path, output_dir: Path):
     """
@@ -42,15 +72,46 @@ def export_ogb_dataset(dataset_name: str, data_dir: Path, output_dir: Path):
     try:
         # Load dataset
         print(f"Loading dataset from {data_dir}...")
-        dataset = PygGraphPropPredDataset(root=str(data_dir), name=dataset_name)
+        
+        # Note: OGB may prompt for dataset updates
+        # If prompted, type 'y' to update or 'N' to use cached version
+        try:
+            dataset = PygGraphPropPredDataset(root=str(data_dir), name=dataset_name)
+        except AttributeError as e:
+            if "'float' object has no attribute 'split'" in str(e):
+                print("\n⚠️  OGB metadata bug detected!")
+                print("   This is a known issue with OGB when metadata contains NaN values.")
+                print("\n   Trying workaround: clearing cache and re-downloading...")
+                
+                # Clear cache
+                import shutil
+                cache_dir = data_dir / dataset_name.replace('-', '_')
+                if cache_dir.exists():
+                    shutil.rmtree(cache_dir)
+                    print(f"   Deleted: {cache_dir}")
+                
+                # Try again
+                print("   Re-downloading dataset...")
+                dataset = PygGraphPropPredDataset(root=str(data_dir), name=dataset_name)
+            else:
+                raise
+        
         print(f"✓ Loaded {len(dataset)} graphs")
         
         # Get split indices
         split_idx = dataset.get_idx_split()
         print(f"  Train: {len(split_idx['train'])}, Valid: {len(split_idx['valid'])}, Test: {len(split_idx['test'])}")
         
+        # Check if dataset has SMILES
+        if not hasattr(dataset, 'smiles'):
+            print(f"\n✗ Error: Dataset {dataset_name} does not have SMILES attribute")
+            print("   This dataset may not be a molecular dataset.")
+            return False
+        
+        print(f"✓ Dataset has {len(dataset.smiles)} SMILES strings")
+        
         # Extract SMILES and labels
-        print("Extracting SMILES and labels...")
+        print("\nExtracting SMILES and labels...")
         smiles_list = []
         labels_list = []
         split_list = []
@@ -60,39 +121,52 @@ def export_ogb_dataset(dataset_name: str, data_dir: Path, output_dir: Path):
             for idx in tqdm(indices, desc=f"  {split_name:5s}"):
                 idx = int(idx)
                 
-                # Get SMILES
+                # Get SMILES from dataset.smiles list
                 try:
                     smiles = dataset.smiles[idx]
-                except:
-                    data = dataset[idx]
-                    if hasattr(data, 'smiles'):
-                        smiles = data.smiles
-                    elif hasattr(data, 'smile'):
-                        smiles = data.smile
-                    else:
-                        print(f"    Warning: No SMILES for idx {idx}, skipping...")
+                    if not smiles or smiles == '':
+                        print(f"    Warning: Empty SMILES at idx {idx}, skipping...")
                         continue
+                except IndexError:
+                    print(f"    Warning: Index {idx} out of range for SMILES list, skipping...")
+                    continue
+                except Exception as e:
+                    print(f"    Warning: Could not get SMILES for idx {idx}: {e}, skipping...")
+                    continue
                 
-                # Get label
-                data = dataset[idx]
-                if hasattr(data, 'y'):
-                    label = data.y.squeeze()
-                    # Handle multi-dimensional labels
-                    if label.dim() > 0:
-                        if label.numel() == 1:
-                            label = float(label.item())
+                # Get label from data object
+                try:
+                    data = dataset[idx]
+                    if hasattr(data, 'y'):
+                        label = data.y.squeeze()
+                        # Handle multi-dimensional labels
+                        if label.dim() > 0:
+                            if label.numel() == 1:
+                                label = float(label.item())
+                            else:
+                                # Multi-task: convert to list
+                                label = label.cpu().numpy().tolist()
                         else:
-                            # Multi-task: convert to list
-                            label = label.cpu().numpy().tolist()
+                            label = float(label.item())
                     else:
-                        label = float(label.item())
-                else:
-                    print(f"    Warning: No label for idx {idx}, skipping...")
+                        print(f"    Warning: No label for idx {idx}, skipping...")
+                        continue
+                except Exception as e:
+                    print(f"    Warning: Could not get label for idx {idx}: {e}, skipping...")
                     continue
                 
                 smiles_list.append(smiles)
                 labels_list.append(label)
                 split_list.append(split_name)
+        
+        # Check if we got any data
+        if len(smiles_list) == 0:
+            print("\n✗ Error: No SMILES extracted from dataset!")
+            print("   Possible issues:")
+            print("     • Dataset SMILES attribute is empty")
+            print("     • All indices failed to extract")
+            print("     • Dataset structure is unexpected")
+            return False
         
         # Create DataFrame
         df = pd.DataFrame({
@@ -110,17 +184,18 @@ def export_ogb_dataset(dataset_name: str, data_dir: Path, output_dir: Path):
         print(f"  Split distribution:")
         print(f"{df['split'].value_counts().to_string(header=False)}")
         
-        # Print label info
-        if isinstance(df['label'].iloc[0], list):
-            num_tasks = len(df['label'].iloc[0])
-            print(f"  Multi-task dataset with {num_tasks} tasks")
-        else:
-            print(f"  Label statistics:")
-            print(f"    Count: {df['label'].count()}")
-            print(f"    Unique: {df['label'].nunique()}")
-            if df['label'].nunique() <= 10:
-                print(f"  Label distribution:")
-                print(f"{df['label'].value_counts().sort_index().to_string()}")
+        # Print label info (only if we have data)
+        if len(df) > 0:
+            if isinstance(df['label'].iloc[0], list):
+                num_tasks = len(df['label'].iloc[0])
+                print(f"  Multi-task dataset with {num_tasks} tasks")
+            else:
+                print(f"  Label statistics:")
+                print(f"    Count: {df['label'].count()}")
+                print(f"    Unique: {df['label'].nunique()}")
+                if df['label'].nunique() <= 10:
+                    print(f"  Label distribution:")
+                    print(f"{df['label'].value_counts().sort_index().to_string()}")
         
         return True
         
