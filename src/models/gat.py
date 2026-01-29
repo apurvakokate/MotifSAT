@@ -4,9 +4,9 @@ import torch.nn as nn
 from torch.nn import Linear
 import torch.nn.functional as F
 from torch_geometric.nn import global_add_pool
-from ogb.graphproppred.mol_encoder import AtomEncoder, BondEncoder
+from ogb.graphproppred.mol_encoder import AtomEncoder
 
-from torch_geometric.nn import GATConv
+from .conv_layers import GATConvWithAtten
 
 
 class GAT(nn.Module):
@@ -15,43 +15,31 @@ class GAT(nn.Module):
 
         self.n_layers = model_config['n_layers']
         hidden_size = model_config['hidden_size']
-        self.edge_attr_dim = edge_attr_dim
         self.dropout_p = model_config['dropout_p']
-        self.use_edge_attr = model_config.get('use_edge_attr', True)
         self.task_type = model_config.get('task_type', 'classification')
 
         if model_config.get('atom_encoder', False):
             self.node_encoder = AtomEncoder(emb_dim=hidden_size)
-            if edge_attr_dim != 0 and self.use_edge_attr:
-                self.edge_encoder = BondEncoder(emb_dim=hidden_size)
         else:
             self.node_encoder = Linear(x_dim, hidden_size)
-            if edge_attr_dim != 0 and self.use_edge_attr:
-                self.edge_encoder = Linear(edge_attr_dim, hidden_size)
 
         self.convs = nn.ModuleList()
         self.relu = nn.ReLU()
         self.pool = global_add_pool
 
         for _ in range(self.n_layers):
-            if edge_attr_dim != 0 and self.use_edge_attr:
-                self.convs.append(GATConv(hidden_size, hidden_size, heads=4, concat=False))
-            else:
-                self.convs.append(GATConv(GIN.MLP(hidden_size, hidden_size)))
+            self.convs.append(GATConvWithAtten(hidden_size, hidden_size, heads=4, concat=False))
 
         if self.task_type == 'regression':
             self.fc_out = nn.Sequential(nn.Linear(hidden_size, 1))
         else:
             self.fc_out = nn.Sequential(nn.Linear(hidden_size, 1 if num_class == 2 and not multi_label else num_class))
 
-
     def forward(self, x, edge_index, batch, edge_attr=None, edge_atten=None):
         x = self.node_encoder(x)
-        if edge_attr is not None and self.use_edge_attr:
-            edge_attr = self.edge_encoder(edge_attr.float())
 
         for i in range(self.n_layers):
-            x = self.convs[i](x, edge_index, edge_attr=edge_attr)
+            x = self.convs[i](x, edge_index, edge_atten=edge_atten)
             x = self.relu(x)
             x = F.dropout(x, p=self.dropout_p, training=self.training)
         return self.fc_out(self.pool(x, batch))
@@ -67,11 +55,9 @@ class GAT(nn.Module):
 
     def get_emb(self, x, edge_index, batch, edge_attr=None, edge_atten=None):
         x = self.node_encoder(x)
-        if edge_attr is not None and self.use_edge_attr:
-            edge_attr = self.edge_encoder(edge_attr.float())
 
         for i in range(self.n_layers):
-            x = self.convs[i](x, edge_index, edge_attr=edge_attr)
+            x = self.convs[i](x, edge_index, edge_atten=edge_atten)
             x = self.relu(x)
             x = F.dropout(x, p=self.dropout_p, training=self.training)
         return x

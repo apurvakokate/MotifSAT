@@ -2,12 +2,14 @@ from typing import Union, Optional, List, Dict
 from torch_geometric.typing import OptPairTensor, Adj, OptTensor, Size, PairTensor
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor
 from torch_geometric.nn import GINEConv as BaseGINEConv, GINConv as BaseGINConv, LEConv as BaseLEConv
+from torch_geometric.nn import GCNConv as BaseGCNConv, GATConv as BaseGATConv, SAGEConv as BaseSAGEConv
 from torch.nn import Sequential, Linear, ReLU
 from torch_geometric.nn.conv import MessagePassing
 from torch_geometric.nn.inits import reset
-from torch_geometric.utils import degree
+from torch_geometric.utils import degree, softmax
 from torch_scatter import scatter
 
 
@@ -87,6 +89,71 @@ class LEConv(BaseLEConv):
             return m * edge_atten
         else:
             return m
+
+
+class GCNConvWithAtten(BaseGCNConv):
+    """
+    Custom GCNConv that supports edge_atten for GSAT.
+    Uses GCN's native edge_weight parameter to apply edge attention.
+    """
+    def forward(self, x: Tensor, edge_index: Adj, edge_attr: OptTensor = None,
+                edge_atten: OptTensor = None, size: Size = None) -> Tensor:
+        # GCNConv natively supports edge_weight - we use edge_atten as edge_weight
+        # edge_atten is shape [num_edges, 1], edge_weight expects [num_edges]
+        edge_weight = edge_atten.squeeze(-1) if edge_atten is not None else None
+        return super().forward(x, edge_index, edge_weight=edge_weight)
+
+
+class GATConvWithAtten(BaseGATConv):
+    """
+    Custom GATConv that combines internal GAT attention with external edge_atten for GSAT.
+    The external edge_atten multiplies the attention-weighted messages.
+    """
+    def forward(self, x: Union[Tensor, OptPairTensor], edge_index: Adj,
+                edge_attr: OptTensor = None, edge_atten: OptTensor = None,
+                size: Size = None, return_attention_weights: bool = None):
+        # Store edge_atten for use in message function
+        self._edge_atten = edge_atten
+        out = super().forward(x, edge_index, edge_attr=None, size=size,
+                              return_attention_weights=return_attention_weights)
+        self._edge_atten = None
+        return out
+
+    def message(self, x_j: Tensor, alpha_j: Tensor, alpha_i: OptTensor,
+                index: Tensor, ptr: OptTensor, size_i: Optional[int]) -> Tensor:
+        # Standard GAT attention computation
+        alpha = alpha_j if alpha_i is None else alpha_j + alpha_i
+        alpha = F.leaky_relu(alpha, self.negative_slope)
+        alpha = softmax(alpha, index, ptr, size_i)
+        alpha = F.dropout(alpha, p=self.dropout, training=self.training)
+        out = x_j * alpha.unsqueeze(-1)
+
+        # Apply external edge attention from GSAT
+        if self._edge_atten is not None:
+            out = out * self._edge_atten
+
+        return out
+
+
+class SAGEConvWithAtten(BaseSAGEConv):
+    """
+    Custom SAGEConv that supports edge_atten for GSAT.
+    Multiplies messages by edge_atten before aggregation.
+    """
+    def forward(self, x: Union[Tensor, OptPairTensor], edge_index: Adj,
+                edge_attr: OptTensor = None, edge_atten: OptTensor = None,
+                size: Size = None) -> Tensor:
+        # Store edge_atten for use in message function
+        self._edge_atten = edge_atten
+        out = super().forward(x, edge_index, size=size)
+        self._edge_atten = None
+        return out
+
+    def message(self, x_j: Tensor) -> Tensor:
+        # Apply edge attention if provided
+        if self._edge_atten is not None:
+            return x_j * self._edge_atten
+        return x_j
 
 
 # https://github.com/lukecavabarrett/pna/blob/master/models/pytorch_geometric/pna.py
