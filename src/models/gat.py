@@ -30,7 +30,7 @@ class GAT(nn.Module):
         for _ in range(self.n_layers):
             # add_self_loops=False to prevent edge_index modification that causes size mismatches
             # Self-loops change edge count from E to E+N, which conflicts with external edge_atten
-            self.convs.append(GATConvWithAtten(hidden_size, hidden_size, add_self_loops=False))
+            self.convs.append(GATConvWithAtten(hidden_size, hidden_size, heads=1, concat=False, add_self_loops=False))
 
         if self.task_type == 'regression':
             self.fc_out = nn.Sequential(nn.Linear(hidden_size, 1))
