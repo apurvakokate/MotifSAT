@@ -6,8 +6,12 @@ This script creates a grid of hyperparameter combinations to systematically
 test the effect of loss coefficients and weight distribution parameters on
 model and explainer performance.
 
+Base configuration is loaded from configs/total.config.yml, which contains
+all default values for the GSAT training pipeline.
+
 Usage:
-    python generate_tuning_configs.py --output_dir configs/tuning --experiment_name baseline
+    python generate_tuning_configs.py --experiment baseline --output_dir configs/tuning
+    python generate_tuning_configs.py --experiment baseline --base_config configs/total.config.yml
 """
 
 import argparse
@@ -16,22 +20,93 @@ import yaml
 from pathlib import Path
 import json
 from datetime import datetime
-from pathlib import Path
+from copy import deepcopy
 import os
 
 
-def generate_config_grid(base_config, param_grid):
+# Default path to the base configuration file
+DEFAULT_BASE_CONFIG_PATH = Path(__file__).parent / 'configs' / 'total.config.yml'
+
+
+def load_base_config(config_path=None):
+    """
+    Load the base configuration from total.config.yml.
+    
+    Args:
+        config_path: Path to the base config file. If None, uses default path.
+        
+    Returns:
+        Dictionary containing the GSAT_config section with all default values.
+    """
+    if config_path is None:
+        config_path = DEFAULT_BASE_CONFIG_PATH
+    
+    config_path = Path(config_path)
+    
+    if not config_path.exists():
+        raise FileNotFoundError(
+            f"Base config file not found: {config_path}\n"
+            f"Please ensure total.config.yml exists in configs/ directory."
+        )
+    
+    with open(config_path, 'r') as f:
+        full_config = yaml.safe_load(f)
+    
+    # Extract GSAT_config section as the base for tuning
+    gsat_config = full_config.get('GSAT_config', {})
+    
+    # Extract tunable parameters with their defaults
+    base_tuning_config = {
+        # Loss coefficients
+        'pred_loss_coef': gsat_config.get('pred_loss_coef', 1.0),
+        'info_loss_coef': gsat_config.get('info_loss_coef', 1.0),
+        'motif_loss_coef': gsat_config.get('motif_loss_coef', 2.0),
+        
+        # Weight distribution parameters (r parameter)
+        'init_r': gsat_config.get('init_r', 0.9),
+        'final_r': gsat_config.get('final_r', 0.5),
+        'decay_r': gsat_config.get('decay_r', 0.1),
+        'decay_interval': gsat_config.get('decay_interval', 10),
+        
+        # Training parameters (can also be tuned)
+        'epochs': gsat_config.get('epochs', 100),
+        'lr': gsat_config.get('lr', 1.0e-3),
+        'weight_decay': gsat_config.get('weight_decay', 0),
+        
+        # Optional parameters
+        'fix_r': gsat_config.get('fix_r', False),
+        'from_scratch': gsat_config.get('from_scratch', True),
+    }
+    
+    print(f"[INFO] Loaded base config from: {config_path}")
+    print(f"[INFO] Base GSAT config values:")
+    for key, value in base_tuning_config.items():
+        print(f"       {key}: {value}")
+    
+    return base_tuning_config
+
+
+def generate_config_grid(base_config, param_grid, experiment_overrides=None):
     """
     Generate all combinations of parameters from the grid.
     
     Args:
-        base_config: Base configuration dictionary
-        param_grid: Dictionary of parameter names to lists of values
+        base_config: Base configuration dictionary (from total.config.yml)
+        param_grid: Dictionary of parameter names to lists of values to tune
+        experiment_overrides: Optional dict of fixed overrides for this experiment
+                             (applied before param_grid variations)
         
     Returns:
         List of configuration dictionaries
     """
     configs = []
+    
+    # Start with base config
+    working_base = deepcopy(base_config)
+    
+    # Apply experiment-specific overrides (fixed values for this experiment type)
+    if experiment_overrides:
+        working_base.update(experiment_overrides)
     
     # Get all parameter names and their values
     param_names = list(param_grid.keys())
@@ -39,10 +114,10 @@ def generate_config_grid(base_config, param_grid):
     
     # Generate all combinations
     for idx, values in enumerate(itertools.product(*param_values)):
-        config = base_config.copy()
+        config = deepcopy(working_base)
         config['tuning_id'] = f'config_{idx:04d}'
         
-        # Update with current parameter values
+        # Update with current parameter values from grid
         param_dict = dict(zip(param_names, values))
         config.update(param_dict)
         
@@ -51,40 +126,34 @@ def generate_config_grid(base_config, param_grid):
     return configs
 
 
-def create_baseline_experiment():
+def create_baseline_experiment(base_config):
     """
     Create baseline experiment: test with and without motif loss.
     
     Research Question: Does adding motif_consistency_loss improve performance?
+    
+    Uses defaults from total.config.yml, only varies motif_loss_coef.
     """
-    base_config = {
-        'pred_loss_coef': 1.0,
-        'info_loss_coef': 1.0,
-        'init_r': 0.7,
-        'final_r': 0.3,
-        'decay_r': 0.2,
-        'decay_interval': 5,
-    }
+    # No overrides - use base config values for everything except what we're tuning
+    experiment_overrides = {}
     
     param_grid = {
         'motif_loss_coef': [0.0, 0.5, 1.0, 2.0],  # Test without and with motif loss
     }
     
-    return generate_config_grid(base_config, param_grid)
+    return generate_config_grid(base_config, param_grid, experiment_overrides)
 
 
-def create_loss_coefficient_tuning():
+def create_loss_coefficient_tuning(base_config):
     """
     Tune loss coefficients while keeping weight distribution fixed.
     
     Research Question: What are the optimal loss coefficient ratios?
+    
+    Uses weight distribution parameters from total.config.yml.
     """
-    base_config = {
-        'init_r': 0.9,
-        'final_r': 0.1,
-        'decay_r': 0.1,
-        'decay_interval': 10,
-    }
+    # No overrides - weight distribution comes from base config
+    experiment_overrides = {}
     
     param_grid = {
         'pred_loss_coef': [0.5, 1.0, 2.0],
@@ -92,20 +161,19 @@ def create_loss_coefficient_tuning():
         'motif_loss_coef': [0.0, 0.5, 1.0, 2.0, 5.0],
     }
     
-    return generate_config_grid(base_config, param_grid)
+    return generate_config_grid(base_config, param_grid, experiment_overrides)
 
 
-def create_weight_distribution_tuning():
+def create_weight_distribution_tuning(base_config):
     """
     Tune weight distribution parameters while keeping loss coefficients fixed.
     
     Research Question: How do weight distribution parameters affect polarization?
+    
+    Uses loss coefficients from total.config.yml.
     """
-    base_config = {
-        'pred_loss_coef': 1.0,
-        'info_loss_coef': 1.0,
-        'motif_loss_coef': 1.0,
-    }
+    # No overrides - loss coefficients come from base config
+    experiment_overrides = {}
     
     param_grid = {
         'init_r': [0.7, 0.9],  # Starting distribution
@@ -114,16 +182,19 @@ def create_weight_distribution_tuning():
         'decay_interval': [5, 10, 15],  # Decay frequency
     }
     
-    return generate_config_grid(base_config, param_grid)
+    return generate_config_grid(base_config, param_grid, experiment_overrides)
 
 
-def create_combined_tuning():
+def create_combined_tuning(base_config):
     """
     Fine-grained tuning of both loss coefficients and weight parameters.
     
     Research Question: What is the optimal combination of all hyperparameters?
+    
+    Tunes all major hyperparameters simultaneously.
     """
-    base_config = {}
+    # No overrides - tune everything
+    experiment_overrides = {}
     
     param_grid = {
         'pred_loss_coef': [0.5, 1.0],
@@ -135,29 +206,43 @@ def create_combined_tuning():
         'decay_interval': [10],
     }
     
-    return generate_config_grid(base_config, param_grid)
+    return generate_config_grid(base_config, param_grid, experiment_overrides)
 
 
-def create_motif_loss_sensitivity():
+def create_motif_loss_sensitivity(base_config):
     """
     Fine-grained sensitivity analysis of motif loss coefficient.
     
     Research Question: How sensitive is performance to motif_loss_coef?
+    
+    Uses all other parameters from total.config.yml.
     """
-    base_config = {
-        'pred_loss_coef': 1.0,
-        'info_loss_coef': 1.0,
-        'init_r': 0.9,
-        'final_r': 0.1,
-        'decay_r': 0.1,
-        'decay_interval': 10,
-    }
+    # No overrides - use base config for everything except motif_loss_coef
+    experiment_overrides = {}
     
     param_grid = {
         'motif_loss_coef': [0.0, 0.1, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 5.0, 10.0],
     }
     
-    return generate_config_grid(base_config, param_grid)
+    return generate_config_grid(base_config, param_grid, experiment_overrides)
+
+
+def create_learning_rate_tuning(base_config):
+    """
+    Tune learning rate and related training parameters.
+    
+    Research Question: What is the optimal learning rate for GSAT training?
+    
+    Uses loss coefficients and weight distribution from total.config.yml.
+    """
+    experiment_overrides = {}
+    
+    param_grid = {
+        'lr': [1e-4, 5e-4, 1e-3, 5e-3],
+        'weight_decay': [0, 1e-5, 1e-4],
+    }
+    
+    return generate_config_grid(base_config, param_grid, experiment_overrides)
 
 
 EXPERIMENT_TYPES = {
@@ -181,10 +266,14 @@ EXPERIMENT_TYPES = {
         'description': 'Sensitivity analysis of motif_loss_coef (11 configs)',
         'generator': create_motif_loss_sensitivity,
     },
+    'lr_tuning': {
+        'description': 'Tune learning rate and weight decay (4×3 = 12 configs)',
+        'generator': create_learning_rate_tuning,
+    },
 }
 
 
-def save_configs(configs, output_dir, experiment_name):
+def save_configs(configs, output_dir, experiment_name, base_config_path=None):
     """
     Save configurations to files and create a manifest.
     
@@ -192,6 +281,7 @@ def save_configs(configs, output_dir, experiment_name):
         configs: List of configuration dictionaries
         output_dir: Directory to save configs
         experiment_name: Name of the experiment
+        base_config_path: Path to the base config file used (for documentation)
     """
     output_dir = Path(output_dir)
     experiment_dir = output_dir / experiment_name
@@ -201,6 +291,7 @@ def save_configs(configs, output_dir, experiment_name):
         'experiment_name': experiment_name,
         'num_configs': len(configs),
         'created_at': datetime.now().isoformat(),
+        'base_config': str(base_config_path or DEFAULT_BASE_CONFIG_PATH),
         'configs': []
     }
     
@@ -437,12 +528,21 @@ def main():
         epilog="""
 Available experiment types:
 """ + '\n'.join(f"  {name:15s} - {info['description']}" 
-                for name, info in EXPERIMENT_TYPES.items())
+                for name, info in EXPERIMENT_TYPES.items()) + """
+
+Base Configuration:
+  All experiments use configs/total.config.yml as the base configuration.
+  This ensures consistent defaults across all tuning experiments.
+  You can override the base config path with --base_config.
+"""
     )
     
     parser.add_argument('--experiment', type=str, required=True,
                         choices=list(EXPERIMENT_TYPES.keys()),
                         help='Type of experiment to generate')
+    
+    parser.add_argument('--base_config', type=str, default=None,
+                        help='Path to base configuration file (default: configs/total.config.yml)')
     
     parser.add_argument('--output_dir', type=str, default='configs/tuning',
                         help='Directory to save configuration files')
@@ -475,15 +575,31 @@ Available experiment types:
     
     args = parser.parse_args()
     
+    # Load base configuration from total.config.yml
+    print("\n" + "="*80)
+    print("LOADING BASE CONFIGURATION")
+    print("="*80)
+    base_config = load_base_config(args.base_config)
+    
     # Generate configurations
-    print(f"\nGenerating {args.experiment} experiment configurations...")
+    print("\n" + "="*80)
+    print("GENERATING EXPERIMENT CONFIGURATIONS")
+    print("="*80)
+    print(f"Experiment type: {args.experiment}")
     exp_info = EXPERIMENT_TYPES[args.experiment]
     print(f"Description: {exp_info['description']}")
     
-    configs = exp_info['generator']()
+    # Pass base_config to the generator function
+    configs = exp_info['generator'](base_config)
     
     # Save configurations
     manifest = save_configs(configs, args.output_dir, args.experiment)
+    
+    # Also save a copy of the base config used for reference
+    base_config_copy_path = Path(args.output_dir) / args.experiment / 'base_config_used.yaml'
+    with open(base_config_copy_path, 'w') as f:
+        yaml.safe_dump(base_config, f, sort_keys=False)
+    print(f"  - Base config reference: {base_config_copy_path}")
     
     # Create run scripts if requested
     if args.create_run_scripts:
@@ -500,6 +616,7 @@ Available experiment types:
     print("SUMMARY")
     print("="*80)
     print(f"Experiment: {args.experiment}")
+    print(f"Base config: {args.base_config or str(DEFAULT_BASE_CONFIG_PATH)}")
     print(f"Configurations: {len(configs)}")
     print(f"Datasets: {len(args.datasets)} - {', '.join(args.datasets)}")
     print(f"Models: {len(args.models)} - {', '.join(args.models)}")
