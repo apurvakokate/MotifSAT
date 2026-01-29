@@ -111,6 +111,8 @@ class GATConvWithAtten(BaseGATConv):
     
     NOTE: When using this with GSAT, initialize with add_self_loops=False to prevent
     PyG from modifying edge_index internally (which would cause size mismatches with edge_atten).
+    
+    Compatible with PyG 2.x+ where attention is computed via edge_updater.
     """
     def forward(self, x: Union[Tensor, OptPairTensor], edge_index: Adj,
                 edge_attr: OptTensor = None, edge_atten: OptTensor = None,
@@ -123,13 +125,9 @@ class GATConvWithAtten(BaseGATConv):
         self._edge_atten = None
         return out
 
-    def message(self, x_j: Tensor, alpha_j: Tensor, alpha_i: OptTensor,
-                index: Tensor, ptr: OptTensor, size_i: Optional[int]) -> Tensor:
-        # Standard GAT attention computation
-        alpha = alpha_j if alpha_i is None else alpha_j + alpha_i
-        alpha = F.leaky_relu(alpha, self.negative_slope)
-        alpha = softmax(alpha, index, ptr, size_i)
-        alpha = F.dropout(alpha, p=self.dropout, training=self.training)
+    def message(self, x_j: Tensor, alpha: Tensor) -> Tensor:
+        # In PyG 2.x+, alpha is already edge-level (computed by edge_updater)
+        # Shape: x_j [num_edges, heads, out_channels], alpha [num_edges, heads]
         out = x_j * alpha.unsqueeze(-1)
 
         # Apply external edge attention from GSAT
