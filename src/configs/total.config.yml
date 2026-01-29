@@ -46,7 +46,7 @@ model_config:
                                      #   - false: use Linear layer for node/edge encoding
                                      #   Source: models/gin.py line 23, models/gcn.py line 21
   
-  use_edge_attr: true                # [DEFAULT: true] Whether to use edge attributes
+  use_edge_attr: false                # [DEFAULT: true] Whether to use edge attributes
                                      #   Source: models/gin.py line 20, models/pna.py line 22
   
   task_type: classification          # [DEFAULT: 'classification'] Task type
