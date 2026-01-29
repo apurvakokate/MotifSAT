@@ -108,12 +108,16 @@ class GATConvWithAtten(BaseGATConv):
     """
     Custom GATConv that combines internal GAT attention with external edge_atten for GSAT.
     The external edge_atten multiplies the attention-weighted messages.
+    
+    NOTE: When using this with GSAT, initialize with add_self_loops=False to prevent
+    PyG from modifying edge_index internally (which would cause size mismatches with edge_atten).
     """
     def forward(self, x: Union[Tensor, OptPairTensor], edge_index: Adj,
                 edge_attr: OptTensor = None, edge_atten: OptTensor = None,
                 size: Size = None, return_attention_weights: bool = None):
         # Store edge_atten for use in message function
         self._edge_atten = edge_atten
+        
         out = super().forward(x, edge_index, edge_attr=None, size=size,
                               return_attention_weights=return_attention_weights)
         self._edge_atten = None
