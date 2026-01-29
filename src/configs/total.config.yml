@@ -1,0 +1,168 @@
+
+# =============================================================================
+# DATA CONFIG (data_config section)
+# =============================================================================
+data_config:
+  batch_size: 128                    # [REQUIRED] Batch size for data loaders
+  
+  splits:                            # [DEFAULT: None] Train/valid/test split ratios
+    train: 0.8                       #   - If None, uses dataset's default splits
+    valid: 0.1                       #   - Only used for datasets that don't have predefined splits
+    test: 0.1
+  
+  mutag_x: true                      # [DEFAULT: false] Special handling for mutag dataset
+                                     #   - When true: uses edge_label > 0 for test set selection
+
+
+# =============================================================================
+# MODEL CONFIG (model_config section)
+# =============================================================================
+model_config:
+  # --- Core Model Parameters ---
+  model_name: GIN                    # [REQUIRED] Model architecture
+                                     #   Options: 'GIN', 'GCN', 'GAT', 'SAGE', 'PNA', 'SPMotifNet'
+  
+  hidden_size: 64                    # [REQUIRED] Hidden dimension size for all layers
+  
+  n_layers: 2                        # [REQUIRED] Number of GNN convolutional layers
+  
+  dropout_p: 0.3                     # [REQUIRED] Dropout probability during training
+  
+  # --- Pretraining Parameters ---
+  pretrain_lr: 1.0e-3                # [REQUIRED] Learning rate for pretraining classifier
+  
+  pretrain_epochs: 100               # [REQUIRED] Number of epochs for pretraining
+  
+  pretrain_wd: 0                     # [DEFAULT: 0] Weight decay for pretraining optimizer
+                                     #   Source: pretrain_clf.py line 47
+  
+  pretrain_scheduler: {}             # [DEFAULT: {}] Scheduler config for pretraining
+                                     #   If non-empty, uses ReduceLROnPlateau with these params
+                                     #   Example: {patience: 10, factor: 0.5}
+  
+  # --- Feature Encoding ---
+  atom_encoder: false                # [DEFAULT: false] Use OGB AtomEncoder/BondEncoder
+                                     #   - true: for OGB molecular datasets (ogbg_molhiv, etc.)
+                                     #   - false: use Linear layer for node/edge encoding
+                                     #   Source: models/gin.py line 23, models/gcn.py line 21
+  
+  use_edge_attr: true                # [DEFAULT: true] Whether to use edge attributes
+                                     #   Source: models/gin.py line 20, models/pna.py line 22
+  
+  task_type: classification          # [DEFAULT: 'classification'] Task type
+                                     #   Options: 'classification', 'regression'
+                                     #   Source: models/gin.py line 21
+  
+  # --- PNA-Specific Parameters ---
+  aggregators:                       # [PNA-ONLY] [REQUIRED for PNA] Aggregation functions
+    - mean                           #   Source: models/pna.py line 29
+    - min
+    - max
+    - std
+    - sum
+  
+  scalers: false                     # [PNA-ONLY] [REQUIRED for PNA] Whether to use scalers
+                                     #   - true: ['identity', 'amplification', 'attenuation']
+                                     #   - false: ['identity'] only
+                                     #   Source: models/pna.py line 30
+  
+  deg: null                          # [RUNTIME] Degree histogram computed from training data
+                                     #   Source: run_gsat.py line 1167, get_data_loaders.py line 159
+
+
+# =============================================================================
+# SHARED CONFIG (shared_config section)
+# =============================================================================
+shared_config:
+  learn_edge_att: false              # [REQUIRED] Whether to learn edge attention directly
+                                     #   - true: extractor outputs edge-level attention
+                                     #   - false: extractor outputs node-level attention,
+                                     #            then lifted to edges via src * dst
+                                     #   Source: run_gsat.py line 206, 365-373
+  
+  precision_k: 5                     # [REQUIRED] k for precision@k metric
+                                     #   Source: run_gsat.py line 207
+  
+  num_viz_samples: 16                # [REQUIRED] Number of samples to visualize per class
+                                     #   Source: run_gsat.py line 208
+  
+  viz_interval: 10                   # [REQUIRED] Epoch interval for visualization
+                                     #   Source: run_gsat.py line 209
+  
+  viz_norm_att: true                 # [REQUIRED] Whether to normalize attention for visualization
+                                     #   Source: run_gsat.py line 210
+  
+  extractor_dropout_p: 0.5           # [REQUIRED] Dropout probability in ExtractorMLP
+                                     #   Source: run_gsat.py line 943
+
+
+# =============================================================================
+# GSAT CONFIG (GSAT_config section)
+# =============================================================================
+GSAT_config:
+  method_name: 'GSAT'                # [REQUIRED] Method name (always 'GSAT')
+                                     #   Source: run_gsat.py line 199
+  
+  # --- Loss Coefficients ---
+  pred_loss_coef: 1                  # [REQUIRED] Weight for prediction (classification) loss
+                                     #   Source: run_gsat.py line 213
+  
+  info_loss_coef: 1                  # [REQUIRED] Weight for information bottleneck loss
+                                     #   Source: run_gsat.py line 214
+  
+  motif_loss_coef: 2                 # [REQUIRED] Weight for motif consistency loss
+                                     #   NOTE: Can be overridden to 0.0 via --use_motif_loss=false
+                                     #   Source: run_gsat.py line 215, 1161
+  
+  # --- Training Parameters ---
+  epochs: 100                        # [REQUIRED] Number of GSAT training epochs
+                                     #   Source: run_gsat.py line 212
+  
+  lr: 1.0e-3                         # [REQUIRED] Learning rate for GSAT training
+                                     #   Source: run_gsat.py line 1183
+  
+  weight_decay: 0                    # [DEFAULT: 0] Weight decay for GSAT optimizer
+                                     #   Source: run_gsat.py line 1183
+  
+  from_scratch: true                 # [REQUIRED] Whether to train from scratch
+                                     #   - true: train classifier and attention together
+                                     #   - false: pretrain classifier first, then add attention
+                                     #   Source: run_gsat.py line 1173
+  
+  scheduler: {}                      # [DEFAULT: {}] Learning rate scheduler config
+                                     #   If non-empty, uses ReduceLROnPlateau(mode='max', ...)
+                                     #   Example: {patience: 10, factor: 0.5, min_lr: 1e-5}
+                                     #   Source: run_gsat.py line 1186-1187
+  
+  # --- Attention Weight Distribution Parameters (r parameter) ---
+  # The 'r' parameter controls the prior distribution in the information loss.
+  # It decays from init_r to final_r over training.
+  
+  fix_r: false                       # [DEFAULT: None/false] Fixed r value (disables decay)
+                                     #   - If set to a float, uses that value throughout training
+                                     #   - If false/None, r decays from init_r to final_r
+                                     #   Source: run_gsat.py line 217
+  
+  init_r: 0.9                        # [DEFAULT: 0.9] Initial r value (at epoch 0)
+                                     #   Higher = more uniform attention initially
+                                     #   Source: run_gsat.py line 221
+  
+  final_r: 0.5                       # [DEFAULT: 0.1] Final r value (target)
+                                     #   Lower = more polarized attention (closer to 0 or 1)
+                                     #   Source: run_gsat.py line 220
+  
+  decay_interval: 10                 # [DEFAULT: None] Epochs between r decay steps
+                                     #   r decreases by decay_r every decay_interval epochs
+                                     #   Source: run_gsat.py line 218
+  
+  decay_r: 0.1                       # [DEFAULT: None] Amount to decrease r each interval
+                                     #   Source: run_gsat.py line 219
+  
+  # --- Tuning/Experiment Tracking Parameters ---
+  tuning_id: default                 # [TUNING] [DEFAULT: 'default'] Unique ID for this config
+                                     #   Used in output directory path
+                                     #   Source: run_gsat.py line 229
+  
+  experiment_name: default_experiment # [TUNING] [DEFAULT: 'default_experiment'] Experiment name
+                                     #   Used in output directory path
+                                     #   Source: run_gsat.py line 230
