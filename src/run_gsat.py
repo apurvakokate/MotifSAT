@@ -45,6 +45,8 @@ def motif_consistency_loss(att, nodes_to_motifs):
     motif_count = 0
 
     for mid in unique_motifs:
+        if mid == -1 or mid is None:
+            raise ExceptionName("Unknown motif found")
         mask = (nodes_to_motifs == mid)
         num_nodes = mask.sum()
         if num_nodes <= 1:
@@ -1071,7 +1073,10 @@ def calculate_explainer_performance(model, extractor, data_loader, device, epoch
     return metrics
 
 
-def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_name, method_name, device, random_state,  fold, task_type='classification', use_motif_loss = False):
+def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_name, method_name, device, random_state,  fold, task_type='classification'):
+    
+    path = "/nfs/stak/users/kokatea/hpc-share/ChemIntuit/MOSE-GNN/DICTIONARY"
+    
     # Build the deterministic seed_dir path to check for artifacts
     gsat_config = local_config.get('GSAT_config', {})
     tuning_id = gsat_config.get('tuning_id', 'default')
@@ -1158,11 +1163,11 @@ def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_nam
     
     method_config['model_name'] = model_name
     
-    if not use_motif_loss:
-        method_config['motif_loss_coef'] = 0.0
+    # if not use_motif_loss:
+    #     method_config['motif_loss_coef'] = 0.0
 
     batch_size, splits = data_config['batch_size'], data_config.get('splits', None)
-    loaders, test_set, x_dim, edge_attr_dim, num_class, aux_info, datasets, masked_data_features = get_data_loaders(data_dir, dataset_name, batch_size, splits, random_state, data_config.get('mutag_x', False), fold)
+    loaders, test_set, x_dim, edge_attr_dim, num_class, aux_info, datasets, masked_data_features = get_data_loaders(data_dir, dataset_name, batch_size, splits, random_state, data_config.get('mutag_x', False), fold, path = path)
 
     model_config['deg'] = aux_info['deg']
     model = get_model(x_dim, edge_attr_dim, num_class, aux_info['multi_label'], model_config, device)
@@ -1221,13 +1226,13 @@ def main():
     parser.add_argument('--seed', type=int, default=None, help='random seed (overrides global config if provided)')
     parser.add_argument('--task', type=str, default='classification', choices=['classification', 'regression'], help='task type: classification or regression')
     parser.add_argument('--backbone', type=str, help='backbone model used')
-    parser.add_argument(
-        "--use_motif_loss",
-        dest="use_motif_loss",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="If False uses sigmoid activation",
-    )
+    # parser.add_argument(
+    #     "--use_motif_loss",
+    #     dest="use_motif_loss",
+    #     action=argparse.BooleanOptionalAction,
+    #     default=False,
+    #     help="If False uses sigmoid activation",
+    # )
     parser.add_argument('--config', type=str, default=None,
                    help='Path to tuning config file')
     parser.add_argument('--cuda', type=int, help='cuda device id, -1 for cpu')
@@ -1282,7 +1287,7 @@ def main():
         # Keeping for backward compatibility with pretrain_clf
         log_dir = data_dir / f'{dataset_name}-fold{fold}' / 'logs' / f'{model_name}-seed{random_state}-{method_name}'
         
-        hparam_dict, metric_dict = train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_name, method_name, device, random_state, fold, task_type, args.use_motif_loss)
+        hparam_dict, metric_dict = train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_name, method_name, device, random_state, fold, task_type)
         metric_dicts.append(metric_dict)
 
     # Summary stats saved by analyze_tuning_results.py

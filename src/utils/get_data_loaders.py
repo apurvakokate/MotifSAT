@@ -3,7 +3,7 @@ import numpy as np
 from torch_geometric.data import Batch, InMemoryDataset
 from torch_geometric.utils import degree
 from torch_geometric.loader import DataLoader
-from DataLoader import MolDataset, get_setup_files_with_folds, load_required_files
+from DataLoader import MolDataset, get_setup_files_with_folds
 from ogb.graphproppred import PygGraphPropPredDataset
 from datasets import SynGraphDataset, Mutag, SPMotif, MNIST75sp, graph_sst2
 
@@ -44,7 +44,7 @@ CHOSEN_THRESHOLD = {'RBRICS':
                      'tox21':0.2}
                    }
 
-def get_data_loaders(data_dir, dataset_name, batch_size, splits, random_state, mutag_x=False, fold=None):
+def get_data_loaders(data_dir, dataset_name, batch_size, splits, random_state, mutag_x=False, fold=None, path = "/nfs/stak/users/kokatea/hpc-share/ChemIntuit/MOSE-GNN/DICTIONARY"):
     multi_label = False
     assert dataset_name in ['ba_2motifs', 'mutag', 'Graph-SST2', 'mnist',
                             'spmotif_0.5', 'spmotif_0.7', 'spmotif_0.9',
@@ -106,7 +106,7 @@ def get_data_loaders(data_dir, dataset_name, batch_size, splits, random_state, m
         csv_path = f"/nfs/stak/users/kokatea/hpc-share/ChemIntuit/MOSE-GNN/DomainDrivenGlobalExpl/datasets/FOLDS/{base_name}_{fold}.csv"
 
         lookup, _, _, _, _, _, test_data_lookup, _, train_mask_data,val_mask_data,test_mask_data = get_setup_files_with_folds(
-            base_name, date_tag, fold, algorithm
+            base_name, date_tag, fold, algorithm, path=path
         )
         
         if DATASET_TYPE[dataset_name] == 'Regression':

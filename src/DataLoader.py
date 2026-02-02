@@ -53,7 +53,7 @@ def load_required_files(base_path):
     
 
 
-def get_setup_files_with_folds(dataset_name, date_tag, fold, algorithm):
+def get_setup_files_with_folds(dataset_name, date_tag, fold, algorithm, path = "/nfs/stak/users/kokatea/hpc-share/ChemIntuit/MOSE-GNN/DICTIONARY"):
     algorithm = 'RBRICS' if algorithm == 'None' else algorithm
     least_count_dict = {'1225':
                             {'Mutagenicity':{'RBRICS':3, 'MGSSL':3}, 
@@ -79,17 +79,18 @@ def get_setup_files_with_folds(dataset_name, date_tag, fold, algorithm):
                         '0201':
                             {'tox21':{'RBRICS':7,'MGSSL':4}}
                        }
-    #Absolute path is used to run on HPC cluster
-    path = "/nfs/stak/users/kokatea/hpc-share/ChemIntuit/MOSE-GNN/DICTIONARY"
+    
+    
     
     # print(algorithm)
-    if date_tag in least_count_dict:
-        least_count = least_count_dict[date_tag][dataset_name][algorithm]
-        base_path = f'{path}/FOLDS/{dataset_name}_{algorithm}_fold_{fold}_leastcount_{least_count}_{date_tag}'
+#     if date_tag in least_count_dict:
+#         least_count = least_count_dict[date_tag][dataset_name][algorithm]
+#         base_path = f'{path}/FOLDS/{dataset_name}_{algorithm}_fold_{fold}_leastcount_{least_count}_{date_tag}'
         
             
-    else:
-        base_path = f'{path}/FOLDS/{dataset_name}_{algorithm}_fold_{fold}_{date_tag}'
+#     else:
+#         base_path = f'{path}/FOLDS/{dataset_name}_{algorithm}_fold_{fold}_{date_tag}'
+    base_path = f'{path}/FOLDS/{dataset_name}_{algorithm}_fold_{fold}_nofilter'
     
     
     return load_required_files(base_path)
