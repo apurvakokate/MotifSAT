@@ -32,7 +32,7 @@ DATASET_TYPE = {
                   'Fluoride_Carbonyl':'BinaryClass',
                 }
 
-CHOSEN_THRESHOLD = {'RBRICS': 
+CHOSEN_THRESHOLD = {'BRICS': 
                     {'Mutagenicity':0.2,
                      'hERG':0.5,
                      'BBBP':0.6,
@@ -99,7 +99,7 @@ def get_data_loaders(data_dir, dataset_name, batch_size, splits, random_state, m
         print('[INFO] Using default splits!')
         
     elif dataset_name in ['BBBP','Mutagenicity','hERG','Benzene','Alkane_Carbonyl','Fluoride_Carbonyl', 'esol', 'Lipophilicity']:
-        algorithm = "RBRICS"
+        algorithm = "BRICS"
         date_tag = f"{algorithm}{CHOSEN_THRESHOLD[algorithm][dataset_name]}"
 
         base_name = dataset_name
