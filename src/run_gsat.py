@@ -28,10 +28,37 @@ from utils import get_local_config_name, get_model, get_data_loaders, write_stat
 from torch_geometric.utils import scatter  # or from torch_scatter import scatter
 
 
-def motif_consistency_loss(att, nodes_to_motifs):
+# =============================================================================
+# MOTIF INCORPORATION HELPER FUNCTIONS
+# =============================================================================
+
+def check_no_unmapped_nodes(nodes_to_motifs):
     """
-    att: [N, 1] or [N] node attentions, same device as nodes_to_motifs
-    nodes_to_motifs: [N] LongTensor with motif id per node
+    Raise error if any node is unmapped (has nodes_to_motifs == -1).
+    All nodes must belong to a motif for motif incorporation methods.
+    """
+    if (nodes_to_motifs == -1).any():
+        num_unmapped = (nodes_to_motifs == -1).sum().item()
+        raise ValueError(
+            f"Found {num_unmapped} unmapped nodes (nodes_to_motifs == -1). "
+            f"All nodes must belong to a motif for motif incorporation methods."
+        )
+
+
+def motif_consistency_loss(att, nodes_to_motifs, batch):
+    """
+    Compute motif consistency loss at GRAPH level, not batch level.
+    
+    For each graph, and for each motif within that graph, compute the
+    variance of attention scores among nodes belonging to that motif.
+    
+    Args:
+        att: [N, 1] or [N] node attentions, same device as nodes_to_motifs
+        nodes_to_motifs: [N] LongTensor with global motif id per node
+        batch: [N] LongTensor with graph id per node (for batched graphs)
+    
+    Returns:
+        Scalar loss value (mean variance across all graph-motif pairs)
     """
     # Flatten attentions to [N]
     att = att.view(-1)
@@ -39,18 +66,22 @@ def motif_consistency_loss(att, nodes_to_motifs):
 
     # Make sure types/devices line up
     nodes_to_motifs = nodes_to_motifs.to(device=device, dtype=torch.long)
+    batch = batch.to(device=device, dtype=torch.long)
 
-    unique_motifs = nodes_to_motifs.unique()
+    # Create unique (graph_id, motif_id) pairs using encoding trick
+    # This ensures consistency is computed per-graph, not across the batch
+    max_motif_id = nodes_to_motifs.max().item() + 1
+    graph_motif_id = batch * max_motif_id + nodes_to_motifs
+
+    unique_graph_motifs = graph_motif_id.unique()
     total_loss = att.new_tensor(0.0)
     motif_count = 0
 
-    for mid in unique_motifs:
-        if mid == -1 or mid is None:
-            raise ExceptionName("Unknown motif found")
-        mask = (nodes_to_motifs == mid)
+    for gm_id in unique_graph_motifs:
+        mask = (graph_motif_id == gm_id)
         num_nodes = mask.sum()
         if num_nodes <= 1:
-            continue  # no variance within this motif
+            continue  # no variance within this motif-graph pair
 
         vals = att[mask]               # [k]
         mean_val = vals.mean()         # scalar
@@ -61,6 +92,129 @@ def motif_consistency_loss(att, nodes_to_motifs):
         return att.new_tensor(0.0)
 
     return total_loss / motif_count
+
+
+def motif_mean_pooling(emb, nodes_to_motifs):
+    """
+    Pool node embeddings to motif level using mean aggregation.
+    
+    Handles non-consecutive global motif indices by remapping to local
+    consecutive indices within the batch.
+    
+    Args:
+        emb: [N, hidden] node embeddings
+        nodes_to_motifs: [N] global motif indices (can be non-consecutive)
+    
+    Returns:
+        motif_emb: [M, hidden] motif embeddings (M = number of unique motifs in batch)
+        unique_motifs: [M] the original global motif IDs
+        inverse_indices: [N] mapping from each node to its index in unique_motifs (0..M-1)
+    """
+    unique_motifs, inverse_indices = nodes_to_motifs.unique(return_inverse=True)
+    motif_emb = scatter(emb, inverse_indices, dim=0, reduce='mean')
+    return motif_emb, unique_motifs, inverse_indices
+
+
+def lift_motif_att_to_node_att(motif_att, inverse_indices):
+    """
+    Broadcast motif attention scores back to nodes.
+    
+    Each node gets the attention score of its corresponding motif.
+    
+    Args:
+        motif_att: [M, 1] attention per motif
+        inverse_indices: [N] mapping from nodes to local motif index (0..M-1)
+    
+    Returns:
+        node_att: [N, 1] attention per node
+    """
+    return motif_att[inverse_indices]
+
+
+def construct_motif_graph(x, edge_index, edge_attr, nodes_to_motifs, batch):
+    """
+    Construct a coarsened motif-level graph from the node-level graph.
+    
+    Each motif becomes a single node in the new graph. An edge exists between
+    two motif-nodes if ANY node in one motif is connected to ANY node in the
+    other motif in the original graph.
+    
+    Args:
+        x: [N, feat] node features
+        edge_index: [2, E] edge indices
+        edge_attr: [E, attr_dim] edge attributes (can be None)
+        nodes_to_motifs: [N] global motif indices
+        batch: [N] batch assignment for nodes
+    
+    Returns:
+        motif_x: [M, feat] aggregated motif features (mean pooled)
+        motif_edge_index: [2, E'] unique edges between motifs
+        motif_edge_attr: [E', attr_dim] aggregated edge attributes (or None)
+        motif_batch: [M] batch assignment for motifs (which graph each motif belongs to)
+        unique_motifs: [M] original global motif IDs
+        inverse_indices: [N] mapping from nodes to local motif index (0..M-1)
+    """
+    unique_motifs, inverse_indices = nodes_to_motifs.unique(return_inverse=True)
+    num_motifs = unique_motifs.size(0)
+    
+    # Aggregate node features to motifs using mean pooling
+    motif_x = scatter(x, inverse_indices, dim=0, reduce='mean')
+    
+    # Compute batch assignment for motifs
+    # All nodes in a motif should have same batch, so we use 'min' (or any reduce)
+    motif_batch = scatter(batch, inverse_indices, dim=0, reduce='min')
+    
+    # Map edges to motif level
+    src, dst = edge_index
+    src_motif = inverse_indices[src]
+    dst_motif = inverse_indices[dst]
+    
+    # Deduplicate motif edges using integer encoding trick
+    # Encode (src_motif, dst_motif) as single integer for efficient deduplication
+    combined = src_motif * num_motifs + dst_motif
+    unique_combined, edge_mapping = combined.unique(return_inverse=True)
+    
+    # Decode back to edge pairs
+    motif_edge_index = torch.stack([
+        unique_combined // num_motifs,  # src motif
+        unique_combined % num_motifs    # dst motif
+    ], dim=0)
+    
+    # Aggregate edge attributes if present
+    # When multiple original edges map to same motif edge, take the mean
+    if edge_attr is not None:
+        motif_edge_attr = scatter(edge_attr.float(), edge_mapping, dim=0, reduce='mean')
+    else:
+        motif_edge_attr = None
+    
+    return motif_x, motif_edge_index, motif_edge_attr, motif_batch, unique_motifs, inverse_indices
+
+
+def map_motif_att_to_edge_att(motif_att, edge_index, inverse_indices):
+    """
+    Map motif attention scores to edge attention on the original graph.
+    
+    edge_att[e] = motif_att[src_motif] * motif_att[dst_motif]
+    
+    For intra-motif edges (both endpoints in same motif), this results in
+    squared attention values.
+    
+    Args:
+        motif_att: [M, 1] attention per motif
+        edge_index: [2, E] original edge indices
+        inverse_indices: [N] mapping from nodes to local motif index
+    
+    Returns:
+        edge_att: [E, 1] attention per edge
+    """
+    src, dst = edge_index
+    src_motif_idx = inverse_indices[src]
+    dst_motif_idx = inverse_indices[dst]
+    
+    src_att = motif_att[src_motif_idx]
+    dst_att = motif_att[dst_motif_idx]
+    
+    return src_att * dst_att
 
 def create_ordered_batch_iterator(dataset, batch_size=2):
     """
@@ -186,10 +340,11 @@ def parse_batch_attention_to_samples(batch_att, batch_data, original_samples, ba
 class GSAT(nn.Module):
 
     def __init__(self, clf, extractor, optimizer, scheduler, writer, device, model_dir, dataset_name, num_class, multi_label, random_state,
-                 method_config, shared_config, fold, task_type='classification', datasets=None, masked_data = None):
+                 method_config, shared_config, fold, task_type='classification', datasets=None, masked_data=None, motif_clf=None):
         super().__init__()
         self.clf = clf
         self.extractor = extractor
+        self.motif_clf = motif_clf  # Separate model for motif graph (optional)
         self.optimizer = optimizer
         self.scheduler = scheduler
 
@@ -227,6 +382,25 @@ class GSAT(nn.Module):
         self.multi_label = multi_label
         self.criterion = Criterion(num_class, multi_label, task_type)
         
+        # Motif incorporation method settings
+        self.motif_method = method_config.get('motif_incorporation_method', None)
+        self.train_motif_graph = method_config.get('train_motif_graph', False)
+        self.separate_motif_model = method_config.get('separate_motif_model', False)
+        
+        # If method is None (baseline), disable motif loss automatically
+        if self.motif_method is None:
+            self.motif_loss_coef = 0.0
+        # If method is 'readout' or 'graph', motif consistency loss is not applicable
+        # (consistency is enforced structurally), so disable it
+        elif self.motif_method in ['readout', 'graph']:
+            # For these methods, motif_loss_coef is used for auxiliary motif graph loss
+            # when train_motif_graph=True (only applicable for 'graph' method)
+            pass
+        
+        print(f'[INFO] Motif incorporation method: {self.motif_method}')
+        print(f'[INFO] Train motif graph: {self.train_motif_graph}')
+        print(f'[INFO] Separate motif model: {self.separate_motif_model}')
+        
         # Create deterministic directory for saving scores (NO TIMESTAMP!)
         tuning_id = method_config.get('tuning_id', 'default')
         experiment_name = method_config.get('experiment_name', 'default_experiment')
@@ -234,12 +408,18 @@ class GSAT(nn.Module):
         # Use environment variable if set (for HPC), otherwise use relative path
         results_base = os.environ.get('RESULTS_DIR', '../tuning_results')
         
+        # Include motif method in path for proper experiment organization
+        motif_method_str = str(self.motif_method) if self.motif_method else 'none'
+        train_motif_str = 'trainmotif' if self.train_motif_graph else 'notrain'
+        separate_model_str = 'separate' if self.separate_motif_model else 'shared'
+        
         self.seed_dir = os.path.join(
             results_base,  # Base directory
             str(self.dataset_name),
             f'model_{self.model_name}',
             f'experiment_{experiment_name}',
             f'tuning_{tuning_id}',
+            f'method_{motif_method_str}_{train_motif_str}_{separate_model_str}',
             f'pred{self.pred_loss_coef}_info{self.info_loss_coef}_motif{self.motif_loss_coef}',
             f'init{self.init_r}_final{self.final_r}_decay{self.decay_r}',
             f'fold{self.fold}_seed{self.random_state}'  # NO TIMESTAMP!
@@ -261,6 +441,11 @@ class GSAT(nn.Module):
             'task_type': self.task_type,
             'experiment_name': experiment_name,
             'tuning_id': tuning_id,
+            'motif_incorporation': {
+                'method': self.motif_method,
+                'train_motif_graph': self.train_motif_graph,
+                'separate_motif_model': self.separate_motif_model
+            },
             'loss_coefficients': {
                 'pred_loss_coef': self.pred_loss_coef,
                 'info_loss_coef': self.info_loss_coef,
@@ -343,10 +528,27 @@ class GSAT(nn.Module):
         hist = hist[hist > 0]  # Remove zero bins
         return -np.sum(hist * np.log(hist))
 
-    def __loss__(self, att, clf_logits, clf_labels, epoch, nodes_to_motifs):
+    def __loss__(self, att, clf_logits, clf_labels, epoch, nodes_to_motifs, batch, aux_clf_logits=None):
+        """
+        Compute the total loss for GSAT training.
+        
+        Args:
+            att: Attention scores (node-level or motif-level depending on method)
+            clf_logits: Classifier predictions on original graph
+            clf_labels: Ground truth labels
+            epoch: Current training epoch
+            nodes_to_motifs: Node to motif mapping
+            batch: Batch assignment for nodes
+            aux_clf_logits: (Optional) Auxiliary classifier predictions from motif graph
+                           Only used when motif_method='graph' and train_motif_graph=True
+        
+        Returns:
+            loss: Total loss value
+            loss_dict: Dictionary of individual loss components
+        """
         if not self.multi_label:
             clf_logits = clf_logits.squeeze(-1)
-        # pdb.set_trace()
+        
         pred_loss = self.criterion(clf_logits, clf_labels)
 
         r = self.fix_r if self.fix_r else self.get_r(self.decay_interval, self.decay_r, epoch, final_r=self.final_r, init_r=self.init_r)
@@ -354,40 +556,155 @@ class GSAT(nn.Module):
 
         pred_loss = pred_loss * self.pred_loss_coef
         info_loss = info_loss * self.info_loss_coef
-        motif_loss = motif_consistency_loss(att, nodes_to_motifs) * self.motif_loss_coef
+        
+        # Compute motif consistency loss only for 'loss' method
+        # For other methods, consistency is enforced structurally or not applicable
+        if self.motif_method == 'loss' and self.motif_loss_coef > 0:
+            motif_loss = motif_consistency_loss(att, nodes_to_motifs, batch) * self.motif_loss_coef
+        else:
+            motif_loss = att.new_tensor(0.0)
+        
         loss = pred_loss + info_loss + motif_loss
-        loss_dict = {'loss': loss.item(), 'pred': pred_loss.item(), 'info': info_loss.item(), 'motif_consistency': motif_loss.item()}
+        
+        loss_dict = {
+            'loss': loss.item(), 
+            'pred': pred_loss.item(), 
+            'info': info_loss.item(), 
+            'motif_consistency': motif_loss.item()
+        }
+        
+        # Add auxiliary motif graph loss if applicable
+        # Only for 'graph' method with train_motif_graph=True
+        if self.motif_method == 'graph' and self.train_motif_graph and aux_clf_logits is not None:
+            if not self.multi_label:
+                aux_clf_logits = aux_clf_logits.squeeze(-1)
+            aux_pred_loss = self.criterion(aux_clf_logits, clf_labels) * self.motif_loss_coef
+            loss = loss + aux_pred_loss
+            loss_dict['loss'] = loss.item()
+            loss_dict['motif_graph_loss'] = aux_pred_loss.item()
+        
         return loss, loss_dict
 
     def forward_pass(self, data, epoch, training):
-        emb = self.clf.get_emb(data.x, data.edge_index, batch=data.batch, edge_attr=data.edge_attr)
-        att_log_logits = self.extractor(emb, data.edge_index, data.batch)
-        att = self.sampling(att_log_logits, epoch, training)
+        """
+        Forward pass through GSAT with different motif incorporation methods.
+        
+        Methods:
+            None: Baseline GSAT (node-level attention, no motif loss)
+            'loss': GSAT with motif consistency loss (node-level attention)
+            'readout': Motif-level readout (pool embeddings, score motifs, broadcast to nodes)
+            'graph': Motif-level graph (construct motif graph, run GNN on it)
+        """
+        # Check for unmapped nodes if using motif incorporation methods
+        if self.motif_method in ['loss', 'readout', 'graph']:
+            check_no_unmapped_nodes(data.nodes_to_motifs)
+        
+        aux_clf_logits = None  # Auxiliary predictions from motif graph (if applicable)
+        
+        if self.motif_method in [None, 'loss']:
+            # =================================================================
+            # BASELINE / LOSS METHOD: Node-level attention
+            # =================================================================
+            emb = self.clf.get_emb(data.x, data.edge_index, batch=data.batch, edge_attr=data.edge_attr)
+            att_log_logits = self.extractor(emb, data.edge_index, data.batch)
+            att = self.sampling(att_log_logits, epoch, training)
 
-        if self.learn_edge_att:
-            if is_undirected(data.edge_index):
-                trans_idx, trans_val = transpose(data.edge_index, att, None, None, coalesced=False)
-                trans_val_perm = reorder_like(trans_idx, data.edge_index, trans_val)
-                edge_att = (att + trans_val_perm) / 2
+            if self.learn_edge_att:
+                if is_undirected(data.edge_index):
+                    trans_idx, trans_val = transpose(data.edge_index, att, None, None, coalesced=False)
+                    trans_val_perm = reorder_like(trans_idx, data.edge_index, trans_val)
+                    edge_att = (att + trans_val_perm) / 2
+                else:
+                    edge_att = att
             else:
-                edge_att = att
-        else:
-            edge_att = self.lift_node_att_to_edge_att(att, data.edge_index)
-            
-        # input(data)
-        # pdb.set_trace()
-        # if self.motif_readout is not None:
-            #todo get edge_att after going a motif level readout if self.motif_readout = add do weighted add readout and if mean a weighted mean readout
-            #from nodes to motif get node_attr and then use self.lift_node_att_to_edge_att(att, data.edge_index)
+                edge_att = self.lift_node_att_to_edge_att(att, data.edge_index)
 
-        clf_logits = self.clf(data.x, data.edge_index, data.batch, edge_attr=data.edge_attr, edge_atten=edge_att)
-        loss, loss_dict = self.__loss__(att, clf_logits, data.y, epoch, data.nodes_to_motifs)
+            clf_logits = self.clf(data.x, data.edge_index, data.batch, edge_attr=data.edge_attr, edge_atten=edge_att)
+            
+        elif self.motif_method == 'readout':
+            # =================================================================
+            # READOUT METHOD: Pool node embeddings to motif level, score motifs
+            # =================================================================
+            # Step 1: Get node embeddings from backbone GNN
+            emb = self.clf.get_emb(data.x, data.edge_index, batch=data.batch, edge_attr=data.edge_attr)
+            
+            # Step 2: Pool node embeddings to motif level using mean
+            motif_emb, unique_motifs, inverse_indices = motif_mean_pooling(emb, data.nodes_to_motifs)
+            
+            # Step 3: Compute motif-level batch for extractor's InstanceNorm
+            motif_batch = scatter(data.batch, inverse_indices, dim=0, reduce='min')
+            
+            # Step 4: Get motif attention scores
+            # Note: edge_index is not used when learn_edge_att=False
+            motif_att_log_logits = self.extractor(motif_emb, None, motif_batch)
+            motif_att = self.sampling(motif_att_log_logits, epoch, training)
+            
+            # Step 5: Map motif attention back to nodes
+            node_att = lift_motif_att_to_node_att(motif_att, inverse_indices)
+            
+            # Step 6: Lift node attention to edge attention
+            edge_att = self.lift_node_att_to_edge_att(node_att, data.edge_index)
+            
+            # Step 7: Run classifier on original graph with motif-derived attention
+            clf_logits = self.clf(data.x, data.edge_index, data.batch, edge_attr=data.edge_attr, edge_atten=edge_att)
+            
+            # Use node attention for loss computation (for info_loss consistency)
+            att = node_att
+            
+        elif self.motif_method == 'graph':
+            # =================================================================
+            # GRAPH METHOD: Construct and process motif-level graph
+            # =================================================================
+            # Step 1: Construct motif graph
+            motif_x, motif_edge_index, motif_edge_attr, motif_batch, unique_motifs, inverse_indices = \
+                construct_motif_graph(data.x, data.edge_index, data.edge_attr, data.nodes_to_motifs, data.batch)
+            
+            # Step 2: Get motif embeddings from GNN on motif graph
+            # Use separate model if configured, otherwise use shared model
+            if self.separate_motif_model and self.motif_clf is not None:
+                motif_emb = self.motif_clf.get_emb(motif_x, motif_edge_index, batch=motif_batch, edge_attr=motif_edge_attr)
+            else:
+                motif_emb = self.clf.get_emb(motif_x, motif_edge_index, batch=motif_batch, edge_attr=motif_edge_attr)
+            
+            # Step 3: Get motif attention scores
+            motif_att_log_logits = self.extractor(motif_emb, motif_edge_index, motif_batch)
+            motif_att = self.sampling(motif_att_log_logits, epoch, training)
+            
+            # Step 4: Map motif attention to edge attention on ORIGINAL graph
+            edge_att = map_motif_att_to_edge_att(motif_att, data.edge_index, inverse_indices)
+            
+            # Step 5: Run classifier on ORIGINAL graph with motif-derived edge attention
+            clf_logits = self.clf(data.x, data.edge_index, data.batch, edge_attr=data.edge_attr, edge_atten=edge_att)
+            
+            # Step 6: Optionally also train classifier on motif graph (auxiliary loss)
+            if self.train_motif_graph:
+                # Create motif-level edge attention for motif graph
+                motif_src, motif_dst = motif_edge_index
+                motif_edge_att = motif_att[motif_src] * motif_att[motif_dst]
+                
+                # Run classifier on motif graph (use motif_clf if separate, else clf)
+                if self.separate_motif_model and self.motif_clf is not None:
+                    aux_clf_logits = self.motif_clf(motif_x, motif_edge_index, motif_batch, 
+                                                    edge_attr=motif_edge_attr, edge_atten=motif_edge_att)
+                else:
+                    aux_clf_logits = self.clf(motif_x, motif_edge_index, motif_batch, 
+                                             edge_attr=motif_edge_attr, edge_atten=motif_edge_att)
+            
+            # Use motif attention for loss computation
+            att = motif_att
+        
+        else:
+            raise ValueError(f"Unknown motif_incorporation_method: {self.motif_method}")
+
+        loss, loss_dict = self.__loss__(att, clf_logits, data.y, epoch, data.nodes_to_motifs, data.batch, aux_clf_logits)
         return edge_att, loss, loss_dict, clf_logits
 
     @torch.no_grad()
     def eval_one_batch(self, data, epoch):
         self.extractor.eval()
         self.clf.eval()
+        if self.motif_clf is not None:
+            self.motif_clf.eval()
 
         att, loss, loss_dict, clf_logits = self.forward_pass(data, epoch, training=False)
         return att.data.cpu().reshape(-1), loss_dict, clf_logits.data.cpu()
@@ -395,6 +712,8 @@ class GSAT(nn.Module):
     def train_one_batch(self, data, epoch):
         self.extractor.train()
         self.clf.train()
+        if self.motif_clf is not None:
+            self.motif_clf.train()
 
         att, loss, loss_dict, clf_logits = self.forward_pass(data, epoch, training=True)
         self.optimizer.zero_grad()
@@ -1088,6 +1407,14 @@ def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_nam
     final_r = gsat_config.get('final_r', 0.7)
     decay_r = gsat_config.get('decay_r', 0.1)
     
+    # Get motif incorporation method settings
+    motif_method = gsat_config.get('motif_incorporation_method', None)
+    train_motif_graph = gsat_config.get('train_motif_graph', False)
+    separate_motif_model = gsat_config.get('separate_motif_model', False)
+    motif_method_str = str(motif_method) if motif_method else 'none'
+    train_motif_str = 'trainmotif' if train_motif_graph else 'notrain'
+    separate_model_str = 'separate' if separate_motif_model else 'shared'
+    
     # Use environment variable if set (for HPC), otherwise use relative path
     results_base = os.environ.get('RESULTS_DIR', '../tuning_results')
     
@@ -1097,6 +1424,7 @@ def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_nam
         f'model_{model_name}',
         f'experiment_{experiment_name}',
         f'tuning_{tuning_id}',
+        f'method_{motif_method_str}_{train_motif_str}_{separate_model_str}',
         f'pred{pred_coef}_info{info_coef}_motif{motif_coef}',
         f'init{init_r}_final{final_r}_decay{decay_r}',
         f'fold{fold}_seed{random_state}'
@@ -1184,9 +1512,22 @@ def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_nam
     else:
         print('[INFO] Training both the model and the attention from scratch...')
 
+    # Create separate motif model if configured (for 'graph' method)
+    motif_clf = None
+    if separate_motif_model and motif_method == 'graph':
+        print('[INFO] Creating separate GNN for motif graph processing...')
+        motif_clf = get_model(x_dim, edge_attr_dim, num_class, aux_info['multi_label'], model_config, device)
+        # Note: motif_clf is trained from scratch (no pretraining on motif graphs available)
+
     extractor = ExtractorMLP(model_config['hidden_size'], shared_config).to(device)
     lr, wd = method_config['lr'], method_config.get('weight_decay', 0)
-    optimizer = torch.optim.Adam(list(extractor.parameters()) + list(model.parameters()), lr=lr, weight_decay=wd)
+    
+    # Build parameter list for optimizer
+    params_to_optimize = list(extractor.parameters()) + list(model.parameters())
+    if motif_clf is not None:
+        params_to_optimize += list(motif_clf.parameters())
+    
+    optimizer = torch.optim.Adam(params_to_optimize, lr=lr, weight_decay=wd)
 
     scheduler_config = method_config.get('scheduler', {})
     scheduler = None if scheduler_config == {} else ReduceLROnPlateau(optimizer, mode='max', **scheduler_config)
@@ -1199,7 +1540,7 @@ def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_nam
 
     print('====================================')
     print('[INFO] Training GSAT...')
-    gsat = GSAT(model, extractor, optimizer, scheduler, writer, device, log_dir, dataset_name, num_class, aux_info['multi_label'], random_state, method_config, shared_config, fold, task_type, datasets, masked_data_features)
+    gsat = GSAT(model, extractor, optimizer, scheduler, writer, device, log_dir, dataset_name, num_class, aux_info['multi_label'], random_state, method_config, shared_config, fold, task_type, datasets, masked_data_features, motif_clf=motif_clf)
     metric_dict = gsat.train(loaders, test_set, metric_dict, model_config.get('use_edge_attr', True))
     writer.add_hparams(hparam_dict=hparam_dict, metric_dict=metric_dict)
     
@@ -1226,13 +1567,17 @@ def main():
     parser.add_argument('--seed', type=int, default=None, help='random seed (overrides global config if provided)')
     parser.add_argument('--task', type=str, default='classification', choices=['classification', 'regression'], help='task type: classification or regression')
     parser.add_argument('--backbone', type=str, help='backbone model used')
-    # parser.add_argument(
-    #     "--use_motif_loss",
-    #     dest="use_motif_loss",
-    #     action=argparse.BooleanOptionalAction,
-    #     default=False,
-    #     help="If False uses sigmoid activation",
-    # )
+    parser.add_argument('--motif_incorporation_method', type=str, default=None,
+                        choices=[None, 'loss', 'readout', 'graph'],
+                        help='Method for incorporating motif information: '
+                             'None=baseline GSAT (no motif), '
+                             'loss=motif consistency loss, '
+                             'readout=motif-level attention readout, '
+                             'graph=motif-level graph construction')
+    parser.add_argument('--train_motif_graph', action='store_true', default=False,
+                        help='For graph method: also train classifier on motif graph (auxiliary loss)')
+    parser.add_argument('--separate_motif_model', action='store_true', default=False,
+                        help='For graph method: use separate GNN for motif graph processing (vs shared parameters)')
     parser.add_argument('--config', type=str, default=None,
                    help='Path to tuning config file')
     parser.add_argument('--cuda', type=int, help='cuda device id, -1 for cpu')
@@ -1265,6 +1610,26 @@ def main():
         # Merge into local_config['GSAT_config']
         for key, value in tuning_config.items():
             local_config['GSAT_config'][key] = value
+
+    # Override with command-line arguments (take precedence over config file)
+    if args.motif_incorporation_method is not None:
+        local_config['GSAT_config']['motif_incorporation_method'] = args.motif_incorporation_method
+    elif 'motif_incorporation_method' not in local_config['GSAT_config']:
+        local_config['GSAT_config']['motif_incorporation_method'] = None
+    
+    if args.train_motif_graph:
+        local_config['GSAT_config']['train_motif_graph'] = True
+    elif 'train_motif_graph' not in local_config['GSAT_config']:
+        local_config['GSAT_config']['train_motif_graph'] = False
+    
+    if args.separate_motif_model:
+        local_config['GSAT_config']['separate_motif_model'] = True
+    elif 'separate_motif_model' not in local_config['GSAT_config']:
+        local_config['GSAT_config']['separate_motif_model'] = False
+    
+    print(f'[INFO] Motif incorporation method: {local_config["GSAT_config"].get("motif_incorporation_method", None)}')
+    print(f'[INFO] Train motif graph: {local_config["GSAT_config"].get("train_motif_graph", False)}')
+    print(f'[INFO] Separate motif model: {local_config["GSAT_config"].get("separate_motif_model", False)}')
 
     data_dir = Path(global_config['data_dir'])
     num_seeds = global_config['num_seeds']

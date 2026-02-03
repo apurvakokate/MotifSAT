@@ -128,20 +128,94 @@ def generate_config_grid(base_config, param_grid, experiment_overrides=None):
 
 def create_baseline_experiment(base_config):
     """
-    Create baseline experiment: test with and without motif loss.
+    Create baseline experiment: test each motif incorporation method.
     
-    Research Question: Does adding motif_consistency_loss improve performance?
+    Research Question: Which motif incorporation method works best?
     
-    Uses defaults from total.config.yml, only varies motif_loss_coef.
+    Methods:
+        - None: Baseline GSAT (no motif information)
+        - 'loss': Motif consistency loss (node-level attention with variance loss)
+        - 'readout': Motif-level readout (pool embeddings, score motifs, broadcast)
+        - 'graph': Motif-level graph (construct coarsened graph, run GNN on it)
+          - With shared vs separate GNN for motif processing
+          - With/without auxiliary motif graph training
+    
+    Uses defaults from total.config.yml for other parameters.
     """
-    # No overrides - use base config values for everything except what we're tuning
-    experiment_overrides = {}
+    configs = []
+    config_idx = 0
     
-    param_grid = {
-        'motif_loss_coef': [0.0, 0.5, 1.0, 2.0],  # Test without and with motif loss
-    }
+    # Method 1: None (baseline GSAT - no motif incorporation)
+    config_none = deepcopy(base_config)
+    config_none['tuning_id'] = f'config_{config_idx:04d}'
+    config_none['motif_incorporation_method'] = None
+    config_none['train_motif_graph'] = False
+    config_none['separate_motif_model'] = False
+    config_none['motif_loss_coef'] = 0.0  # No motif loss for baseline
+    configs.append(config_none)
+    config_idx += 1
     
-    return generate_config_grid(base_config, param_grid, experiment_overrides)
+    # Method 2: 'loss' (motif consistency loss)
+    config_loss = deepcopy(base_config)
+    config_loss['tuning_id'] = f'config_{config_idx:04d}'
+    config_loss['motif_incorporation_method'] = 'loss'
+    config_loss['train_motif_graph'] = False
+    config_loss['separate_motif_model'] = False
+    # Uses motif_loss_coef from base_config
+    configs.append(config_loss)
+    config_idx += 1
+    
+    # Method 3: 'readout' (motif-level attention readout)
+    config_readout = deepcopy(base_config)
+    config_readout['tuning_id'] = f'config_{config_idx:04d}'
+    config_readout['motif_incorporation_method'] = 'readout'
+    config_readout['train_motif_graph'] = False
+    config_readout['separate_motif_model'] = False
+    config_readout['motif_loss_coef'] = 0.0  # Not applicable for readout
+    configs.append(config_readout)
+    config_idx += 1
+    
+    # Method 4: 'graph' with SHARED model (no auxiliary training)
+    config_graph_shared = deepcopy(base_config)
+    config_graph_shared['tuning_id'] = f'config_{config_idx:04d}'
+    config_graph_shared['motif_incorporation_method'] = 'graph'
+    config_graph_shared['train_motif_graph'] = False
+    config_graph_shared['separate_motif_model'] = False  # Shared parameters
+    config_graph_shared['motif_loss_coef'] = 0.0  # No auxiliary loss
+    configs.append(config_graph_shared)
+    config_idx += 1
+    
+    # Method 5: 'graph' with SHARED model + auxiliary training
+    config_graph_shared_train = deepcopy(base_config)
+    config_graph_shared_train['tuning_id'] = f'config_{config_idx:04d}'
+    config_graph_shared_train['motif_incorporation_method'] = 'graph'
+    config_graph_shared_train['train_motif_graph'] = True
+    config_graph_shared_train['separate_motif_model'] = False  # Shared parameters
+    # Uses motif_loss_coef from base_config for auxiliary loss weight
+    configs.append(config_graph_shared_train)
+    config_idx += 1
+    
+    # Method 6: 'graph' with SEPARATE model (no auxiliary training)
+    config_graph_separate = deepcopy(base_config)
+    config_graph_separate['tuning_id'] = f'config_{config_idx:04d}'
+    config_graph_separate['motif_incorporation_method'] = 'graph'
+    config_graph_separate['train_motif_graph'] = False
+    config_graph_separate['separate_motif_model'] = True  # Separate GNN for motif graph
+    config_graph_separate['motif_loss_coef'] = 0.0  # No auxiliary loss
+    configs.append(config_graph_separate)
+    config_idx += 1
+    
+    # Method 7: 'graph' with SEPARATE model + auxiliary training
+    config_graph_separate_train = deepcopy(base_config)
+    config_graph_separate_train['tuning_id'] = f'config_{config_idx:04d}'
+    config_graph_separate_train['motif_incorporation_method'] = 'graph'
+    config_graph_separate_train['train_motif_graph'] = True
+    config_graph_separate_train['separate_motif_model'] = True  # Separate GNN for motif graph
+    # Uses motif_loss_coef from base_config for auxiliary loss weight
+    configs.append(config_graph_separate_train)
+    config_idx += 1
+    
+    return configs
 
 
 def create_loss_coefficient_tuning(base_config):
@@ -247,7 +321,7 @@ def create_learning_rate_tuning(base_config):
 
 EXPERIMENT_TYPES = {
     'baseline': {
-        'description': 'Test with and without motif loss (4 configs)',
+        'description': 'Test all motif incorporation methods with shared/separate models (7 configs)',
         'generator': create_baseline_experiment,
     },
     'loss_tuning': {
