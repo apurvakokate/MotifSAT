@@ -417,8 +417,10 @@ def save_configs(configs, output_dir, experiment_name, base_config_path=None):
 
 def create_run_scripts(manifest, output_dir, datasets, models, folds, seeds):
     """
-    Create shell scripts to run all experiments - parallelized by dataset.
+    Create shell scripts to run all experiments - parallelized by dataset AND fold.
     Scripts will be placed in src/ directory for easy execution from HPC.
+    
+    Creates one script per (dataset, fold) combination for maximum parallelization.
     
     Args:
         manifest: Experiment manifest
@@ -431,24 +433,23 @@ def create_run_scripts(manifest, output_dir, datasets, models, folds, seeds):
     experiment_name = manifest['experiment_name']
     experiment_dir = Path(output_dir) / experiment_name
     src_dir = Path('.')  # Current directory (src/) for run scripts
+    scripts_dir = src_dir / 'run_scripts'
+    scripts_dir.mkdir(exist_ok=True)
     
-    # Create individual scripts for each dataset (for parallel execution)
-    # Prioritize: Fold -> Model (Architecture) -> Config -> Seed
+    created_scripts = []
+    
+    # Create individual scripts for each (dataset, fold) combination
     for dataset in datasets:
-        dataset_script = src_dir / f'run_{dataset}.sh'
-        
-        with open(dataset_script, 'w') as f:
-            f.write('#!/bin/bash\n')
-            f.write(f'# Run all experiments for {dataset}\n')
-            f.write(f'# Experiment: {experiment_name}\n')
-            f.write(f'# Organization: Fold -> Architecture -> Config -> Seed\n')
-            f.write(f'# Generated: {datetime.now().isoformat()}\n\n')
+        for fold in folds:
+            script_name = f'run_{dataset}_fold{fold}.sh'
+            script_path = scripts_dir / script_name
             
-            # Prioritize fold first, then model (architecture)
-            for fold in folds:
-                f.write(f'\n{"="*80}\n')
-                f.write(f'# FOLD {fold}\n')
-                f.write(f'{"="*80}\n\n')
+            with open(script_path, 'w') as f:
+                f.write('#!/bin/bash\n')
+                f.write(f'# Run experiments for {dataset} - Fold {fold}\n')
+                f.write(f'# Experiment: {experiment_name}\n')
+                f.write(f'# Organization: Architecture -> Config -> Seed\n')
+                f.write(f'# Generated: {datetime.now().isoformat()}\n\n')
                 
                 for model in models:
                     f.write(f'\n{"-"*80}\n')
@@ -471,30 +472,61 @@ def create_run_scripts(manifest, output_dir, datasets, models, folds, seeds):
                             f.write(f'  --seed {seed} \\\n')
                             f.write(f'  --cuda 0 \\\n')
                             f.write(f'  --config {config_file}\n\n')
+            
+            script_path.chmod(0o755)
+            created_scripts.append(script_name)
+            print(f"Created: {script_path}")
+    
+    # Create per-dataset master scripts (runs all folds for a dataset sequentially)
+    for dataset in datasets:
+        dataset_script = scripts_dir / f'run_{dataset}_all_folds.sh'
+        with open(dataset_script, 'w') as f:
+            f.write('#!/bin/bash\n')
+            f.write(f'# Run all folds for {dataset}\n')
+            f.write(f'# Experiment: {experiment_name}\n')
+            f.write(f'# Generated: {datetime.now().isoformat()}\n\n')
+            
+            for fold in folds:
+                f.write(f'echo "Starting {dataset} - Fold {fold}"\n')
+                f.write(f'bash run_scripts/run_{dataset}_fold{fold}.sh\n\n')
         
         dataset_script.chmod(0o755)
         print(f"Created: {dataset_script}")
     
-    # Create master script in src/ that runs all dataset scripts
+    # Create master script that runs everything
     master_script = src_dir / 'run_all.sh'
     with open(master_script, 'w') as f:
         f.write('#!/bin/bash\n')
         f.write('# Master script to run all tuning experiments\n')
         f.write(f'# Experiment: {experiment_name}\n')
         f.write(f'# Generated: {datetime.now().isoformat()}\n\n')
+        f.write(f'# Total scripts: {len(created_scripts)} (one per dataset-fold combination)\n')
+        f.write(f'# Datasets: {", ".join(datasets)}\n')
+        f.write(f'# Folds: {", ".join(map(str, folds))}\n\n')
         
         for dataset in datasets:
-            f.write(f'echo "Starting experiments for {dataset}"\n')
-            f.write(f'bash run_{dataset}.sh\n\n')
+            for fold in folds:
+                f.write(f'echo "Starting {dataset} - Fold {fold}"\n')
+                f.write(f'bash run_scripts/run_{dataset}_fold{fold}.sh\n\n')
     
     master_script.chmod(0o755)
-    print(f"\nCreated master script: {master_script}")
-    print(f"Run individual datasets in parallel using: bash run_<dataset>.sh or sbatch")
+    
+    print(f"\n{'='*60}")
+    print(f"Created {len(created_scripts)} individual scripts in {scripts_dir}")
+    print(f"Run individual (dataset, fold) pairs in parallel:")
+    print(f"  bash run_scripts/run_<dataset>_fold<N>.sh")
+    print(f"Or run all folds for a dataset:")
+    print(f"  bash run_scripts/run_<dataset>_all_folds.sh")
+    print(f"Or run everything sequentially:")
+    print(f"  bash run_all.sh")
+    print(f"{'='*60}")
 
 
 def create_slurm_scripts(manifest, output_dir, datasets, models, folds, seeds, base_path=None):
     """
-    Create SLURM batch scripts for HPC cluster - one job per dataset for parallel execution.
+    Create SLURM batch scripts for HPC cluster - one job per (dataset, fold) for parallel execution.
+    
+    Creates one script per (dataset, fold) combination for maximum parallelization.
     
     Args:
         manifest: Experiment manifest
@@ -515,44 +547,41 @@ def create_slurm_scripts(manifest, output_dir, datasets, models, folds, seeds, b
     if base_path is None:
         base_path = '/nfs/stak/users/kokatea/hpc-share/ChemIntuit/MotifSAT'
     
-    # Create one SLURM script per dataset (for parallel job submission)
+    created_scripts = []
+    
+    # Create one SLURM script per (dataset, fold) combination
     for dataset in datasets:
-        job_name = f'{experiment_name}_{dataset}'
-        script_path = slurm_dir / f'{job_name}.sh'
-        
-        with open(script_path, 'w') as f:
-            f.write('#!/bin/bash\n')
-            f.write(f'#SBATCH --job-name={job_name}\n')
-            f.write(f'#SBATCH --output=logs/{job_name}_%j.out\n')
-            f.write(f'#SBATCH --error=logs/{job_name}_%j.err\n')
-            f.write('#SBATCH --time=2-00:00:00\n')
-            f.write('#SBATCH --partition=gpu\n')
-            f.write('#SBATCH --gres=gpu:1\n')
-            f.write('#SBATCH --cpus-per-task=8\n')
-            f.write('#SBATCH --mem=64G\n\n')
+        for fold in folds:
+            job_name = f'{experiment_name}_{dataset}_fold{fold}'
+            script_path = slurm_dir / f'{job_name}.sh'
             
-            f.write('# Initialize Conda\n')
-            f.write('source ~/hpc-share/anaconda3/etc/profile.d/conda.sh\n\n')
-            
-            f.write('# Activate the desired environment\n')
-            f.write('conda activate l2xgnn\n\n')
-            
-            f.write('# Set absolute paths for HPC\n')
-            f.write(f'export BASE_PATH="{base_path}"\n')
-            f.write('export RESULTS_DIR="${BASE_PATH}/tuning_results"\n')
-            f.write('export WANDB_DIR="${BASE_PATH}/wandb"\n\n')
-            
-            f.write('# Navigate to src directory\n')
-            f.write(f'cd {base_path}/src\n\n')
-            
-            f.write('# Organization: Fold -> Architecture -> Config -> Seed\n\n')
-            
-            # Add all experiments for this dataset
-            # Prioritize fold first, then model (architecture)
-            for fold in folds:
-                f.write(f'\n{"="*80}\n')
-                f.write(f'# FOLD {fold}\n')
-                f.write(f'{"="*80}\n\n')
+            with open(script_path, 'w') as f:
+                f.write('#!/bin/bash\n')
+                f.write(f'#SBATCH --job-name={job_name}\n')
+                f.write(f'#SBATCH --output=logs/{job_name}_%j.out\n')
+                f.write(f'#SBATCH --error=logs/{job_name}_%j.err\n')
+                f.write('#SBATCH --time=1-00:00:00\n')  # Shorter time for single fold
+                f.write('#SBATCH --partition=gpu\n')
+                f.write('#SBATCH --gres=gpu:1\n')
+                f.write('#SBATCH --cpus-per-task=8\n')
+                f.write('#SBATCH --mem=64G\n\n')
+                
+                f.write('# Initialize Conda\n')
+                f.write('source ~/hpc-share/anaconda3/etc/profile.d/conda.sh\n\n')
+                
+                f.write('# Activate the desired environment\n')
+                f.write('conda activate l2xgnn\n\n')
+                
+                f.write('# Set absolute paths for HPC\n')
+                f.write(f'export BASE_PATH="{base_path}"\n')
+                f.write('export RESULTS_DIR="${BASE_PATH}/tuning_results"\n')
+                f.write('export WANDB_DIR="${BASE_PATH}/wandb"\n\n')
+                
+                f.write('# Navigate to src directory\n')
+                f.write(f'cd {base_path}/src\n\n')
+                
+                f.write(f'# Dataset: {dataset}, Fold: {fold}\n')
+                f.write('# Organization: Architecture -> Config -> Seed\n\n')
                 
                 for model in models:
                     f.write(f'\n{"-"*80}\n')
@@ -575,24 +604,53 @@ def create_slurm_scripts(manifest, output_dir, datasets, models, folds, seeds, b
                             f.write(f'  --seed {seed} \\\n')
                             f.write(f'  --cuda 0 \\\n')
                             f.write(f'  --config {config_file}\n\n')
-        
-        script_path.chmod(0o755)
+            
+            script_path.chmod(0o755)
+            created_scripts.append(job_name)
     
-    # Create submission script
+    # Create per-dataset submission scripts (submits all folds for a dataset)
+    for dataset in datasets:
+        submit_dataset = slurm_dir / f'submit_{dataset}.sh'
+        with open(submit_dataset, 'w') as f:
+            f.write('#!/bin/bash\n')
+            f.write(f'# Submit all folds for {dataset}\n\n')
+            
+            for fold in folds:
+                job_name = f'{experiment_name}_{dataset}_fold{fold}'
+                f.write(f'echo "Submitting job for {dataset} - Fold {fold}"\n')
+                f.write(f'sbatch {slurm_dir}/{job_name}.sh\n')
+                f.write('sleep 1\n\n')
+        
+        submit_dataset.chmod(0o755)
+    
+    # Create master submission script
     submit_all = slurm_dir / 'submit_all.sh'
     with open(submit_all, 'w') as f:
         f.write('#!/bin/bash\n')
-        f.write('# Submit all SLURM jobs (one per dataset for parallel execution)\n\n')
+        f.write(f'# Submit all SLURM jobs (one per dataset-fold combination)\n')
+        f.write(f'# Total jobs: {len(created_scripts)}\n')
+        f.write(f'# Datasets: {", ".join(datasets)}\n')
+        f.write(f'# Folds: {", ".join(map(str, folds))}\n\n')
         
         for dataset in datasets:
-            job_name = f'{experiment_name}_{dataset}'
-            f.write(f'echo "Submitting job for {dataset}"\n')
-            f.write(f'sbatch slurm_scripts/{job_name}.sh\n')
-            f.write('sleep 1\n\n')
+            f.write(f'\n# {dataset}\n')
+            for fold in folds:
+                job_name = f'{experiment_name}_{dataset}_fold{fold}'
+                f.write(f'echo "Submitting {dataset} - Fold {fold}"\n')
+                f.write(f'sbatch {slurm_dir}/{job_name}.sh\n')
+                f.write('sleep 1\n')
     
     submit_all.chmod(0o755)
-    print(f"\nCreated SLURM scripts in {slurm_dir}")
-    print(f"Submit all jobs: bash {submit_all}")
+    
+    print(f"\n{'='*60}")
+    print(f"Created {len(created_scripts)} SLURM scripts in {slurm_dir}")
+    print(f"Submit individual (dataset, fold) jobs:")
+    print(f"  sbatch {slurm_dir}/{experiment_name}_<dataset>_fold<N>.sh")
+    print(f"Submit all folds for a dataset:")
+    print(f"  bash {slurm_dir}/submit_<dataset>.sh")
+    print(f"Submit all jobs:")
+    print(f"  bash {submit_all}")
+    print(f"{'='*60}")
 
 
 def main():
