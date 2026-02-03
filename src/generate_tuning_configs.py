@@ -25,7 +25,7 @@ import os
 
 
 # Default path to the base configuration file
-DEFAULT_BASE_CONFIG_PATH = Path(__file__).parent / 'configs' / 'total.config.yml'
+DEFAULT_BASE_CONFIG_PATH = Path(__file__).parent / 'configs' / 'total_config.yml'
 
 
 def load_base_config(config_path=None):
