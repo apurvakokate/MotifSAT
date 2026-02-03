@@ -143,19 +143,19 @@ GSAT_config:
                                      #   - If false/None, r decays from init_r to final_r
                                      #   Source: run_gsat.py line 217
   
-  init_r: 0.9                        # [DEFAULT: 0.9] Initial r value (at epoch 0)
+  init_r: 0.7                        # [DEFAULT: 0.9] Initial r value (at epoch 0)
                                      #   Higher = more uniform attention initially
                                      #   Source: run_gsat.py line 221
   
-  final_r: 0.5                       # [DEFAULT: 0.1] Final r value (target)
+  final_r: 0.3                       # [DEFAULT: 0.1] Final r value (target)
                                      #   Lower = more polarized attention (closer to 0 or 1)
                                      #   Source: run_gsat.py line 220
   
-  decay_interval: 10                 # [DEFAULT: None] Epochs between r decay steps
+  decay_interval: 5                 # [DEFAULT: None] Epochs between r decay steps
                                      #   r decreases by decay_r every decay_interval epochs
                                      #   Source: run_gsat.py line 218
   
-  decay_r: 0.1                       # [DEFAULT: None] Amount to decrease r each interval
+  decay_r: 0.2                       # [DEFAULT: None] Amount to decrease r each interval
                                      #   Source: run_gsat.py line 219
   
   # --- Tuning/Experiment Tracking Parameters ---
