@@ -94,25 +94,35 @@ def motif_consistency_loss(att, nodes_to_motifs, batch):
     return total_loss / motif_count
 
 
-def motif_mean_pooling(emb, nodes_to_motifs):
+def motif_mean_pooling(emb, nodes_to_motifs, batch):
     """
     Pool node embeddings to motif level using mean aggregation.
     
     Handles non-consecutive global motif indices by remapping to local
-    consecutive indices within the batch.
+    consecutive indices within the batch. Motifs are kept separate per-graph
+    to ensure proper graph-level processing.
     
     Args:
         emb: [N, hidden] node embeddings
         nodes_to_motifs: [N] global motif indices (can be non-consecutive)
+        batch: [N] batch assignment for nodes
     
     Returns:
-        motif_emb: [M, hidden] motif embeddings (M = number of unique motifs in batch)
-        unique_motifs: [M] the original global motif IDs
-        inverse_indices: [N] mapping from each node to its index in unique_motifs (0..M-1)
+        motif_emb: [M, hidden] motif embeddings (M = number of unique graph-motif pairs)
+        motif_batch: [M] batch assignment for motifs
+        inverse_indices: [N] mapping from each node to its motif index (0..M-1)
     """
-    unique_motifs, inverse_indices = nodes_to_motifs.unique(return_inverse=True)
+    # Create unique (graph_id, motif_id) pairs to keep motifs separate per-graph
+    max_motif_id = nodes_to_motifs.max().item() + 1
+    graph_motif_id = batch * max_motif_id + nodes_to_motifs
+    
+    unique_graph_motifs, inverse_indices = graph_motif_id.unique(return_inverse=True)
+    
+    # Decode to get batch assignment for motifs
+    motif_batch = unique_graph_motifs // max_motif_id
+    
     motif_emb = scatter(emb, inverse_indices, dim=0, reduce='mean')
-    return motif_emb, unique_motifs, inverse_indices
+    return motif_emb, motif_batch, inverse_indices
 
 
 def lift_motif_att_to_node_att(motif_att, inverse_indices):
@@ -139,6 +149,10 @@ def construct_motif_graph(x, edge_index, edge_attr, nodes_to_motifs, batch):
     two motif-nodes if ANY node in one motif is connected to ANY node in the
     other motif in the original graph.
     
+    IMPORTANT: Motifs are kept separate per-graph in the batch. Even if two graphs
+    have nodes with the same global motif ID, they become separate motif nodes.
+    This ensures the number of motif nodes per graph matches graph-level labels.
+    
     Args:
         x: [N, feat] node features
         edge_index: [2, E] edge indices
@@ -151,18 +165,24 @@ def construct_motif_graph(x, edge_index, edge_attr, nodes_to_motifs, batch):
         motif_edge_index: [2, E'] unique edges between motifs
         motif_edge_attr: [E', attr_dim] aggregated edge attributes (or None)
         motif_batch: [M] batch assignment for motifs (which graph each motif belongs to)
-        unique_motifs: [M] original global motif IDs
+        unique_motifs: [M] original global motif IDs (note: may have duplicates across graphs)
         inverse_indices: [N] mapping from nodes to local motif index (0..M-1)
     """
-    unique_motifs, inverse_indices = nodes_to_motifs.unique(return_inverse=True)
-    num_motifs = unique_motifs.size(0)
+    # Create unique (graph_id, motif_id) pairs to keep motifs separate per-graph
+    # This prevents merging same motif ID across different graphs in the batch
+    max_motif_id = nodes_to_motifs.max().item() + 1
+    graph_motif_id = batch * max_motif_id + nodes_to_motifs
+    
+    # Get unique graph-motif combinations
+    unique_graph_motifs, inverse_indices = graph_motif_id.unique(return_inverse=True)
+    num_motifs = unique_graph_motifs.size(0)
+    
+    # Decode back to get motif batch assignment and original motif IDs
+    motif_batch = unique_graph_motifs // max_motif_id
+    unique_motifs = unique_graph_motifs % max_motif_id
     
     # Aggregate node features to motifs using mean pooling
     motif_x = scatter(x, inverse_indices, dim=0, reduce='mean')
-    
-    # Compute batch assignment for motifs
-    # All nodes in a motif should have same batch, so we use 'min' (or any reduce)
-    motif_batch = scatter(batch, inverse_indices, dim=0, reduce='min')
     
     # Map edges to motif level
     src, dst = edge_index
@@ -629,17 +649,15 @@ class GSAT(nn.Module):
             emb = self.clf.get_emb(data.x, data.edge_index, batch=data.batch, edge_attr=data.edge_attr)
             
             # Step 2: Pool node embeddings to motif level using mean
-            motif_emb, unique_motifs, inverse_indices = motif_mean_pooling(emb, data.nodes_to_motifs)
+            # Note: motif_mean_pooling keeps motifs separate per-graph in the batch
+            motif_emb, motif_batch, inverse_indices = motif_mean_pooling(emb, data.nodes_to_motifs, data.batch)
             
-            # Step 3: Compute motif-level batch for extractor's InstanceNorm
-            motif_batch = scatter(data.batch, inverse_indices, dim=0, reduce='min')
-            
-            # Step 4: Get motif attention scores
+            # Step 3: Get motif attention scores
             # Note: edge_index is not used when learn_edge_att=False
             motif_att_log_logits = self.extractor(motif_emb, None, motif_batch)
             motif_att = self.sampling(motif_att_log_logits, epoch, training)
             
-            # Step 5: Map motif attention back to nodes
+            # Step 4: Map motif attention back to nodes
             node_att = lift_motif_att_to_node_att(motif_att, inverse_indices)
             
             # Step 6: Lift node attention to edge attention
