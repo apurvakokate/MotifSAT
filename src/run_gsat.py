@@ -236,6 +236,420 @@ def map_motif_att_to_edge_att(motif_att, edge_index, inverse_indices):
     
     return src_att * dst_att
 
+# =============================================================================
+# TEST GRAPH PIPELINE - DETAILED OUTPUT FOR EACH METHOD
+# =============================================================================
+
+def run_test_graphs_pipeline(n_graphs, model, extractor, data_loader, device, output_file, model_config):
+    """
+    Run N graphs through the pipeline and log detailed outputs at each stage.
+    
+    This function traces through all 4 motif incorporation methods to show:
+    - Input graph structure
+    - Node embeddings  
+    - Method-specific intermediate results
+    - Final attention and predictions
+    
+    Args:
+        n_graphs: Number of graphs to process
+        model: The GNN classifier model
+        extractor: The attention extractor MLP
+        data_loader: DataLoader to get test graphs from
+        device: torch device
+        output_file: Path to save detailed outputs
+        model_config: Model configuration dict
+    """
+    model.eval()
+    extractor.eval()
+    
+    # Collect n_graphs from the data loader
+    test_graphs = []
+    for batch_data in data_loader:
+        # Process individual graphs from the batch
+        batch_data = batch_data.to(device)
+        num_in_batch = batch_data.batch.max().item() + 1
+        
+        for graph_idx in range(num_in_batch):
+            if len(test_graphs) >= n_graphs:
+                break
+            
+            # Extract single graph from batch
+            node_mask = (batch_data.batch == graph_idx)
+            graph_nodes = node_mask.sum().item()
+            
+            # Get node indices for this graph
+            node_indices = torch.where(node_mask)[0]
+            
+            # Create edge mask for edges within this graph
+            src, dst = batch_data.edge_index
+            edge_mask = node_mask[src] & node_mask[dst]
+            
+            # Store graph info
+            graph_info = {
+                'graph_idx': len(test_graphs),
+                'batch_data': batch_data,
+                'node_mask': node_mask,
+                'edge_mask': edge_mask,
+                'node_indices': node_indices,
+                'num_nodes': graph_nodes,
+                'num_edges': edge_mask.sum().item()
+            }
+            test_graphs.append(graph_info)
+        
+        if len(test_graphs) >= n_graphs:
+            break
+    
+    if len(test_graphs) == 0:
+        print("[WARNING] No graphs found in data loader for testing")
+        return
+    
+    print(f"\n{'='*80}")
+    print(f"RUNNING TEST GRAPH PIPELINE FOR {len(test_graphs)} GRAPHS")
+    print(f"{'='*80}\n")
+    
+    # Open output file
+    with open(output_file, 'w') as f:
+        f.write("=" * 100 + "\n")
+        f.write("MOTIFSAT TEST GRAPH PIPELINE - DETAILED OUTPUT\n")
+        f.write(f"Generated: {datetime.now().isoformat()}\n")
+        f.write(f"Number of graphs: {len(test_graphs)}\n")
+        f.write("=" * 100 + "\n\n")
+        
+        # Process each graph through all methods
+        for graph_info in test_graphs:
+            batch_data = graph_info['batch_data']
+            graph_idx = graph_info['graph_idx']
+            node_mask = graph_info['node_mask']
+            edge_mask = graph_info['edge_mask']
+            
+            f.write("\n" + "#" * 100 + "\n")
+            f.write(f"GRAPH {graph_idx}\n")
+            f.write("#" * 100 + "\n\n")
+            
+            # =====================================================================
+            # SECTION 1: INPUT GRAPH STRUCTURE
+            # =====================================================================
+            f.write("-" * 80 + "\n")
+            f.write("1. INPUT GRAPH STRUCTURE\n")
+            f.write("-" * 80 + "\n\n")
+            
+            num_nodes = node_mask.sum().item()
+            num_edges = edge_mask.sum().item()
+            
+            f.write(f"Number of nodes: {num_nodes}\n")
+            f.write(f"Number of edges: {num_edges}\n")
+            f.write(f"Node feature dim: {batch_data.x.shape[1]}\n")
+            
+            if hasattr(batch_data, 'edge_attr') and batch_data.edge_attr is not None:
+                f.write(f"Edge attr dim: {batch_data.edge_attr.shape[1]}\n")
+            else:
+                f.write("Edge attr: None\n")
+            
+            # Node features summary
+            node_x = batch_data.x[node_mask]
+            f.write(f"\nNode features (first 5 nodes, first 10 dims):\n")
+            for i in range(min(5, num_nodes)):
+                f.write(f"  Node {i}: {node_x[i, :10].cpu().numpy()}\n")
+            
+            # Edge structure
+            src, dst = batch_data.edge_index[:, edge_mask]
+            # Remap to local indices
+            node_remap = torch.zeros(batch_data.x.size(0), dtype=torch.long, device=device)
+            node_remap[node_mask] = torch.arange(num_nodes, device=device)
+            local_src = node_remap[src]
+            local_dst = node_remap[dst]
+            
+            f.write(f"\nEdge list (first 10 edges):\n")
+            for i in range(min(10, num_edges)):
+                f.write(f"  Edge {i}: {local_src[i].item()} -> {local_dst[i].item()}\n")
+            
+            # Motif structure
+            if hasattr(batch_data, 'nodes_to_motifs'):
+                nodes_to_motifs = batch_data.nodes_to_motifs[node_mask]
+                unique_motifs = nodes_to_motifs.unique()
+                f.write(f"\nMotif structure:\n")
+                f.write(f"  Number of unique motifs: {len(unique_motifs)}\n")
+                f.write(f"  Motif IDs: {unique_motifs.cpu().numpy()}\n")
+                f.write(f"  Node-to-motif mapping: {nodes_to_motifs.cpu().numpy()}\n")
+                
+                # Motif sizes
+                f.write(f"\n  Motif sizes:\n")
+                for motif_id in unique_motifs:
+                    size = (nodes_to_motifs == motif_id).sum().item()
+                    f.write(f"    Motif {motif_id.item()}: {size} nodes\n")
+            else:
+                f.write("\nMotif structure: Not available\n")
+            
+            # Label
+            if hasattr(batch_data, 'y'):
+                # Get label for this specific graph
+                if batch_data.y.dim() > 1:
+                    label = batch_data.y[graph_idx].cpu().numpy()
+                else:
+                    label = batch_data.y[graph_idx].item()
+                f.write(f"\nGraph label: {label}\n")
+            
+            # =====================================================================
+            # SECTION 2: NODE EMBEDDINGS
+            # =====================================================================
+            f.write("\n" + "-" * 80 + "\n")
+            f.write("2. NODE EMBEDDINGS (from GNN backbone)\n")
+            f.write("-" * 80 + "\n\n")
+            
+            with torch.no_grad():
+                edge_attr = batch_data.edge_attr if hasattr(batch_data, 'edge_attr') else None
+                emb = model.get_emb(batch_data.x, batch_data.edge_index, batch=batch_data.batch, edge_attr=edge_attr)
+                node_emb = emb[node_mask]
+            
+            f.write(f"Embedding shape: {node_emb.shape}\n")
+            f.write(f"Embedding stats: mean={node_emb.mean().item():.4f}, std={node_emb.std().item():.4f}, "
+                   f"min={node_emb.min().item():.4f}, max={node_emb.max().item():.4f}\n")
+            
+            f.write(f"\nEmbedding samples (first 5 nodes, first 10 dims):\n")
+            for i in range(min(5, num_nodes)):
+                f.write(f"  Node {i}: {node_emb[i, :10].cpu().numpy()}\n")
+            
+            # =====================================================================
+            # SECTION 3: METHOD = None (Baseline)
+            # =====================================================================
+            f.write("\n" + "-" * 80 + "\n")
+            f.write("3. METHOD: None (BASELINE)\n")
+            f.write("-" * 80 + "\n\n")
+            f.write("Description: Standard GSAT - node-level attention, no motif information used.\n\n")
+            
+            with torch.no_grad():
+                # Get node attention
+                att_log_logits = extractor(emb, batch_data.edge_index, batch_data.batch)
+                node_att = torch.sigmoid(att_log_logits)
+                
+                graph_node_att = node_att[node_mask]
+                
+                f.write(f"Node attention shape: {graph_node_att.shape}\n")
+                f.write(f"Node attention stats: mean={graph_node_att.mean().item():.4f}, "
+                       f"std={graph_node_att.std().item():.4f}, "
+                       f"min={graph_node_att.min().item():.4f}, max={graph_node_att.max().item():.4f}\n")
+                f.write(f"\nNode attention values:\n")
+                for i in range(min(10, num_nodes)):
+                    f.write(f"  Node {i}: {graph_node_att[i].item():.4f}\n")
+                
+                # Lift to edge attention
+                src_full, dst_full = batch_data.edge_index
+                edge_att_full = node_att[src_full] * node_att[dst_full]
+                graph_edge_att = edge_att_full[edge_mask]
+                
+                f.write(f"\nEdge attention (lifted from nodes):\n")
+                f.write(f"  Shape: {graph_edge_att.shape}\n")
+                f.write(f"  Stats: mean={graph_edge_att.mean().item():.4f}, "
+                       f"std={graph_edge_att.std().item():.4f}\n")
+                f.write(f"\n  First 10 edges:\n")
+                for i in range(min(10, num_edges)):
+                    f.write(f"    Edge {local_src[i].item()}->{local_dst[i].item()}: {graph_edge_att[i].item():.4f}\n")
+            
+            # =====================================================================
+            # SECTION 4: METHOD = 'loss' (Motif Consistency Loss)
+            # =====================================================================
+            f.write("\n" + "-" * 80 + "\n")
+            f.write("4. METHOD: 'loss' (MOTIF CONSISTENCY LOSS)\n")
+            f.write("-" * 80 + "\n\n")
+            f.write("Description: Same attention as baseline, but adds motif consistency loss\n")
+            f.write("             to encourage similar attention within motifs.\n\n")
+            
+            if hasattr(batch_data, 'nodes_to_motifs'):
+                with torch.no_grad():
+                    # Same attention as baseline
+                    f.write("Attention: Same as baseline (node-level)\n")
+                    f.write("Edge attention: Same as baseline\n\n")
+                    
+                    # Calculate motif consistency loss for this graph
+                    nodes_to_motifs_full = batch_data.nodes_to_motifs
+                    
+                    f.write("Motif Consistency Analysis:\n")
+                    for motif_id in unique_motifs:
+                        motif_mask = (nodes_to_motifs == motif_id)
+                        motif_att_vals = graph_node_att[motif_mask]
+                        if len(motif_att_vals) > 1:
+                            variance = motif_att_vals.var().item()
+                            f.write(f"  Motif {motif_id.item()}: "
+                                   f"mean_att={motif_att_vals.mean().item():.4f}, "
+                                   f"variance={variance:.6f}, "
+                                   f"nodes={[f'{v.item():.4f}' for v in motif_att_vals]}\n")
+                        else:
+                            f.write(f"  Motif {motif_id.item()}: "
+                                   f"att={motif_att_vals.mean().item():.4f} (single node)\n")
+            else:
+                f.write("Motif information not available - same as baseline.\n")
+            
+            # =====================================================================
+            # SECTION 5: METHOD = 'readout' (Motif-level Pooling)
+            # =====================================================================
+            f.write("\n" + "-" * 80 + "\n")
+            f.write("5. METHOD: 'readout' (MOTIF-LEVEL POOLING)\n")
+            f.write("-" * 80 + "\n\n")
+            f.write("Description: Pool node embeddings to motif level, score motifs,\n")
+            f.write("             then lift attention back to nodes and edges.\n\n")
+            
+            if hasattr(batch_data, 'nodes_to_motifs'):
+                with torch.no_grad():
+                    # Step 1: Motif pooling
+                    f.write("Step 1: Motif Mean Pooling\n")
+                    motif_emb, motif_batch, inverse_indices = motif_mean_pooling(
+                        emb, batch_data.nodes_to_motifs, batch_data.batch
+                    )
+                    
+                    # Get motifs for this graph
+                    graph_batch_idx = batch_data.batch[node_mask][0].item()
+                    motif_mask_for_graph = (motif_batch == graph_batch_idx)
+                    graph_motif_emb = motif_emb[motif_mask_for_graph]
+                    
+                    f.write(f"  Total motif embeddings: {motif_emb.shape}\n")
+                    f.write(f"  Motifs in this graph: {graph_motif_emb.shape[0]}\n")
+                    f.write(f"  Motif embedding dim: {graph_motif_emb.shape[1]}\n")
+                    f.write(f"\n  Motif embedding stats:\n")
+                    for i in range(min(5, graph_motif_emb.shape[0])):
+                        f.write(f"    Motif {i}: mean={graph_motif_emb[i].mean().item():.4f}, "
+                               f"norm={graph_motif_emb[i].norm().item():.4f}\n")
+                    
+                    # Step 2: Motif attention
+                    f.write("\nStep 2: Motif Attention Scoring\n")
+                    motif_att_log_logits = extractor(motif_emb, None, motif_batch)
+                    motif_att = torch.sigmoid(motif_att_log_logits)
+                    graph_motif_att = motif_att[motif_mask_for_graph]
+                    
+                    f.write(f"  Motif attention values:\n")
+                    for i in range(graph_motif_att.shape[0]):
+                        f.write(f"    Motif {i}: {graph_motif_att[i].item():.4f}\n")
+                    
+                    # Step 3: Lift to node attention
+                    f.write("\nStep 3: Lift Motif Attention to Nodes\n")
+                    node_att_from_motif = lift_motif_att_to_node_att(motif_att, inverse_indices)
+                    graph_node_att_readout = node_att_from_motif[node_mask]
+                    
+                    f.write(f"  Node attention (from motifs):\n")
+                    for i in range(min(10, num_nodes)):
+                        f.write(f"    Node {i}: {graph_node_att_readout[i].item():.4f}\n")
+                    
+                    # Step 4: Lift to edge attention
+                    f.write("\nStep 4: Lift to Edge Attention\n")
+                    edge_att_readout = node_att_from_motif[src_full] * node_att_from_motif[dst_full]
+                    graph_edge_att_readout = edge_att_readout[edge_mask]
+                    
+                    f.write(f"  Edge attention stats: mean={graph_edge_att_readout.mean().item():.4f}, "
+                           f"std={graph_edge_att_readout.std().item():.4f}\n")
+                    f.write(f"\n  First 10 edges:\n")
+                    for i in range(min(10, num_edges)):
+                        f.write(f"    Edge {local_src[i].item()}->{local_dst[i].item()}: "
+                               f"{graph_edge_att_readout[i].item():.4f}\n")
+            else:
+                f.write("Motif information not available - cannot run readout method.\n")
+            
+            # =====================================================================
+            # SECTION 6: METHOD = 'graph' (Motif Graph Construction)
+            # =====================================================================
+            f.write("\n" + "-" * 80 + "\n")
+            f.write("6. METHOD: 'graph' (MOTIF GRAPH CONSTRUCTION)\n")
+            f.write("-" * 80 + "\n\n")
+            f.write("Description: Construct a coarsened motif-level graph,\n")
+            f.write("             run GNN on it, then map attention back to original edges.\n\n")
+            
+            if hasattr(batch_data, 'nodes_to_motifs'):
+                with torch.no_grad():
+                    # Step 1: Construct motif graph
+                    f.write("Step 1: Construct Motif Graph\n")
+                    motif_x, motif_edge_index, motif_edge_attr, motif_batch_graph, unique_motifs_graph, inverse_indices_graph = \
+                        construct_motif_graph(batch_data.x, batch_data.edge_index, edge_attr, 
+                                            batch_data.nodes_to_motifs, batch_data.batch)
+                    
+                    # Get motif graph for this specific graph
+                    motif_mask_graph = (motif_batch_graph == graph_batch_idx)
+                    num_motif_nodes = motif_mask_graph.sum().item()
+                    
+                    f.write(f"  Original graph: {num_nodes} nodes, {num_edges} edges\n")
+                    f.write(f"  Motif graph: {num_motif_nodes} nodes (motifs)\n")
+                    
+                    # Count motif edges for this graph
+                    if motif_edge_index.size(1) > 0:
+                        motif_src, motif_dst = motif_edge_index
+                        motif_node_indices = torch.where(motif_mask_graph)[0]
+                        # Create set for fast lookup
+                        valid_motif_nodes = set(motif_node_indices.cpu().numpy())
+                        motif_edge_mask = torch.tensor([
+                            (s.item() in valid_motif_nodes and d.item() in valid_motif_nodes)
+                            for s, d in zip(motif_src, motif_dst)
+                        ], device=device)
+                        num_motif_edges = motif_edge_mask.sum().item()
+                    else:
+                        num_motif_edges = 0
+                    
+                    f.write(f"  Motif edges: {num_motif_edges}\n")
+                    f.write(f"  Compression ratio: {num_nodes}/{num_motif_nodes} = {num_nodes/max(1,num_motif_nodes):.2f}x\n")
+                    
+                    # Motif features
+                    graph_motif_x = motif_x[motif_mask_graph]
+                    f.write(f"\n  Motif node features:\n")
+                    for i in range(min(5, num_motif_nodes)):
+                        f.write(f"    Motif node {i}: mean={graph_motif_x[i].mean().item():.4f}, "
+                               f"norm={graph_motif_x[i].norm().item():.4f}\n")
+                    
+                    # Step 2: Get motif embeddings
+                    f.write("\nStep 2: Motif Graph Embeddings (from GNN)\n")
+                    motif_emb_graph = model.get_emb(motif_x, motif_edge_index, batch=motif_batch_graph, 
+                                                   edge_attr=motif_edge_attr)
+                    graph_motif_emb_g = motif_emb_graph[motif_mask_graph]
+                    
+                    f.write(f"  Motif embedding shape: {graph_motif_emb_g.shape}\n")
+                    f.write(f"  Embedding stats: mean={graph_motif_emb_g.mean().item():.4f}, "
+                           f"std={graph_motif_emb_g.std().item():.4f}\n")
+                    
+                    # Step 3: Motif attention
+                    f.write("\nStep 3: Motif Attention Scoring\n")
+                    motif_att_log_graph = extractor(motif_emb_graph, motif_edge_index, motif_batch_graph)
+                    motif_att_graph = torch.sigmoid(motif_att_log_graph)
+                    graph_motif_att_g = motif_att_graph[motif_mask_graph]
+                    
+                    f.write(f"  Motif attention values:\n")
+                    for i in range(min(10, num_motif_nodes)):
+                        f.write(f"    Motif node {i}: {graph_motif_att_g[i].item():.4f}\n")
+                    
+                    # Step 4: Map to original edge attention
+                    f.write("\nStep 4: Map to Original Edge Attention\n")
+                    edge_att_graph = map_motif_att_to_edge_att(motif_att_graph, batch_data.edge_index, 
+                                                              inverse_indices_graph)
+                    graph_edge_att_graph = edge_att_graph[edge_mask]
+                    
+                    f.write(f"  Edge attention stats: mean={graph_edge_att_graph.mean().item():.4f}, "
+                           f"std={graph_edge_att_graph.std().item():.4f}\n")
+                    f.write(f"\n  First 10 edges:\n")
+                    for i in range(min(10, num_edges)):
+                        f.write(f"    Edge {local_src[i].item()}->{local_dst[i].item()}: "
+                               f"{graph_edge_att_graph[i].item():.4f}\n")
+                    
+                    # Intra-motif vs inter-motif edge analysis
+                    f.write("\nStep 5: Intra-motif vs Inter-motif Edge Analysis\n")
+                    local_inverse = inverse_indices_graph[node_mask]
+                    src_motif = local_inverse[local_src - local_src.min()]
+                    dst_motif = local_inverse[local_dst - local_dst.min()]
+                    
+                    intra_mask = (src_motif == dst_motif)
+                    inter_mask = ~intra_mask
+                    
+                    if intra_mask.any():
+                        intra_att = graph_edge_att_graph[intra_mask]
+                        f.write(f"  Intra-motif edges: {intra_mask.sum().item()}, "
+                               f"mean_att={intra_att.mean().item():.4f}\n")
+                    if inter_mask.any():
+                        inter_att = graph_edge_att_graph[inter_mask]
+                        f.write(f"  Inter-motif edges: {inter_mask.sum().item()}, "
+                               f"mean_att={inter_att.mean().item():.4f}\n")
+            else:
+                f.write("Motif information not available - cannot run graph method.\n")
+            
+            f.write("\n")
+    
+    print(f"\n[INFO] Detailed pipeline output saved to: {output_file}")
+    print(f"[INFO] Processed {len(test_graphs)} graphs through all 4 methods")
+    return output_file
+
+
 def create_ordered_batch_iterator(dataset, batch_size=2):
     """
     Create ordered batch iterator from dataset to ensure data correspondence.
@@ -1850,6 +2264,8 @@ def main():
                         help='For graph method: also train classifier on motif graph (auxiliary loss)')
     parser.add_argument('--separate_motif_model', action='store_true', default=False,
                         help='For graph method: use separate GNN for motif graph processing (vs shared parameters)')
+    parser.add_argument('--run_test_graphs', type=int, default=0,
+                        help='Run N graphs through the pipeline and save detailed outputs to file (0 = disabled)')
     parser.add_argument('--config', type=str, default=None,
                    help='Path to tuning config file')
     parser.add_argument('--cuda', type=int, help='cuda device id, -1 for cpu')
@@ -1907,6 +2323,42 @@ def main():
     num_seeds = global_config['num_seeds']
 
     device = torch.device(f'cuda:{cuda_id}' if cuda_id >= 0 else 'cpu')
+
+    # Handle --run_test_graphs mode (run N graphs through pipeline and exit)
+    if args.run_test_graphs > 0:
+        print(f"\n[INFO] Running test graph pipeline mode with {args.run_test_graphs} graphs")
+        
+        # Load data
+        data_config = local_config['data_config']
+        model_config = local_config['model_config']
+        batch_size = data_config['batch_size']
+        splits = data_config.get('splits', None)
+        
+        loaders, test_set, x_dim, edge_attr_dim, num_class, aux_info, datasets, _ = get_data_loaders(
+            data_dir, dataset_name, batch_size, splits, 0, data_config.get('mutag_x', False), fold
+        )
+        
+        # Create model and extractor
+        model_config['deg'] = aux_info['deg']
+        model = get_model(x_dim, edge_attr_dim, num_class, aux_info['multi_label'], model_config, device)
+        extractor = ExtractorMLP(model_config['hidden_size'], local_config['shared_config']).to(device)
+        
+        # Create output file
+        output_file = f'test_pipeline_output_{dataset_name}_{model_name}_fold{fold}.txt'
+        
+        # Run test pipeline
+        run_test_graphs_pipeline(
+            n_graphs=args.run_test_graphs,
+            model=model,
+            extractor=extractor,
+            data_loader=loaders['valid'],  # Use validation set for testing
+            device=device,
+            output_file=output_file,
+            model_config=model_config
+        )
+        
+        print(f"\n[INFO] Test pipeline complete. Output saved to: {output_file}")
+        return  # Exit after test mode
 
     # If seed is specified via command line, use it; otherwise use range from config
     if args.seed is not None:
