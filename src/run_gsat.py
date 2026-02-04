@@ -2333,9 +2333,11 @@ def main():
         model_config = local_config['model_config']
         batch_size = data_config['batch_size']
         splits = data_config.get('splits', None)
+
+        path = "/nfs/stak/users/kokatea/hpc-share/ChemIntuit/MotifBreakdown/DICTIONARY_NOFILTER"
         
         loaders, test_set, x_dim, edge_attr_dim, num_class, aux_info, datasets, _ = get_data_loaders(
-            data_dir, dataset_name, batch_size, splits, 0, data_config.get('mutag_x', False), fold
+            data_dir, dataset_name, batch_size, splits, 0, data_config.get('mutag_x', False), fold, path = path
         )
         
         # Create model and extractor
