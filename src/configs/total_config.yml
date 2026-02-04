@@ -115,7 +115,7 @@ GSAT_config:
                                      #   Source: run_gsat.py line 215, 1161
   
   # --- Training Parameters ---
-  epochs: 100                        # [REQUIRED] Number of GSAT training epochs
+  epochs: 500                        # [REQUIRED] Number of GSAT training epochs
                                      #   Source: run_gsat.py line 212
   
   lr: 1.0e-3                         # [REQUIRED] Learning rate for GSAT training
