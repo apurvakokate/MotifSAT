@@ -540,7 +540,9 @@ def create_slurm_scripts(manifest, output_dir, datasets, models, folds, seeds, b
     """
     experiment_name = manifest['experiment_name']
     experiment_dir = Path(output_dir) / experiment_name
-    slurm_dir = experiment_dir / 'slurm_scripts'
+    # Save slurm scripts under src/ directory (same as run scripts)
+    src_dir = Path('.')  # Current directory (src/)
+    slurm_dir = src_dir / 'slurm_scripts'
     slurm_dir.mkdir(exist_ok=True)
     
     # Default base path if not provided
