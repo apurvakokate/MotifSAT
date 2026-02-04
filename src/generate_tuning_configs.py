@@ -126,9 +126,9 @@ def generate_config_grid(base_config, param_grid, experiment_overrides=None):
     return configs
 
 
-def create_baseline_experiment(base_config):
+def create_method_comparison_experiment(base_config):
     """
-    Create baseline experiment: test each motif incorporation method.
+    Compare all motif incorporation methods.
     
     Research Question: Which motif incorporation method works best?
     
@@ -320,9 +320,9 @@ def create_learning_rate_tuning(base_config):
 
 
 EXPERIMENT_TYPES = {
-    'baseline': {
-        'description': 'Test all motif incorporation methods with shared/separate models (7 configs)',
-        'generator': create_baseline_experiment,
+    'method_comparison': {
+        'description': 'Compare all motif incorporation methods with shared/separate models (7 configs)',
+        'generator': create_method_comparison_experiment,
     },
     'loss_tuning': {
         'description': 'Tune loss coefficients (3×3×5 = 45 configs)',

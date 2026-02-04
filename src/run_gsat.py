@@ -821,7 +821,15 @@ class GSAT(nn.Module):
                     )
                     wandb.log(explainer_metrics)
                     print(f"[INFO] Fidelity-: {explainer_metrics['explainer/fidelity_minus']:.4f}, "
-                          f"Fidelity+: {explainer_metrics['explainer/fidelity_plus']:.4f}")
+                          f"Fidelity+: {explainer_metrics['explainer/fidelity_plus']:.4f}, "
+                          f"Sparsity: {explainer_metrics['explainer/sparsity']:.4f}")
+                    print(f"[INFO] Edge Att - Mean: {explainer_metrics['edge_att/mean']:.4f}, "
+                          f"Std: {explainer_metrics['edge_att/std']:.4f}, "
+                          f"Low(<0.3): {explainer_metrics['edge_att/pct_below_0.3']:.2%}, "
+                          f"High(>0.7): {explainer_metrics['edge_att/pct_above_0.7']:.2%}")
+                    if 'motif/att_impact_correlation' in explainer_metrics:
+                        print(f"[INFO] Motif Att-Impact Correlation: {explainer_metrics['motif/att_impact_correlation']:.4f} "
+                              f"(n={explainer_metrics.get('motif/att_impact_n_samples', 0)})")
                 except Exception as e:
                     print(f"[WARNING] Failed to calculate explainer performance: {e}")
 
@@ -1021,6 +1029,7 @@ class GSAT(nn.Module):
                     f'{phase}/pred_loss': loss_dict['pred'],
                     f'{phase}/info_loss': loss_dict['info'],
                     f'{phase}/motif_loss': loss_dict.get('motif_consistency', 0),
+                    f'{phase}/motif_graph_loss': loss_dict.get('motif_graph_loss', 0),
                     f'{phase}/att_auroc': att_auroc if att_auroc is not None else 0,
                     f'{phase}/precision_k': precision if precision is not None else 0,
                     'epoch': epoch,
@@ -1036,11 +1045,53 @@ class GSAT(nn.Module):
                 if phase == 'train':
                     wandb_metrics['learning_rate'] = get_lr(self.optimizer)
                 
+                # Compute attention quality metrics
+                att_quality = self._compute_attention_quality_metrics(att)
+                wandb_metrics.update({f'{phase}/{k}': v for k, v in att_quality.items()})
+                
                 wandb.log(wandb_metrics)
             except Exception as e:
                 pass  # Silently fail if wandb is not initialized
         
         return desc, att_auroc, precision, clf_acc, clf_roc, loss_dict['pred']
+    
+    def _compute_attention_quality_metrics(self, att):
+        """
+        Compute attention quality metrics.
+        
+        - Entropy: Lower = more decisive/peaked attention
+        - Gini: Higher = more unequal/sparse attention
+        - Sparsity: Fraction of attention values below threshold
+        """
+        att_np = att.numpy() if torch.is_tensor(att) else att
+        att_np = att_np.flatten()
+        
+        # Clamp to avoid log(0)
+        att_np = np.clip(att_np, 1e-10, 1 - 1e-10)
+        
+        metrics = {}
+        
+        # Entropy (normalized to [0, 1])
+        entropy = -np.mean(att_np * np.log(att_np) + (1 - att_np) * np.log(1 - att_np))
+        max_entropy = np.log(2)  # Maximum entropy for binary
+        metrics['att_entropy'] = entropy / max_entropy
+        
+        # Gini coefficient (measures inequality/sparsity)
+        sorted_att = np.sort(att_np)
+        n = len(sorted_att)
+        if n > 0:
+            cumulative = np.cumsum(sorted_att)
+            gini = (2 * np.sum((np.arange(1, n + 1) * sorted_att))) / (n * np.sum(sorted_att) + 1e-10) - (n + 1) / n
+            metrics['att_gini'] = max(0, gini)  # Gini should be non-negative
+        
+        # Sparsity metrics
+        metrics['att_sparsity_0.1'] = float(np.mean(att_np < 0.1))  # % below 0.1
+        metrics['att_sparsity_0.5'] = float(np.mean(att_np < 0.5))  # % below 0.5
+        
+        # Polarization: % of attention near 0 or 1 (good for explainability)
+        metrics['att_polarization'] = float(np.mean((att_np < 0.2) | (att_np > 0.8)))
+        
+        return metrics
 
     def get_eval_score(self, epoch, phase, exp_labels, att, precision_at_k, clf_labels, clf_logits, batch):
         if self.task_type == 'regression':
@@ -1322,90 +1373,292 @@ def check_artifacts_exist(seed_dir):
     return exists
 
 
-def calculate_explainer_performance(model, extractor, data_loader, device, epoch, learn_edge_att=True):
+def calculate_explainer_performance(model, extractor, data_loader, device, epoch, learn_edge_att=False):
     """
-    Calculate explainer performance by comparing predictions:
-    1. Original graph vs graph with important regions removed (fidelity-)
-    2. Original graph vs only important regions kept (fidelity+)
+    Calculate explainer performance using edge masking approach.
     
-    Returns metrics for wandb logging.
+    Fidelity metrics measure how well attention scores identify important edges:
+    - Fidelity- : Prediction drop when masking important edges (higher = better)
+    - Fidelity+ : Prediction maintained when keeping only important edges (lower = better)
+    
+    Also collects edge attention distribution statistics for wandb logging.
+    
+    Args:
+        model: The GNN classifier
+        extractor: The attention extractor MLP
+        data_loader: DataLoader for evaluation
+        device: torch device
+        epoch: Current epoch number
+        learn_edge_att: Whether extractor outputs edge-level attention
+    
+    Returns:
+        Dictionary of metrics for wandb logging
     """
     model.eval()
     extractor.eval()
     
-    fidelity_minus = []  # Prediction drop when removing important parts
-    fidelity_plus = []   # Prediction maintained with only important parts
+    fidelity_minus = []  # Prediction drop when masking important edges
+    fidelity_plus = []   # Prediction similarity when keeping only important edges
+    sparsity = []        # Fraction of edges with low attention
+    
+    # Collect all attention values for distribution analysis
+    all_att_values = []
+    all_node_att_values = []  # For node-level attention (before edge conversion)
+    
+    # Motif consistency metrics
+    within_motif_variances = []
+    between_motif_variances = []
+    
+    # Motif attention vs impact correlation (sampled for efficiency)
+    motif_att_scores = []
+    motif_impact_scores = []
+    max_batches_for_correlation = 3  # Only sample first N batches for correlation
+    
+    top_k_ratio = 0.2  # Consider top 20% as "important"
     
     with torch.no_grad():
-        for batch_data in data_loader:
+        for batch_idx, batch_data in enumerate(data_loader):
             batch_data = batch_data.to(device)
             
-            # Process each graph in the batch individually to avoid shape mismatches
+            # Get edge attributes if available
+            edge_attr = batch_data.edge_attr if hasattr(batch_data, 'edge_attr') else None
+            
+            # Get node embeddings
+            emb = model.get_emb(batch_data.x, batch_data.edge_index, batch_data.batch, edge_attr=edge_attr)
+            
+            # Get attention scores
+            att_log_logits = extractor(emb, batch_data.edge_index, batch_data.batch)
+            att = att_log_logits.sigmoid()
+            
+            # Store node attention for motif analysis
+            node_att = att.squeeze()
+            all_node_att_values.append(node_att.cpu().numpy())
+            
+            # Compute within-motif consistency if motif information available
+            if hasattr(batch_data, 'nodes_to_motifs') and not learn_edge_att:
+                try:
+                    nodes_to_motifs = batch_data.nodes_to_motifs
+                    graph_batch = batch_data.batch
+                    
+                    # Create unique (graph_id, motif_id) pairs
+                    max_motif_id = nodes_to_motifs.max().item() + 1
+                    graph_motif_id = graph_batch * max_motif_id + nodes_to_motifs
+                    
+                    unique_graph_motifs = graph_motif_id.unique()
+                    
+                    motif_means = []
+                    for gm_id in unique_graph_motifs:
+                        mask = (graph_motif_id == gm_id)
+                        if mask.sum() > 1:
+                            motif_att = node_att[mask]
+                            within_motif_variances.append(motif_att.var().item())
+                            motif_means.append(motif_att.mean().item())
+                    
+                    # Between-motif variance (variance of motif means)
+                    if len(motif_means) > 1:
+                        between_motif_variances.append(np.var(motif_means))
+                    
+                    # === Motif attention vs impact correlation (sampled) ===
+                    # Only compute for first few batches to save time
+                    if batch_idx < max_batches_for_correlation:
+                        # Get original predictions for all graphs in batch
+                        orig_output = model(batch_data.x, batch_data.edge_index, graph_batch,
+                                           edge_attr=edge_attr, edge_atten=None)
+                        orig_probs = torch.sigmoid(orig_output).squeeze()
+                        
+                        # For each unique motif in batch, compute attention and impact
+                        src, dst = batch_data.edge_index
+                        for gm_id in unique_graph_motifs:
+                            node_mask = (graph_motif_id == gm_id)
+                            if node_mask.sum() < 1:
+                                continue
+                            
+                            # Get graph index for this motif
+                            graph_id = graph_batch[node_mask][0].item()
+                            
+                            # Mean attention for this motif
+                            motif_mean_att = node_att[node_mask].mean().item()
+                            
+                            # Create edge mask: edges where BOTH endpoints are in this motif
+                            src_in_motif = node_mask[src]
+                            dst_in_motif = node_mask[dst]
+                            motif_edge_mask = src_in_motif & dst_in_motif
+                            
+                            if motif_edge_mask.sum() == 0:
+                                continue
+                            
+                            # Mask this motif's edges (set attention to 0)
+                            masked_edge_att = edge_att.clone()
+                            masked_edge_att[motif_edge_mask] = 0.0
+                            
+                            # Get prediction with masked motif
+                            masked_output = model(batch_data.x, batch_data.edge_index, graph_batch,
+                                                 edge_attr=edge_attr, 
+                                                 edge_atten=masked_edge_att.unsqueeze(-1))
+                            masked_prob = torch.sigmoid(masked_output[graph_id]).item()
+                            
+                            # Impact = |original - masked|
+                            impact = abs(orig_probs[graph_id].item() - masked_prob)
+                            
+                            motif_att_scores.append(motif_mean_att)
+                            motif_impact_scores.append(impact)
+                            
+                except Exception:
+                    pass
+            
+            # Convert node attention to edge attention if needed
+            if not learn_edge_att:
+                # Node-level attention -> edge attention
+                src, dst = batch_data.edge_index
+                edge_att = att[src] * att[dst]
+            else:
+                edge_att = att
+            
+            edge_att = edge_att.squeeze()
+            all_att_values.append(edge_att.cpu().numpy())
+            
+            # Get original prediction (with full attention)
+            orig_output = model(batch_data.x, batch_data.edge_index, batch_data.batch, 
+                               edge_attr=edge_attr, edge_atten=None)
+            
+            # Process each graph in the batch
             num_graphs = batch_data.batch.max().item() + 1
             
             for graph_idx in range(num_graphs):
                 try:
-                    # Extract single graph from batch
-                    node_mask = batch_data.batch == graph_idx
-                    node_indices = torch.where(node_mask)[0]
-                    
                     # Get edges for this graph
+                    node_mask = batch_data.batch == graph_idx
                     edge_mask = node_mask[batch_data.edge_index[0]] & node_mask[batch_data.edge_index[1]]
-                    graph_edge_index = batch_data.edge_index[:, edge_mask]
                     
-                    # Remap node indices to start from 0
-                    node_mapping = torch.zeros(batch_data.x.size(0), dtype=torch.long, device=device)
-                    node_mapping[node_indices] = torch.arange(len(node_indices), device=device)
-                    graph_edge_index = node_mapping[graph_edge_index]
+                    if edge_mask.sum() == 0:
+                        continue
                     
-                    # Extract features
-                    graph_x = batch_data.x[node_mask]
-                    graph_nodes_to_motifs = batch_data.nodes_to_motifs[node_mask] if hasattr(batch_data, 'nodes_to_motifs') else None
-                    graph_batch = torch.zeros(graph_x.size(0), dtype=torch.long, device=device)
+                    graph_edge_att = edge_att[edge_mask]
+                    num_edges = graph_edge_att.size(0)
                     
-                    # Get original prediction
-                    orig_output, orig_emb = model(graph_x, graph_edge_index, graph_batch, graph_nodes_to_motifs)
-                    orig_pred = torch.sigmoid(orig_output) if orig_output.shape[-1] == 1 else torch.softmax(orig_output, dim=1)
+                    if num_edges < 2:
+                        continue
                     
-                    # Get attention scores
-                    att_log_logits = extractor(orig_emb, graph_edge_index, graph_batch)
-                    att = att_log_logits.sigmoid()
+                    # Determine threshold for important edges (top k%)
+                    k = max(1, int(top_k_ratio * num_edges))
+                    threshold = torch.topk(graph_edge_att, k).values[-1]
                     
-                    if learn_edge_att and graph_edge_index.size(1) > 0:
-                        # Edge-level attention
-                        num_edges = graph_edge_index.size(1)
-                        k = max(1, int(0.2 * num_edges))  # Keep top 20%
-                        
-                        if att.numel() >= k:
-                            top_k_indices = torch.topk(att.squeeze(), min(k, att.numel())).indices
-                            
-                            # Create mask for important edges
-                            important_mask = torch.zeros(num_edges, dtype=torch.bool, device=device)
-                            important_mask[top_k_indices] = True
-                            
-                            # Fidelity- : Remove important edges
-                            remaining_edges = graph_edge_index[:, ~important_mask]
-                            if remaining_edges.size(1) > 0:
-                                output_minus, _ = model(graph_x, remaining_edges, graph_batch, graph_nodes_to_motifs)
-                                pred_minus = torch.sigmoid(output_minus) if output_minus.shape[-1] == 1 else torch.softmax(output_minus, dim=1)
-                                fidelity_minus.append((orig_pred - pred_minus).abs().mean().item())
-                            
-                            # Fidelity+ : Keep only important edges
-                            important_edges = graph_edge_index[:, important_mask]
-                            if important_edges.size(1) > 0:
-                                output_plus, _ = model(graph_x, important_edges, graph_batch, graph_nodes_to_motifs)
-                                pred_plus = torch.sigmoid(output_plus) if output_plus.shape[-1] == 1 else torch.softmax(output_plus, dim=1)
-                                fidelity_plus.append((orig_pred - pred_plus).abs().mean().item())
-                
+                    # Create masks for important vs unimportant edges
+                    important_mask = graph_edge_att >= threshold
+                    
+                    # Calculate sparsity (fraction of low-attention edges)
+                    sparsity.append((~important_mask).float().mean().item())
+                    
+                    # Get original prediction for this graph
+                    orig_pred = orig_output[graph_idx]
+                    if orig_pred.dim() == 0:
+                        orig_pred = orig_pred.unsqueeze(0)
+                    orig_prob = torch.sigmoid(orig_pred)
+                    
+                    # Create edge attention masks for the full batch
+                    # Fidelity- : Set important edge attention to 0 (mask out important)
+                    fid_minus_att = edge_att.clone()
+                    fid_minus_att[edge_mask] = torch.where(
+                        important_mask,
+                        torch.zeros_like(graph_edge_att),
+                        graph_edge_att
+                    )
+                    
+                    # Fidelity+ : Set unimportant edge attention to 0 (keep only important)
+                    fid_plus_att = edge_att.clone()
+                    fid_plus_att[edge_mask] = torch.where(
+                        important_mask,
+                        graph_edge_att,
+                        torch.zeros_like(graph_edge_att)
+                    )
+                    
+                    # Get predictions with masked attention
+                    output_minus = model(batch_data.x, batch_data.edge_index, batch_data.batch,
+                                        edge_attr=edge_attr, edge_atten=fid_minus_att.unsqueeze(-1))
+                    output_plus = model(batch_data.x, batch_data.edge_index, batch_data.batch,
+                                       edge_attr=edge_attr, edge_atten=fid_plus_att.unsqueeze(-1))
+                    
+                    pred_minus = torch.sigmoid(output_minus[graph_idx])
+                    pred_plus = torch.sigmoid(output_plus[graph_idx])
+                    
+                    # Fidelity- : How much does prediction drop when removing important edges?
+                    # Higher is better (important edges are truly important)
+                    fidelity_minus.append((orig_prob - pred_minus).abs().item())
+                    
+                    # Fidelity+ : How similar is prediction when keeping only important edges?
+                    # Lower is better (important edges are sufficient)
+                    fidelity_plus.append((orig_prob - pred_plus).abs().item())
+                    
                 except Exception as e:
-                    # Skip this graph if there's an error
                     continue
+    
+    # Compute attention distribution statistics
+    if all_att_values:
+        all_att = np.concatenate(all_att_values)
+        att_mean = float(np.mean(all_att))
+        att_std = float(np.std(all_att))
+        att_median = float(np.median(all_att))
+        att_min = float(np.min(all_att))
+        att_max = float(np.max(all_att))
+        pct_low = float(np.mean(all_att < 0.3))  # % of edges with att < 0.3
+        pct_high = float(np.mean(all_att > 0.7))  # % of edges with att > 0.7
+        
+        # Create histogram for wandb
+        try:
+            att_histogram = wandb.Histogram(all_att, num_bins=50)
+        except:
+            att_histogram = None
+    else:
+        att_mean = att_std = att_median = att_min = att_max = pct_low = pct_high = 0.0
+        att_histogram = None
     
     metrics = {
         'explainer/fidelity_minus': np.mean(fidelity_minus) if fidelity_minus else 0.0,
         'explainer/fidelity_plus': np.mean(fidelity_plus) if fidelity_plus else 0.0,
-        'explainer/epoch': epoch
+        'explainer/sparsity': np.mean(sparsity) if sparsity else 0.0,
+        'explainer/epoch': epoch,
+        # Edge attention distribution
+        'edge_att/mean': att_mean,
+        'edge_att/std': att_std,
+        'edge_att/median': att_median,
+        'edge_att/min': att_min,
+        'edge_att/max': att_max,
+        'edge_att/pct_below_0.3': pct_low,
+        'edge_att/pct_above_0.7': pct_high,
     }
+    
+    # Add histogram if available
+    if att_histogram is not None:
+        metrics['edge_att/distribution'] = att_histogram
+    
+    # Add motif consistency metrics (critical for motif-based analysis)
+    if within_motif_variances:
+        metrics['motif/within_variance_mean'] = float(np.mean(within_motif_variances))
+        metrics['motif/within_variance_std'] = float(np.std(within_motif_variances))
+        # Lower within-motif variance = nodes in same motif have similar attention (good!)
+    
+    if between_motif_variances:
+        metrics['motif/between_variance_mean'] = float(np.mean(between_motif_variances))
+        # Higher between-motif variance = different motifs have different attention (good!)
+    
+    # Motif consistency ratio: high between / low within is ideal
+    if within_motif_variances and between_motif_variances:
+        within_mean = np.mean(within_motif_variances)
+        between_mean = np.mean(between_motif_variances)
+        if within_mean > 1e-10:
+            metrics['motif/consistency_ratio'] = float(between_mean / within_mean)
+        # Higher ratio = better motif-level attention consistency
+    
+    # Motif attention vs impact correlation
+    # Higher correlation = attention correctly identifies impactful motifs
+    if len(motif_att_scores) >= 5:  # Need enough samples for meaningful correlation
+        try:
+            correlation = np.corrcoef(motif_att_scores, motif_impact_scores)[0, 1]
+            if not np.isnan(correlation):
+                metrics['motif/att_impact_correlation'] = float(correlation)
+                metrics['motif/att_impact_n_samples'] = len(motif_att_scores)
+        except Exception:
+            pass
     
     return metrics
 
