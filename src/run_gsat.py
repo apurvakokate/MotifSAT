@@ -347,9 +347,9 @@ def run_test_graphs_pipeline(n_graphs, model, extractor, data_loader, device, ou
             
             # Node features summary
             node_x = batch_data.x[node_mask]
-            f.write(f"\nNode features (first 5 nodes, first 10 dims):\n")
-            for i in range(min(5, num_nodes)):
-                f.write(f"  Node {i}: {node_x[i, :10].cpu().numpy()}\n")
+            f.write(f"\nNode features:\n")
+            for i in range(num_nodes):
+                f.write(f"  Node {i}: {node_x[i].cpu().numpy()}\n")
             
             # Edge structure
             src, dst = batch_data.edge_index[:, edge_mask]
@@ -359,8 +359,8 @@ def run_test_graphs_pipeline(n_graphs, model, extractor, data_loader, device, ou
             local_src = node_remap[src]
             local_dst = node_remap[dst]
             
-            f.write(f"\nEdge list (first 10 edges):\n")
-            for i in range(min(10, num_edges)):
+            f.write(f"\nEdge list:\n")
+            for i in range(num_edges):
                 f.write(f"  Edge {i}: {local_src[i].item()} -> {local_dst[i].item()}\n")
             
             # Motif structure
@@ -405,9 +405,9 @@ def run_test_graphs_pipeline(n_graphs, model, extractor, data_loader, device, ou
             f.write(f"Embedding stats: mean={node_emb.mean().item():.4f}, std={node_emb.std().item():.4f}, "
                    f"min={node_emb.min().item():.4f}, max={node_emb.max().item():.4f}\n")
             
-            f.write(f"\nEmbedding samples (first 5 nodes, first 10 dims):\n")
-            for i in range(min(5, num_nodes)):
-                f.write(f"  Node {i}: {node_emb[i, :10].cpu().numpy()}\n")
+            f.write(f"\nEmbedding samples:\n")
+            for i in range(num_nodes):
+                f.write(f"  Node {i}: {node_emb[i].cpu().numpy()}\n")
             
             # =====================================================================
             # SECTION 3: METHOD = None (Baseline)
@@ -429,7 +429,7 @@ def run_test_graphs_pipeline(n_graphs, model, extractor, data_loader, device, ou
                        f"std={graph_node_att.std().item():.4f}, "
                        f"min={graph_node_att.min().item():.4f}, max={graph_node_att.max().item():.4f}\n")
                 f.write(f"\nNode attention values:\n")
-                for i in range(min(10, num_nodes)):
+                for i in range(num_nodes):
                     f.write(f"  Node {i}: {graph_node_att[i].item():.4f}\n")
                 
                 # Lift to edge attention
@@ -441,8 +441,8 @@ def run_test_graphs_pipeline(n_graphs, model, extractor, data_loader, device, ou
                 f.write(f"  Shape: {graph_edge_att.shape}\n")
                 f.write(f"  Stats: mean={graph_edge_att.mean().item():.4f}, "
                        f"std={graph_edge_att.std().item():.4f}\n")
-                f.write(f"\n  First 10 edges:\n")
-                for i in range(min(10, num_edges)):
+                f.write(f"\n  All edges:\n")
+                for i in range( num_edges):
                     f.write(f"    Edge {local_src[i].item()}->{local_dst[i].item()}: {graph_edge_att[i].item():.4f}\n")
             
             # =====================================================================
@@ -505,7 +505,7 @@ def run_test_graphs_pipeline(n_graphs, model, extractor, data_loader, device, ou
                     f.write(f"  Motifs in this graph: {graph_motif_emb.shape[0]}\n")
                     f.write(f"  Motif embedding dim: {graph_motif_emb.shape[1]}\n")
                     f.write(f"\n  Motif embedding stats:\n")
-                    for i in range(min(5, graph_motif_emb.shape[0])):
+                    for i in range(graph_motif_emb.shape[0]):
                         f.write(f"    Motif {i}: mean={graph_motif_emb[i].mean().item():.4f}, "
                                f"norm={graph_motif_emb[i].norm().item():.4f}\n")
                     
@@ -525,7 +525,7 @@ def run_test_graphs_pipeline(n_graphs, model, extractor, data_loader, device, ou
                     graph_node_att_readout = node_att_from_motif[node_mask]
                     
                     f.write(f"  Node attention (from motifs):\n")
-                    for i in range(min(10, num_nodes)):
+                    for i in range( num_nodes):
                         f.write(f"    Node {i}: {graph_node_att_readout[i].item():.4f}\n")
                     
                     # Step 4: Lift to edge attention
@@ -535,8 +535,8 @@ def run_test_graphs_pipeline(n_graphs, model, extractor, data_loader, device, ou
                     
                     f.write(f"  Edge attention stats: mean={graph_edge_att_readout.mean().item():.4f}, "
                            f"std={graph_edge_att_readout.std().item():.4f}\n")
-                    f.write(f"\n  First 10 edges:\n")
-                    for i in range(min(10, num_edges)):
+                    f.write(f"\n  All edges:\n")
+                    for i in range(num_edges):
                         f.write(f"    Edge {local_src[i].item()}->{local_dst[i].item()}: "
                                f"{graph_edge_att_readout[i].item():.4f}\n")
             else:
@@ -586,7 +586,7 @@ def run_test_graphs_pipeline(n_graphs, model, extractor, data_loader, device, ou
                     # Motif features
                     graph_motif_x = motif_x[motif_mask_graph]
                     f.write(f"\n  Motif node features:\n")
-                    for i in range(min(5, num_motif_nodes)):
+                    for i in range(num_motif_nodes):
                         f.write(f"    Motif node {i}: mean={graph_motif_x[i].mean().item():.4f}, "
                                f"norm={graph_motif_x[i].norm().item():.4f}\n")
                     
@@ -607,7 +607,7 @@ def run_test_graphs_pipeline(n_graphs, model, extractor, data_loader, device, ou
                     graph_motif_att_g = motif_att_graph[motif_mask_graph]
                     
                     f.write(f"  Motif attention values:\n")
-                    for i in range(min(10, num_motif_nodes)):
+                    for i in range(num_motif_nodes):
                         f.write(f"    Motif node {i}: {graph_motif_att_g[i].item():.4f}\n")
                     
                     # Step 4: Map to original edge attention
@@ -618,8 +618,8 @@ def run_test_graphs_pipeline(n_graphs, model, extractor, data_loader, device, ou
                     
                     f.write(f"  Edge attention stats: mean={graph_edge_att_graph.mean().item():.4f}, "
                            f"std={graph_edge_att_graph.std().item():.4f}\n")
-                    f.write(f"\n  First 10 edges:\n")
-                    for i in range(min(10, num_edges)):
+                    f.write(f"\n  All edges:\n")
+                    for i in range(num_edges):
                         f.write(f"    Edge {local_src[i].item()}->{local_dst[i].item()}: "
                                f"{graph_edge_att_graph[i].item():.4f}\n")
                     
