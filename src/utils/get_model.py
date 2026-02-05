@@ -37,10 +37,12 @@ class Criterion(nn.Module):
             # Ensure both tensors have the same shape by squeezing both
             loss = F.mse_loss(logits.squeeze(), targets.squeeze().float())
         elif self.num_class == 2 and not self.multi_label:
-            loss = F.binary_cross_entropy_with_logits(logits, targets.float())
-            # loss = F.binary_cross_entropy_with_logits(logits, targets.view(-1, 1).float())
+            # Squeeze both to ensure shapes match: [N] and [N]
+            # Some datasets have targets shape [N, 1], others have [N]
+            loss = F.binary_cross_entropy_with_logits(logits.squeeze(), targets.squeeze().float())
         elif self.num_class > 2 and not self.multi_label:
-            loss = F.cross_entropy(logits, targets.long())
+            # For multi-class, targets should be [N] with class indices
+            loss = F.cross_entropy(logits, targets.squeeze().long())
         else:
             is_labeled = targets == targets  # mask for labeled data
             loss = F.binary_cross_entropy_with_logits(logits[is_labeled], targets[is_labeled].float())
@@ -50,10 +52,10 @@ class Criterion(nn.Module):
 def get_preds(logits, multi_label):
     if multi_label:
         preds = (logits.sigmoid() > 0.5).float()
-    elif logits.shape[1] > 1:  # multi-class
+    elif len(logits.shape) > 1 and logits.shape[1] > 1:  # multi-class
         preds = logits.argmax(dim=1).float()
-    else:  # binary
-        preds = (logits.sigmoid() > 0.5).float().squeeze(-1)  # Remove the last dimension
+    else:  # binary (handles both [N] and [N, 1] shapes)
+        preds = (logits.squeeze().sigmoid() > 0.5).float()
     return preds
 
 
