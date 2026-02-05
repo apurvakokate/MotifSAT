@@ -993,7 +993,7 @@ class GSAT(nn.Module):
         
         # Compute motif consistency loss only for 'loss' method
         # For other methods, consistency is enforced structurally or not applicable
-        if self.motif_method == 'loss' and self.motif_loss_coef > 0:
+        if self.motif_method == 'loss' and self.motif_loss_coef > 0 and nodes_to_motifs is not None:
             motif_loss = motif_consistency_loss(att, nodes_to_motifs, batch) * self.motif_loss_coef
         else:
             motif_loss = att.new_tensor(0.0)
@@ -1031,7 +1031,11 @@ class GSAT(nn.Module):
         """
         # Check for unmapped nodes if using motif incorporation methods
         if self.motif_method in ['loss', 'readout', 'graph']:
-            check_no_unmapped_nodes(data.nodes_to_motifs)
+            nodes_to_motifs = getattr(data, 'nodes_to_motifs', None)
+            if nodes_to_motifs is None:
+                raise ValueError(f"motif_method='{self.motif_method}' requires nodes_to_motifs attribute in data. "
+                                f"This dataset may not support motif incorporation methods.")
+            check_no_unmapped_nodes(nodes_to_motifs)
         
         aux_clf_logits = None  # Auxiliary predictions from motif graph (if applicable)
         
@@ -1064,7 +1068,10 @@ class GSAT(nn.Module):
             
             # Step 2: Pool node embeddings to motif level using mean
             # Note: motif_mean_pooling keeps motifs separate per-graph in the batch
-            motif_emb, motif_batch, inverse_indices = motif_mean_pooling(emb, data.nodes_to_motifs, data.batch)
+            nodes_to_motifs = getattr(data, 'nodes_to_motifs', None)
+            if nodes_to_motifs is None:
+                raise ValueError("'readout' method requires nodes_to_motifs attribute in data")
+            motif_emb, motif_batch, inverse_indices = motif_mean_pooling(emb, nodes_to_motifs, data.batch)
             
             # Step 3: Get motif attention scores
             # Note: edge_index is not used when learn_edge_att=False
@@ -1087,9 +1094,12 @@ class GSAT(nn.Module):
             # =================================================================
             # GRAPH METHOD: Construct and process motif-level graph
             # =================================================================
+            nodes_to_motifs = getattr(data, 'nodes_to_motifs', None)
+            if nodes_to_motifs is None:
+                raise ValueError("'graph' method requires nodes_to_motifs attribute in data")
             # Step 1: Construct motif graph
             motif_x, motif_edge_index, motif_edge_attr, motif_batch, unique_motifs, inverse_indices = \
-                construct_motif_graph(data.x, data.edge_index, data.edge_attr, data.nodes_to_motifs, data.batch)
+                construct_motif_graph(data.x, data.edge_index, data.edge_attr, nodes_to_motifs, data.batch)
             
             # Step 2: Get motif embeddings from GNN on motif graph
             # Use separate model if configured, otherwise use shared model
@@ -1128,7 +1138,9 @@ class GSAT(nn.Module):
         else:
             raise ValueError(f"Unknown motif_incorporation_method: {self.motif_method}")
 
-        loss, loss_dict = self.__loss__(att, clf_logits, data.y, epoch, data.nodes_to_motifs, data.batch, aux_clf_logits)
+        # Get nodes_to_motifs if available (only needed for motif_method='loss')
+        nodes_to_motifs = getattr(data, 'nodes_to_motifs', None)
+        loss, loss_dict = self.__loss__(att, clf_logits, data.y, epoch, nodes_to_motifs, data.batch, aux_clf_logits)
         return edge_att, loss, loss_dict, clf_logits
 
     @torch.no_grad()
@@ -1261,12 +1273,9 @@ class GSAT(nn.Module):
             '''
             NOTE: CHECK LOGIC
             '''
-            if epoch == self.epochs - 1:
+            # Skip detailed score export if datasets are not provided (e.g., for paper dataset replication)
+            if epoch == self.epochs - 1 and self.datasets is not None:
                 print(f"[INFO] Computing attention scores using small batch processing")
-                
-                
-                
-                
                 
                 # Export node and edge scores to jsonl files using small batch processing
                 node_jsonl_path = os.path.join(self.seed_dir, 'node_scores.jsonl')
@@ -1300,8 +1309,12 @@ class GSAT(nn.Module):
                                 sample_results['sample'] = data 
 
                                 # For each motif in the current graph mask it out 
-
-                                for local_motif in data.nodes_to_motifs.unique():
+                                # Skip if nodes_to_motifs or masked_data_features are not available
+                                nodes_to_motifs = getattr(data, 'nodes_to_motifs', None)
+                                if nodes_to_motifs is None or self.masked_data_features is None:
+                                    continue
+                                    
+                                for local_motif in nodes_to_motifs.unique():
                                     # Convert tensor to int/Python scalar for key comparison
                                     local_motif_key = int(local_motif.item()) if hasattr(local_motif, 'item') else int(local_motif)
                                     
