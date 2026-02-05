@@ -2194,7 +2194,19 @@ def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_nam
     #     method_config['motif_loss_coef'] = 0.0
 
     batch_size, splits = data_config['batch_size'], data_config.get('splits', None)
-    loaders, test_set, x_dim, edge_attr_dim, num_class, aux_info, datasets, masked_data_features = get_data_loaders(data_dir, dataset_name, batch_size, splits, random_state, data_config.get('mutag_x', False), fold, path = path)
+    
+    # get_data_loaders returns different number of values depending on dataset:
+    # - Paper datasets (ba_2motifs, mutag, etc.): 6 values
+    # - Molecular datasets with motif info (BBBP, Mutagenicity, etc.): 8 values
+    loader_result = get_data_loaders(data_dir, dataset_name, batch_size, splits, random_state, data_config.get('mutag_x', False), fold, path=path)
+    
+    if len(loader_result) == 8:
+        loaders, test_set, x_dim, edge_attr_dim, num_class, aux_info, datasets, masked_data_features = loader_result
+    else:
+        # Paper datasets don't have motif information
+        loaders, test_set, x_dim, edge_attr_dim, num_class, aux_info = loader_result
+        datasets = None
+        masked_data_features = None
 
     model_config['deg'] = aux_info['deg']
     model = get_model(x_dim, edge_attr_dim, num_class, aux_info['multi_label'], model_config, device)
