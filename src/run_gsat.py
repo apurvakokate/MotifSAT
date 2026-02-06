@@ -1531,6 +1531,10 @@ class GSAT(nn.Module):
             clf_roc = mse   # Keep MSE as auxiliary metric
         else:
             clf_preds = get_preds(clf_logits, self.multi_label)
+            # Squeeze clf_labels to handle [N, 1] vs [N] shape mismatch
+            # Use squeezed labels for all subsequent calculations (accuracy, ROC-AUC, etc.)
+            if hasattr(clf_labels, 'squeeze'):
+                clf_labels = clf_labels.squeeze()
             clf_acc = 0 if self.multi_label else (clf_preds == clf_labels).sum().item() / clf_labels.shape[0]
 
         if batch:
@@ -1558,10 +1562,12 @@ class GSAT(nn.Module):
                     else:
                         clf_logits_tensor = clf_logits
                     clf_probs = torch.sigmoid(clf_logits_tensor).numpy()
+                    # Ensure clf_labels is numpy array
+                    clf_labels_np = clf_labels.numpy() if hasattr(clf_labels, 'numpy') else clf_labels
                     # Handle NaN values in labels for multi-label
-                    valid_mask = ~np.isnan(clf_labels)
+                    valid_mask = ~np.isnan(clf_labels_np)
                     if valid_mask.any():
-                        clf_roc = roc_auc_score(clf_labels[valid_mask], clf_probs[valid_mask], average='micro')
+                        clf_roc = roc_auc_score(clf_labels_np[valid_mask], clf_probs[valid_mask], average='micro')
                     else:
                         clf_roc = 0
                 elif len(np.unique(clf_labels)) == 2:
@@ -1570,10 +1576,12 @@ class GSAT(nn.Module):
                         clf_logits_tensor = torch.from_numpy(clf_logits)
                     else:
                         clf_logits_tensor = clf_logits
-                    clf_probs = torch.sigmoid(clf_logits_tensor).numpy()
-                    if clf_probs.ndim > 1 and clf_probs.shape[1] > 1:
-                        clf_probs = clf_probs[:, 1] if clf_probs.shape[1] == 2 else clf_probs.squeeze()
-                    clf_roc = roc_auc_score(clf_labels, clf_probs)
+                    clf_probs = torch.sigmoid(clf_logits_tensor.squeeze()).numpy()
+                    # Ensure both clf_labels and clf_probs are 1D for roc_auc_score
+                    clf_labels_np = clf_labels.numpy() if hasattr(clf_labels, 'numpy') else clf_labels
+                    clf_labels_np = clf_labels_np.squeeze() if hasattr(clf_labels_np, 'squeeze') else clf_labels_np
+                    clf_probs = clf_probs.squeeze() if hasattr(clf_probs, 'squeeze') else clf_probs
+                    clf_roc = roc_auc_score(clf_labels_np, clf_probs)
                 else:
                     # Multi-class classification
                     if isinstance(clf_logits, np.ndarray):
@@ -1581,7 +1589,10 @@ class GSAT(nn.Module):
                     else:
                         clf_logits_tensor = clf_logits
                     clf_probs = torch.softmax(clf_logits_tensor, dim=1).numpy()
-                    clf_roc = roc_auc_score(clf_labels, clf_probs, multi_class='ovr', average='macro')
+                    # Ensure clf_labels is 1D numpy array for roc_auc_score
+                    clf_labels_np = clf_labels.numpy() if hasattr(clf_labels, 'numpy') else clf_labels
+                    clf_labels_np = clf_labels_np.squeeze() if hasattr(clf_labels_np, 'squeeze') else clf_labels_np
+                    clf_roc = roc_auc_score(clf_labels_np, clf_probs, multi_class='ovr', average='macro')
             except Exception as e:
                 print(f"[WARNING] Could not calculate ROC-AUC for {phase}: {e}")
                 clf_roc = 0
