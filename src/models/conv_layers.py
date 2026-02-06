@@ -91,70 +91,189 @@ class LEConv(BaseLEConv):
             return m
 
 
-class GCNConvWithAtten(BaseGCNConv):
+class GCNConvWithAtten(MessagePassing):
     """
     Custom GCNConv that supports edge_atten for GSAT.
-    Uses GCN's native edge_weight parameter to apply edge attention.
+    Simplified implementation that properly handles edge_atten without self-loop issues.
+    
+    Unlike base GCNConv, this does NOT add self-loops (which would cause size mismatches
+    with the externally-provided edge_atten).
     """
+    def __init__(self, in_channels: int, out_channels: int, bias: bool = True, **kwargs):
+        kwargs.setdefault('aggr', 'add')
+        super().__init__(**kwargs)
+        
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        
+        self.lin = Linear(in_channels, out_channels, bias=False)
+        if bias:
+            self.bias = torch.nn.Parameter(torch.Tensor(out_channels))
+        else:
+            self.register_parameter('bias', None)
+        
+        self.reset_parameters()
+    
+    def reset_parameters(self):
+        self.lin.reset_parameters()
+        if self.bias is not None:
+            torch.nn.init.zeros_(self.bias)
+    
     def forward(self, x: Tensor, edge_index: Adj, edge_attr: OptTensor = None,
                 edge_atten: OptTensor = None, size: Size = None) -> Tensor:
-        # GCNConv natively supports edge_weight - we use edge_atten as edge_weight
-        # edge_atten is shape [num_edges, 1], edge_weight expects [num_edges]
-        edge_weight = edge_atten.squeeze(-1) if edge_atten is not None else None
-        return super().forward(x, edge_index, edge_weight=edge_weight)
-
-
-class GATConvWithAtten(BaseGATConv):
-    """
-    Custom GATConv that combines internal GAT attention with external edge_atten for GSAT.
-    The external edge_atten multiplies the attention-weighted messages.
-    
-    NOTE: When using this with GSAT, initialize with add_self_loops=False to prevent
-    PyG from modifying edge_index internally (which would cause size mismatches with edge_atten).
-    
-    Compatible with PyG 2.x+ where attention is computed via edge_updater.
-    """
-    def forward(self, x: Union[Tensor, OptPairTensor], edge_index: Adj,
-                edge_attr: OptTensor = None, edge_atten: OptTensor = None,
-                size: Size = None, return_attention_weights: bool = None):
-        # Store edge_atten for use in message function
-        self._edge_atten = edge_atten
+        # Linear transformation
+        x = self.lin(x)
         
-        out = super().forward(x, edge_index, edge_attr=None, size=size,
-                              return_attention_weights=return_attention_weights)
-        self._edge_atten = None
+        # Compute normalization (degree-based, no self-loops)
+        row, col = edge_index
+        deg = degree(col, x.size(0), dtype=x.dtype)
+        deg_inv_sqrt = deg.pow(-0.5)
+        deg_inv_sqrt[deg_inv_sqrt == float('inf')] = 0
+        norm = deg_inv_sqrt[row] * deg_inv_sqrt[col]
+        
+        # Combine norm with edge_atten if provided
+        if edge_atten is not None:
+            edge_weight = norm * edge_atten.squeeze(-1)
+        else:
+            edge_weight = norm
+        
+        # Propagate
+        out = self.propagate(edge_index, x=x, edge_weight=edge_weight, size=size)
+        
+        if self.bias is not None:
+            out = out + self.bias
+        
         return out
+    
+    def message(self, x_j: Tensor, edge_weight: OptTensor) -> Tensor:
+        return x_j * edge_weight.view(-1, 1)
 
-    def message(self, x_j: Tensor, alpha: Tensor) -> Tensor:
-        # In PyG 2.x+, alpha is already edge-level (computed by edge_updater)
-        # Shape: x_j [num_edges, heads, out_channels], alpha [num_edges, heads]
-        out = x_j * alpha.unsqueeze(-1)
 
+class GATConvWithAtten(MessagePassing):
+    """
+    Simplified GAT that supports external edge_atten for GSAT.
+    Instead of using full PyG GATConv (which has complex internal state),
+    we implement a simple attention mechanism compatible with edge_atten.
+    
+    This is a single-head GAT with linear transformation + attention scoring.
+    """
+    def __init__(self, in_channels: int, out_channels: int, heads: int = 1,
+                 concat: bool = True, add_self_loops: bool = False, **kwargs):
+        kwargs.setdefault('aggr', 'add')
+        super().__init__(node_dim=0, **kwargs)
+        
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.heads = heads
+        self.concat = concat
+        self.add_self_loops = add_self_loops
+        
+        # Linear transformations
+        self.lin = Linear(in_channels, heads * out_channels, bias=False)
+        
+        # Attention parameters (for computing alpha)
+        self.att_src = torch.nn.Parameter(torch.Tensor(1, heads, out_channels))
+        self.att_dst = torch.nn.Parameter(torch.Tensor(1, heads, out_channels))
+        
+        self.bias = torch.nn.Parameter(torch.Tensor(heads * out_channels if concat else out_channels))
+        
+        self.reset_parameters()
+    
+    def reset_parameters(self):
+        torch.nn.init.xavier_uniform_(self.lin.weight)
+        torch.nn.init.xavier_uniform_(self.att_src)
+        torch.nn.init.xavier_uniform_(self.att_dst)
+        torch.nn.init.zeros_(self.bias)
+    
+    def forward(self, x: Tensor, edge_index: Adj, edge_attr: OptTensor = None,
+                edge_atten: OptTensor = None, size: Size = None) -> Tensor:
+        H, C = self.heads, self.out_channels
+        
+        # Linear transformation: [N, in_channels] -> [N, H*C] -> [N, H, C]
+        x = self.lin(x).view(-1, H, C)
+        
+        # Compute attention scores
+        alpha_src = (x * self.att_src).sum(dim=-1)  # [N, H]
+        alpha_dst = (x * self.att_dst).sum(dim=-1)  # [N, H]
+        
+        # Propagate
+        out = self.propagate(edge_index, x=x, alpha=(alpha_src, alpha_dst),
+                             edge_atten=edge_atten, size=size)
+        
+        # Reshape output
+        if self.concat:
+            out = out.view(-1, H * C)
+        else:
+            out = out.mean(dim=1)
+        
+        out = out + self.bias
+        return out
+    
+    def message(self, x_j: Tensor, alpha_j: Tensor, alpha_i: Tensor,
+                edge_atten: OptTensor, index: Tensor, ptr: OptTensor,
+                size_i: Optional[int]) -> Tensor:
+        # Compute attention coefficient
+        alpha = alpha_j + alpha_i  # [E, H]
+        alpha = F.leaky_relu(alpha, negative_slope=0.2)
+        alpha = softmax(alpha, index, ptr, size_i)  # [E, H]
+        
         # Apply external edge attention from GSAT
-        if self._edge_atten is not None:
-            out = out * self._edge_atten
+        if edge_atten is not None:
+            # edge_atten is [E, 1], alpha is [E, H]
+            alpha = alpha * edge_atten
+        
+        # Weighted message: [E, H, C]
+        return x_j * alpha.unsqueeze(-1)
 
-        return out
 
-
-class SAGEConvWithAtten(BaseSAGEConv):
+class SAGEConvWithAtten(MessagePassing):
     """
     Custom SAGEConv that supports edge_atten for GSAT.
-    Multiplies messages by edge_atten before aggregation.
+    Simplified implementation that properly handles edge_atten in message passing.
+    
+    Computes: x_i = W1 * x_i + W2 * mean_j(edge_atten_ij * x_j)
     """
+    def __init__(self, in_channels: int, out_channels: int, 
+                 normalize: bool = False, bias: bool = True, **kwargs):
+        kwargs.setdefault('aggr', 'mean')
+        super().__init__(**kwargs)
+        
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.normalize = normalize
+        
+        self.lin_l = Linear(in_channels, out_channels, bias=bias)
+        self.lin_r = Linear(in_channels, out_channels, bias=False)
+        
+        self.reset_parameters()
+    
+    def reset_parameters(self):
+        self.lin_l.reset_parameters()
+        self.lin_r.reset_parameters()
+    
     def forward(self, x: Union[Tensor, OptPairTensor], edge_index: Adj,
                 edge_attr: OptTensor = None, edge_atten: OptTensor = None,
                 size: Size = None) -> Tensor:
-        # Store edge_atten for use in message function
-        self._edge_atten = edge_atten
-        out = super().forward(x, edge_index, size=size)
-        self._edge_atten = None
+        if isinstance(x, Tensor):
+            x = (x, x)
+        
+        # Propagate with edge attention
+        out = self.propagate(edge_index, x=x, edge_atten=edge_atten, size=size)
+        out = self.lin_l(out)
+        
+        # Add self-loop contribution
+        x_r = x[1]
+        if x_r is not None:
+            out = out + self.lin_r(x_r)
+        
+        if self.normalize:
+            out = F.normalize(out, p=2., dim=-1)
+        
         return out
-
-    def message(self, x_j: Tensor) -> Tensor:
-        # Apply edge attention if provided
-        if self._edge_atten is not None:
-            return x_j * self._edge_atten
+    
+    def message(self, x_j: Tensor, edge_atten: OptTensor = None) -> Tensor:
+        if edge_atten is not None:
+            return x_j * edge_atten
         return x_j
 
 

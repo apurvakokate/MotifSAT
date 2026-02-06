@@ -6,7 +6,7 @@ data_config:
     train: 0.8
     valid: 0.1
     test: 0.1
-  batch_size: 128
+  batch_size: 64
 
 model_config:
   model_name: GAT
