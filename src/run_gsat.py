@@ -1476,6 +1476,67 @@ class GSAT(nn.Module):
                 att_quality = self._compute_attention_quality_metrics(att)
                 wandb_metrics.update({f'{phase}/{k}': v for k, v in att_quality.items()})
                 
+                # Log label distributions (true and predicted)
+                if self.task_type != 'regression':
+                    clf_preds = get_preds(clf_logits, self.multi_label)
+                    clf_labels_np = clf_labels.numpy() if hasattr(clf_labels, 'numpy') else clf_labels
+                    clf_preds_np = clf_preds.numpy() if hasattr(clf_preds, 'numpy') else clf_preds
+                    
+                    # Get prediction probabilities for confidence analysis
+                    if isinstance(clf_logits, np.ndarray):
+                        clf_logits_tensor = torch.from_numpy(clf_logits)
+                    else:
+                        clf_logits_tensor = clf_logits
+                    
+                    if self.multi_label or self.num_class == 2:
+                        # Binary/multi-label: sigmoid probabilities
+                        clf_probs = torch.sigmoid(clf_logits_tensor).numpy()
+                        # For binary, get probability of positive class
+                        if self.num_class == 2:
+                            clf_probs = clf_probs.flatten()
+                    else:
+                        # Multi-class: softmax probabilities, take max confidence
+                        clf_probs = torch.softmax(clf_logits_tensor, dim=1).numpy()
+                        clf_probs = clf_probs.max(axis=1)  # Max probability (confidence)
+                    
+                    # Flatten if needed
+                    clf_labels_flat = clf_labels_np.flatten()
+                    clf_preds_flat = clf_preds_np.flatten()
+                    
+                    # Compute class distributions
+                    valid_mask = ~np.isnan(clf_labels_flat)
+                    unique_true, counts_true = np.unique(clf_labels_flat[valid_mask], return_counts=True)
+                    unique_pred, counts_pred = np.unique(clf_preds_flat, return_counts=True)
+                    
+                    # Log distribution statistics
+                    total_true = counts_true.sum()
+                    total_pred = counts_pred.sum()
+                    
+                    for cls, cnt in zip(unique_true, counts_true):
+                        wandb_metrics[f'{phase}/true_label_class_{int(cls)}_ratio'] = cnt / total_true
+                    for cls, cnt in zip(unique_pred, counts_pred):
+                        wandb_metrics[f'{phase}/pred_label_class_{int(cls)}_ratio'] = cnt / total_pred
+                    
+                    # Log class imbalance ratio (max/min class ratio)
+                    if len(counts_true) > 1:
+                        wandb_metrics[f'{phase}/true_label_imbalance'] = counts_true.max() / (counts_true.min() + 1e-10)
+                    if len(counts_pred) > 1:
+                        wandb_metrics[f'{phase}/pred_label_imbalance'] = counts_pred.max() / (counts_pred.min() + 1e-10)
+                    
+                    # Log prediction confidence statistics
+                    clf_probs_flat = clf_probs.flatten() if hasattr(clf_probs, 'flatten') else clf_probs
+                    wandb_metrics[f'{phase}/pred_confidence_mean'] = float(np.mean(clf_probs_flat))
+                    wandb_metrics[f'{phase}/pred_confidence_std'] = float(np.std(clf_probs_flat))
+                    wandb_metrics[f'{phase}/pred_confidence_min'] = float(np.min(clf_probs_flat))
+                    wandb_metrics[f'{phase}/pred_confidence_max'] = float(np.max(clf_probs_flat))
+                    
+                    # Log histograms for distributions
+                    wandb.log({
+                        f'{phase}/true_label_distribution': wandb.Histogram(clf_labels_flat[valid_mask]),
+                        f'{phase}/pred_label_distribution': wandb.Histogram(clf_preds_flat),
+                        f'{phase}/pred_confidence_distribution': wandb.Histogram(clf_probs_flat),
+                    })
+                
                 wandb.log(wandb_metrics)
             except Exception as e:
                 pass  # Silently fail if wandb is not initialized
@@ -1521,6 +1582,9 @@ class GSAT(nn.Module):
         return metrics
 
     def get_eval_score(self, epoch, phase, exp_labels, att, precision_at_k, clf_labels, clf_logits, batch):
+        # Keep original labels for OGB evaluator (needs [N, 1] shape)
+        clf_labels_orig = clf_labels
+        
         if self.task_type == 'regression':
             # For regression, calculate MAE as primary metric, keep MSE as auxiliary
             clf_preds = clf_logits.squeeze()
@@ -1531,11 +1595,9 @@ class GSAT(nn.Module):
             clf_roc = mse   # Keep MSE as auxiliary metric
         else:
             clf_preds = get_preds(clf_logits, self.multi_label)
-            # Squeeze clf_labels to handle [N, 1] vs [N] shape mismatch
-            # Use squeezed labels for all subsequent calculations (accuracy, ROC-AUC, etc.)
-            if hasattr(clf_labels, 'squeeze'):
-                clf_labels = clf_labels.squeeze()
-            clf_acc = 0 if self.multi_label else (clf_preds == clf_labels).sum().item() / clf_labels.shape[0]
+            # Squeeze clf_labels to handle [N, 1] vs [N] shape mismatch for accuracy
+            clf_labels_squeezed = clf_labels.squeeze() if hasattr(clf_labels, 'squeeze') else clf_labels
+            clf_acc = 0 if self.multi_label else (clf_preds == clf_labels_squeezed).sum().item() / clf_labels_squeezed.shape[0]
 
         if batch:
             if self.task_type == 'regression':
@@ -1552,8 +1614,23 @@ class GSAT(nn.Module):
             # Try to calculate ROC-AUC for binary/multi-class classification
             try:
                 if 'ogb' in self.dataset_name:
+                    # OGB evaluator expects [N, 1] shape for both y_pred and y_true
                     evaluator = Evaluator(name='-'.join(self.dataset_name.split('_')))
-                    clf_roc = evaluator.eval({'y_pred': clf_logits, 'y_true': clf_labels})['rocauc']
+                    # Ensure correct shapes for OGB evaluator
+                    if isinstance(clf_logits, np.ndarray):
+                        y_pred = torch.from_numpy(clf_logits)
+                    else:
+                        y_pred = clf_logits
+                    if isinstance(clf_labels_orig, np.ndarray):
+                        y_true = torch.from_numpy(clf_labels_orig)
+                    else:
+                        y_true = clf_labels_orig
+                    # Ensure [N, 1] shape
+                    if len(y_pred.shape) == 1:
+                        y_pred = y_pred.unsqueeze(1)
+                    if len(y_true.shape) == 1:
+                        y_true = y_true.unsqueeze(1)
+                    clf_roc = evaluator.eval({'y_pred': y_pred, 'y_true': y_true})['rocauc']
                 elif self.multi_label:
                     # Multi-label classification
                     # Convert to tensor if needed, then apply sigmoid
@@ -1562,15 +1639,15 @@ class GSAT(nn.Module):
                     else:
                         clf_logits_tensor = clf_logits
                     clf_probs = torch.sigmoid(clf_logits_tensor).numpy()
-                    # Ensure clf_labels is numpy array
-                    clf_labels_np = clf_labels.numpy() if hasattr(clf_labels, 'numpy') else clf_labels
+                    # Ensure clf_labels is numpy array (use original labels for multi-label)
+                    clf_labels_np = clf_labels_orig.numpy() if hasattr(clf_labels_orig, 'numpy') else clf_labels_orig
                     # Handle NaN values in labels for multi-label
                     valid_mask = ~np.isnan(clf_labels_np)
                     if valid_mask.any():
                         clf_roc = roc_auc_score(clf_labels_np[valid_mask], clf_probs[valid_mask], average='micro')
                     else:
                         clf_roc = 0
-                elif len(np.unique(clf_labels)) == 2:
+                elif len(np.unique(clf_labels_squeezed)) == 2:
                     # Binary classification
                     if isinstance(clf_logits, np.ndarray):
                         clf_logits_tensor = torch.from_numpy(clf_logits)
@@ -1578,8 +1655,7 @@ class GSAT(nn.Module):
                         clf_logits_tensor = clf_logits
                     clf_probs = torch.sigmoid(clf_logits_tensor.squeeze()).numpy()
                     # Ensure both clf_labels and clf_probs are 1D for roc_auc_score
-                    clf_labels_np = clf_labels.numpy() if hasattr(clf_labels, 'numpy') else clf_labels
-                    clf_labels_np = clf_labels_np.squeeze() if hasattr(clf_labels_np, 'squeeze') else clf_labels_np
+                    clf_labels_np = clf_labels_squeezed.numpy() if hasattr(clf_labels_squeezed, 'numpy') else clf_labels_squeezed
                     clf_probs = clf_probs.squeeze() if hasattr(clf_probs, 'squeeze') else clf_probs
                     clf_roc = roc_auc_score(clf_labels_np, clf_probs)
                 else:
@@ -1590,8 +1666,7 @@ class GSAT(nn.Module):
                         clf_logits_tensor = clf_logits
                     clf_probs = torch.softmax(clf_logits_tensor, dim=1).numpy()
                     # Ensure clf_labels is 1D numpy array for roc_auc_score
-                    clf_labels_np = clf_labels.numpy() if hasattr(clf_labels, 'numpy') else clf_labels
-                    clf_labels_np = clf_labels_np.squeeze() if hasattr(clf_labels_np, 'squeeze') else clf_labels_np
+                    clf_labels_np = clf_labels_squeezed.numpy() if hasattr(clf_labels_squeezed, 'numpy') else clf_labels_squeezed
                     clf_roc = roc_auc_score(clf_labels_np, clf_probs, multi_class='ovr', average='macro')
             except Exception as e:
                 print(f"[WARNING] Could not calculate ROC-AUC for {phase}: {e}")

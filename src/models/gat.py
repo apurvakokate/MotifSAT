@@ -18,7 +18,8 @@ class GAT(nn.Module):
         self.dropout_p = model_config['dropout_p']
         self.task_type = model_config.get('task_type', 'classification')
 
-        if model_config.get('atom_encoder', False):
+        self.use_atom_encoder = model_config.get('atom_encoder', False)
+        if self.use_atom_encoder:
             self.node_encoder = AtomEncoder(emb_dim=hidden_size)
         else:
             self.node_encoder = Linear(x_dim, hidden_size)
@@ -38,6 +39,9 @@ class GAT(nn.Module):
             self.fc_out = nn.Sequential(nn.Linear(hidden_size, 1 if num_class == 2 and not multi_label else num_class))
 
     def forward(self, x, edge_index, batch, edge_attr=None, edge_atten=None):
+        # AtomEncoder expects integer indices for embedding lookup
+        if self.use_atom_encoder:
+            x = x.long()
         x = self.node_encoder(x)
 
         for i in range(self.n_layers):
@@ -56,6 +60,9 @@ class GAT(nn.Module):
         )
 
     def get_emb(self, x, edge_index, batch, edge_attr=None, edge_atten=None):
+        # AtomEncoder expects integer indices for embedding lookup
+        if self.use_atom_encoder:
+            x = x.long()
         x = self.node_encoder(x)
 
         for i in range(self.n_layers):

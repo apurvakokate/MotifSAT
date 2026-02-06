@@ -20,7 +20,8 @@ class GIN(nn.Module):
         self.use_edge_attr = model_config.get('use_edge_attr', True)
         self.task_type = model_config.get('task_type', 'classification')
 
-        if model_config.get('atom_encoder', False):
+        self.use_atom_encoder = model_config.get('atom_encoder', False)
+        if self.use_atom_encoder:
             self.node_encoder = AtomEncoder(emb_dim=hidden_size)
             if edge_attr_dim != 0 and self.use_edge_attr:
                 self.edge_encoder = BondEncoder(emb_dim=hidden_size)
@@ -45,9 +46,15 @@ class GIN(nn.Module):
             self.fc_out = nn.Sequential(nn.Linear(hidden_size, 1 if num_class == 2 and not multi_label else num_class))
 
     def forward(self, x, edge_index, batch, edge_attr=None, edge_atten=None):
+        # AtomEncoder/BondEncoder expect integer indices for embedding lookup
+        if self.use_atom_encoder:
+            x = x.long()
+            if edge_attr is not None and self.use_edge_attr:
+                edge_attr = self.edge_encoder(edge_attr.long())
+        else:
+            if edge_attr is not None and self.use_edge_attr:
+                edge_attr = self.edge_encoder(edge_attr.float())
         x = self.node_encoder(x)
-        if edge_attr is not None and self.use_edge_attr:
-            edge_attr = self.edge_encoder(edge_attr.float())
 
         for i in range(self.n_layers):
             x = self.convs[i](x, edge_index, edge_attr=edge_attr, edge_atten=edge_atten)
@@ -65,9 +72,15 @@ class GIN(nn.Module):
         )
 
     def get_emb(self, x, edge_index, batch, edge_attr=None, edge_atten=None):
+        # AtomEncoder/BondEncoder expect integer indices for embedding lookup
+        if self.use_atom_encoder:
+            x = x.long()
+            if edge_attr is not None and self.use_edge_attr:
+                edge_attr = self.edge_encoder(edge_attr.long())
+        else:
+            if edge_attr is not None and self.use_edge_attr:
+                edge_attr = self.edge_encoder(edge_attr.float())
         x = self.node_encoder(x)
-        if edge_attr is not None and self.use_edge_attr:
-            edge_attr = self.edge_encoder(edge_attr.float())
 
         for i in range(self.n_layers):
             x = self.convs[i](x, edge_index, edge_attr=edge_attr, edge_atten=edge_atten)
