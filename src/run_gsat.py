@@ -814,6 +814,7 @@ class GSAT(nn.Module):
         self.motif_readout = method_config["model_name"]
 
         self.multi_label = multi_label
+        self.num_class = num_class
         self.criterion = Criterion(num_class, multi_label, task_type)
         
         # Motif incorporation method settings
