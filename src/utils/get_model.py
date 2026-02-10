@@ -44,8 +44,12 @@ class Criterion(nn.Module):
             # For multi-class, targets should be [N] with class indices
             loss = F.cross_entropy(logits, targets.squeeze().long())
         else:
-            is_labeled = targets == targets  # mask for labeled data
-            loss = F.binary_cross_entropy_with_logits(logits[is_labeled], targets[is_labeled].float())
+            # Multi-label classification
+            # Ensure consistent shapes before masking
+            logits_flat = logits.view(-1) if len(logits.shape) > 1 else logits
+            targets_flat = targets.view(-1) if len(targets.shape) > 1 else targets
+            is_labeled = targets_flat == targets_flat  # mask for labeled data (non-NaN)
+            loss = F.binary_cross_entropy_with_logits(logits_flat[is_labeled], targets_flat[is_labeled].float())
         return loss
 
 

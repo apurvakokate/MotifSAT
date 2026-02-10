@@ -147,7 +147,9 @@ def gen_dataset(global_b, data_path):
     print(np.mean(n_mean), np.mean(e_mean))
     print(len(ground_truth_list))
 
-    np.save(data_path / 'train.npy', (edge_index_list, label_list, ground_truth_list, role_id_list, pos_list))
+    # Use object array to handle variable-sized graphs
+    data_to_save = np.array((edge_index_list, label_list, ground_truth_list, role_id_list, pos_list), dtype=object)
+    np.save(data_path / 'train.npy', data_to_save, allow_pickle=True)
 
 
     # Validation Dataset
@@ -253,7 +255,9 @@ def gen_dataset(global_b, data_path):
         pos_list.append(pos)
     print(np.mean(n_mean), np.mean(e_mean))
     print(len(ground_truth_list))
-    np.save(data_path / 'val.npy', (edge_index_list, label_list, ground_truth_list, role_id_list, pos_list))
+    # Use object array to handle variable-sized graphs
+    data_to_save = np.array((edge_index_list, label_list, ground_truth_list, role_id_list, pos_list), dtype=object)
+    np.save(data_path / 'val.npy', data_to_save, allow_pickle=True)
 
     # Test Dataset
 
@@ -358,7 +362,9 @@ def gen_dataset(global_b, data_path):
         pos_list.append(pos)
     print(np.mean(n_mean), np.mean(e_mean))
     print(len(ground_truth_list))
-    np.save(data_path / 'test.npy', (edge_index_list, label_list, ground_truth_list, role_id_list, pos_list))
+    # Use object array to handle variable-sized graphs
+    data_to_save = np.array((edge_index_list, label_list, ground_truth_list, role_id_list, pos_list), dtype=object)
+    np.save(data_path / 'test.npy', data_to_save, allow_pickle=True)
 
 
 def get_house(basis_type, nb_shapes=80, width_basis=8, feature_generator=None, m=3, draw=True):
