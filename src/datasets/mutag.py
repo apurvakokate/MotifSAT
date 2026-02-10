@@ -17,7 +17,7 @@ except ImportError:
 
 
 class Mutag(InMemoryDataset):
-    def __init__(self, root, add_smiles=True, add_motifs=True):
+    def __init__(self, root, add_smiles=False, add_motifs=False):
         """
         Args:
             root: Root directory
@@ -26,6 +26,8 @@ class Mutag(InMemoryDataset):
         """
         self.add_smiles = add_smiles and RDKIT_AVAILABLE
         self.add_motifs = add_motifs and RDKIT_AVAILABLE
+        print(f"Adding SMILES: {self.add_smiles}")
+        print(f"Adding Motifs: {self.add_motifs}")
         super().__init__(root=root)
         self.data, self.slices = torch.load(self.processed_paths[0])
         
