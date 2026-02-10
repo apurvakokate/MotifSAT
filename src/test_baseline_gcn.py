@@ -44,7 +44,6 @@ def test_baseline_gcn():
             'use_edge_attr': False,
         },
         'data_config': {
-            'splits': {'train': 0.8, 'valid': 0.1, 'test': 0.1},
             'batch_size': 128,
             'mutag_x': False,
         },
@@ -61,9 +60,23 @@ def test_baseline_gcn():
     data_dir = Path('../data')
     batch_size = config['data_config']['batch_size']
     
-    loaders, test_set, x_dim, edge_attr_dim, num_class, aux_info, datasets, _ = get_data_loaders(
-        data_dir, dataset_name, batch_size, None, seed, False, 0
+    # Use standard splits for ba_2motifs
+    splits = {'train': 0.8, 'valid': 0.1, 'test': 0.1}
+    
+    # BA-2Motifs is a paper dataset, returns 6 values (not 8 like molecular datasets)
+    result = get_data_loaders(
+        data_dir, dataset_name, batch_size, splits, seed, False, 0
     )
+    
+    if len(result) == 8:
+        loaders, test_set, x_dim, edge_attr_dim, num_class, aux_info, datasets, _ = result
+    else:
+        loaders, test_set, x_dim, edge_attr_dim, num_class, aux_info = result
+        datasets = {
+            'train': loaders['train'].dataset,
+            'valid': loaders['valid'].dataset,
+            'test': loaders['test'].dataset
+        }
     
     print(f"✓ Dataset loaded")
     print(f"  Train: {len(datasets['train'])} graphs")
