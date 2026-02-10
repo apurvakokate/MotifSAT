@@ -126,15 +126,20 @@ def get_base_config(model_name, dataset_name):
     # GOAt paper (Lu et al., 2024): hidden_size=32 for BA-2Motifs, 64 for molecular
     # MAGE paper (Bui et al., 2024): Similar settings, GCN achieves 97-100%
     
-    # Dataset-specific hidden sizes
+    # Dataset-specific configurations (based on MAGE ICML'24 paper)
     if 'ba' in dataset_name.lower() or 'spmotif' in dataset_name.lower():
-        # Synthetic datasets: smaller hidden size works better
-        gcn_hidden = 32
+        # Synthetic datasets with constant features
+        # MAGE paper: gcn_normalize=False, hidden=20, 3 layers, dropout=0.0
+        gcn_hidden = 20
+        gcn_normalize = False  # CRITICAL: No normalization for constant features!
+        gcn_dropout = 0.0      # MAGE uses no dropout
         sage_hidden = 32
-        gat_hidden = 64  # GAT needs more capacity but still fails
+        gat_hidden = 64
     else:
-        # Real-world datasets: larger hidden size
+        # Real-world datasets: use standard GCN with normalization
         gcn_hidden = 64
+        gcn_normalize = True
+        gcn_dropout = 0.3
         sage_hidden = 64
         gat_hidden = 64
     
@@ -153,18 +158,19 @@ def get_base_config(model_name, dataset_name):
         },
         'GAT': {
             'hidden_size': gat_hidden,
-            'n_layers': 3,  # Try deeper (literature uses 3)
+            'n_layers': 3,
             'dropout_p': 0.3,
         },
         'SAGE': {
             'hidden_size': sage_hidden,
-            'n_layers': 3,  # Match literature (3 layers)
+            'n_layers': 3,
             'dropout_p': 0.3,
         },
         'GCN': {
             'hidden_size': gcn_hidden,
-            'n_layers': 3,  # Match literature (3 layers)
-            'dropout_p': 0.3,
+            'n_layers': 3,
+            'dropout_p': gcn_dropout,
+            'gcn_normalize': gcn_normalize,  # Control normalization
         },
     }
     

@@ -98,13 +98,19 @@ class GCNConvWithAtten(MessagePassing):
     
     Unlike base GCNConv, this does NOT add self-loops (which would cause size mismatches
     with the externally-provided edge_atten).
+    
+    Args:
+        normalize: If True, applies D^{-1/2}AD^{-1/2} normalization. 
+                   If False, uses raw adjacency (degree info preserved even with constant features!)
     """
-    def __init__(self, in_channels: int, out_channels: int, bias: bool = True, **kwargs):
+    def __init__(self, in_channels: int, out_channels: int, bias: bool = True, 
+                 normalize: bool = True, **kwargs):
         kwargs.setdefault('aggr', 'add')
         super().__init__(**kwargs)
         
         self.in_channels = in_channels
         self.out_channels = out_channels
+        self.normalize = normalize
         
         self.lin = Linear(in_channels, out_channels, bias=False)
         if bias:
@@ -124,18 +130,25 @@ class GCNConvWithAtten(MessagePassing):
         # Linear transformation
         x = self.lin(x)
         
-        # Compute normalization (degree-based, no self-loops)
-        row, col = edge_index
-        deg = degree(col, x.size(0), dtype=x.dtype)
-        deg_inv_sqrt = deg.pow(-0.5)
-        deg_inv_sqrt[deg_inv_sqrt == float('inf')] = 0
-        norm = deg_inv_sqrt[row] * deg_inv_sqrt[col]
-        
-        # Combine norm with edge_atten if provided
-        if edge_atten is not None:
-            edge_weight = norm * edge_atten.squeeze(-1)
+        if self.normalize:
+            # Compute normalization (degree-based, no self-loops)
+            row, col = edge_index
+            deg = degree(col, x.size(0), dtype=x.dtype)
+            deg_inv_sqrt = deg.pow(-0.5)
+            deg_inv_sqrt[deg_inv_sqrt == float('inf')] = 0
+            norm = deg_inv_sqrt[row] * deg_inv_sqrt[col]
+            
+            # Combine norm with edge_atten if provided
+            if edge_atten is not None:
+                edge_weight = norm * edge_atten.squeeze(-1)
+            else:
+                edge_weight = norm
         else:
-            edge_weight = norm
+            # No normalization - preserves degree information even with constant features!
+            if edge_atten is not None:
+                edge_weight = edge_atten.squeeze(-1)
+            else:
+                edge_weight = torch.ones(edge_index.size(1), dtype=x.dtype, device=x.device)
         
         # Propagate
         out = self.propagate(edge_index, x=x, edge_weight=edge_weight, size=size)

@@ -31,20 +31,21 @@ def test_baseline_gcn():
     
     set_seed(seed)
     
-    # Configuration matching GOAt paper
+    # Configuration matching MAGE paper for BA-2Motifs
     config = {
         'model_config': {
             'model_name': 'GCN',
-            'hidden_size': 32,  # GOAt paper uses 32 for BA-2Motifs
-            'n_layers': 3,      # Literature uses 3
-            'dropout_p': 0.3,
-            'pretrain_epochs': 100,
+            'hidden_size': 20,  # MAGE uses 20 for BA-2Motifs
+            'n_layers': 3,      # MAGE uses 3 layers
+            'dropout_p': 0.0,   # MAGE uses 0.0 dropout
+            'gcn_normalize': False,  # CRITICAL: No normalization! (MAGE paper)
+            'pretrain_epochs': 200,  # MAGE trains for 800, using 200 for faster test
             'pretrain_lr': 1e-3,
             'atom_encoder': False,
             'use_edge_attr': False,
         },
         'data_config': {
-            'batch_size': 128,
+            'batch_size': 64,  # MAGE uses 64
             'mutag_x': False,
         },
     }
