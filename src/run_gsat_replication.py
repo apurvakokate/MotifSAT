@@ -122,7 +122,22 @@ def get_base_config(model_name, dataset_name):
     Get base configuration for a model-dataset combination.
     Uses paper hyperparameters where available.
     """
-    # Model architecture defaults
+    # Model architecture defaults (matched to literature)
+    # GOAt paper (Lu et al., 2024): hidden_size=32 for BA-2Motifs, 64 for molecular
+    # MAGE paper (Bui et al., 2024): Similar settings, GCN achieves 97-100%
+    
+    # Dataset-specific hidden sizes
+    if 'ba' in dataset_name.lower() or 'spmotif' in dataset_name.lower():
+        # Synthetic datasets: smaller hidden size works better
+        gcn_hidden = 32
+        sage_hidden = 32
+        gat_hidden = 64  # GAT needs more capacity but still fails
+    else:
+        # Real-world datasets: larger hidden size
+        gcn_hidden = 64
+        sage_hidden = 64
+        gat_hidden = 64
+    
     model_defaults = {
         'GIN': {
             'hidden_size': 64,
@@ -137,18 +152,18 @@ def get_base_config(model_name, dataset_name):
             'scalers': False,
         },
         'GAT': {
-            'hidden_size': 128,  # ⬆️ 64 -> 128
-            'n_layers': 2,
+            'hidden_size': gat_hidden,
+            'n_layers': 3,  # Try deeper (literature uses 3)
             'dropout_p': 0.3,
         },
         'SAGE': {
-            'hidden_size': 128,  # ⬆️ 64 -> 128
-            'n_layers': 2,
+            'hidden_size': sage_hidden,
+            'n_layers': 3,  # Match literature (3 layers)
             'dropout_p': 0.3,
         },
         'GCN': {
-            'hidden_size': 128,  # ⬆️ 64 -> 128
-            'n_layers': 2,
+            'hidden_size': gcn_hidden,
+            'n_layers': 3,  # Match literature (3 layers)
             'dropout_p': 0.3,
         },
     }
@@ -187,13 +202,13 @@ def get_base_config(model_name, dataset_name):
         'GSAT_config': {
             'method_name': 'GSAT',
             'model_name': model_name,
-            'pred_loss_coef': 2.0,  # ⬆️ 1 -> 2 (prioritize prediction)
-            'info_loss_coef': 0.3,  # ⬇️ 1 -> 0.3 (reduce sparsity pressure)
+            'pred_loss_coef': 1,  # Standard GSAT
+            'info_loss_coef': 1,  # Standard GSAT
             'motif_loss_coef': 0,  # No motif loss for baseline replication
             'epochs': hp['epochs'],
             'lr': hp['lr'],
-            'from_scratch': False,  # ⬆️ True -> False (USE PRETRAINING!)
-            'fix_r': 0.9,  # ✨ Fix r high initially
+            'from_scratch': True,  # Match GSAT paper
+            'fix_r': False,  # Use decay (match GSAT paper)
             'decay_interval': 10 if model_name != 'PNA' else 5,
             'decay_r': 0.1,
             'init_r': 0.9,
