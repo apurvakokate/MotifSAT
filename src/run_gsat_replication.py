@@ -137,17 +137,17 @@ def get_base_config(model_name, dataset_name):
             'scalers': False,
         },
         'GAT': {
-            'hidden_size': 64,
+            'hidden_size': 128,  # ⬆️ 64 -> 128
             'n_layers': 2,
             'dropout_p': 0.3,
         },
         'SAGE': {
-            'hidden_size': 64,
+            'hidden_size': 128,  # ⬆️ 64 -> 128
             'n_layers': 2,
             'dropout_p': 0.3,
         },
         'GCN': {
-            'hidden_size': 64,
+            'hidden_size': 128,  # ⬆️ 64 -> 128
             'n_layers': 2,
             'dropout_p': 0.3,
         },
@@ -187,13 +187,13 @@ def get_base_config(model_name, dataset_name):
         'GSAT_config': {
             'method_name': 'GSAT',
             'model_name': model_name,
-            'pred_loss_coef': 1,
-            'info_loss_coef': 1,
+            'pred_loss_coef': 2.0,  # ⬆️ 1 -> 2 (prioritize prediction)
+            'info_loss_coef': 0.3,  # ⬇️ 1 -> 0.3 (reduce sparsity pressure)
             'motif_loss_coef': 0,  # No motif loss for baseline replication
             'epochs': hp['epochs'],
             'lr': hp['lr'],
-            'from_scratch': True,
-            'fix_r': False,
+            'from_scratch': False,  # ⬆️ True -> False (USE PRETRAINING!)
+            'fix_r': 0.9,  # ✨ Fix r high initially
             'decay_interval': 10 if model_name != 'PNA' else 5,
             'decay_r': 0.1,
             'init_r': 0.9,
