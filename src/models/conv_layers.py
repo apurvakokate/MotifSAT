@@ -245,10 +245,15 @@ class SAGEConvWithAtten(MessagePassing):
     Simplified implementation that properly handles edge_atten in message passing.
     
     Computes: x_i = W1 * x_i + W2 * mean_j(edge_atten_ij * x_j)
+    
+    Args:
+        aggr: Aggregation method. Use 'sum' for constant features (preserves degree info),
+              'mean' for rich features (standard SAGE).
     """
     def __init__(self, in_channels: int, out_channels: int, 
-                 normalize: bool = False, bias: bool = True, **kwargs):
-        kwargs.setdefault('aggr', 'mean')
+                 normalize: bool = False, bias: bool = True, 
+                 aggr: str = 'mean', **kwargs):
+        kwargs['aggr'] = aggr  # Allow override
         super().__init__(**kwargs)
         
         self.in_channels = in_channels

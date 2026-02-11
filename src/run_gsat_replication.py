@@ -129,18 +129,27 @@ def get_base_config(model_name, dataset_name):
     # Dataset-specific configurations (based on MAGE ICML'24 paper)
     if 'ba' in dataset_name.lower() or 'spmotif' in dataset_name.lower():
         # Synthetic datasets with constant features
-        # MAGE paper: gcn_normalize=False, hidden=20, 3 layers, dropout=0.0
+        # GCN: Use unnormalized aggregation (MAGE paper)
         gcn_hidden = 20
         gcn_normalize = False  # CRITICAL: No normalization for constant features!
         gcn_dropout = 0.0      # MAGE uses no dropout
-        sage_hidden = 32
+        
+        # SAGE: Use SUM aggregation to preserve degree info (like GIN)
+        sage_hidden = 20
+        sage_aggr = 'sum'      # CRITICAL: SUM preserves degree with constant features!
+        sage_dropout = 0.0
+        
         gat_hidden = 64
     else:
-        # Real-world datasets: use standard GCN with normalization
+        # Real-world datasets: use standard configurations
         gcn_hidden = 64
-        gcn_normalize = True
+        gcn_normalize = True   # Standard normalization
         gcn_dropout = 0.3
+        
         sage_hidden = 64
+        sage_aggr = 'mean'     # Standard SAGE uses MEAN
+        sage_dropout = 0.3
+        
         gat_hidden = 64
     
     model_defaults = {
@@ -164,7 +173,8 @@ def get_base_config(model_name, dataset_name):
         'SAGE': {
             'hidden_size': sage_hidden,
             'n_layers': 3,
-            'dropout_p': 0.3,
+            'dropout_p': sage_dropout,
+            'sage_aggr': sage_aggr,  # Control aggregation
         },
         'GCN': {
             'hidden_size': gcn_hidden,

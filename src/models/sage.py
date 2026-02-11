@@ -17,6 +17,10 @@ class SAGE(nn.Module):
         hidden_size = model_config['hidden_size']
         self.dropout_p = model_config['dropout_p']
         self.task_type = model_config.get('task_type', 'classification')
+        
+        # For constant features (BA-2Motifs), use SUM to preserve degree info
+        # For rich features, use MEAN (standard SAGE)
+        self.aggr = model_config.get('sage_aggr', 'mean')
 
         self.use_atom_encoder = model_config.get('atom_encoder', False)
         if self.use_atom_encoder:
@@ -29,7 +33,7 @@ class SAGE(nn.Module):
         self.pool = global_add_pool
 
         for _ in range(self.n_layers):
-            self.convs.append(SAGEConvWithAtten(hidden_size, hidden_size))
+            self.convs.append(SAGEConvWithAtten(hidden_size, hidden_size, aggr=self.aggr))
 
         if self.task_type == 'regression':
             self.fc_out = nn.Sequential(nn.Linear(hidden_size, 1))
