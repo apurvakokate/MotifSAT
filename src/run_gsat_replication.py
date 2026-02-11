@@ -126,15 +126,16 @@ def get_base_config(model_name, dataset_name):
     # GOAt paper (Lu et al., 2024): hidden_size=32 for BA-2Motifs, 64 for molecular
     # MAGE paper (Bui et al., 2024): Similar settings, GCN achieves 97-100%
     
-    # Dataset-specific configurations (based on MAGE ICML'24 paper)
-    if 'ba' in dataset_name.lower() or 'spmotif' in dataset_name.lower():
-        # Synthetic datasets with constant features
-        # GCN: Use unnormalized aggregation (MAGE paper)
+    # Dataset-specific configurations (based on MAGE ICML'24 paper + DIR ICLR'22)
+    if 'ba_2motif' in dataset_name.lower() or 'spmotif' in dataset_name.lower():
+        # BA-2Motifs AND SPMotif: BOTH use CONSTANT features!
+        # DIR paper (ICLR'22) uses featgen.ConstFeatureGen(1) for SPMotif
+        # BUT: MotifSAT's spmotif.py line 57 replaces with torch.rand() - this is WRONG!
+        # Need unnormalized aggregation to preserve degree info
         gcn_hidden = 20
         gcn_normalize = False  # CRITICAL: No normalization for constant features!
-        gcn_dropout = 0.0      # MAGE uses no dropout
+        gcn_dropout = 0.0      # MAGE/DIR use no dropout
         
-        # SAGE: Use SUM aggregation to preserve degree info (like GIN)
         sage_hidden = 20
         sage_aggr = 'sum'      # CRITICAL: SUM preserves degree with constant features!
         sage_dropout = 0.0
@@ -208,7 +209,7 @@ def get_base_config(model_name, dataset_name):
             'pretrain_epochs': 100 if model_name != 'PNA' else 50,
         },
         'shared_config': {
-            'learn_edge_att': model_name == 'PNA',  # PNA uses edge attention
+            'learn_edge_att': True,  # EXPERIMENT: Enable edge-level attention for ALL models (like GSAT GIN)
             'precision_k': 5,
             'num_viz_samples': 0,  # Disable visualization for replication
             'viz_interval': 10,

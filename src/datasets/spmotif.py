@@ -51,10 +51,18 @@ class SPMotif(InMemoryDataset):
             edge_index = torch.from_numpy(edge_index).long()
             node_idx = torch.unique(edge_index)
             assert node_idx.max() == node_idx.size(0) - 1
+            # EXPERIMENT: Testing if edge-level attention enables random features!
+            # GSAT paper uses torch.rand() with edge-level attention (learn_edge_att=true)
+            # Previous failure was due to node-level attention (learn_edge_att=false)
+            x = torch.rand((node_idx.size(0), 4))  # Random features (like GSAT)
+            
+            # ALTERNATIVE: Constant features (proven to work with node-level attention)
+            # x = torch.ones(node_idx.size(0), 4) * 0.1
+            
+            # ALTERNATIVE: One-hot role encoding (if needed later)
             # x = torch.zeros(node_idx.size(0), 4)
             # index = [i for i in range(node_idx.size(0))]
             # x[index, z] = 1
-            x = torch.rand((node_idx.size(0), 4))
             edge_attr = torch.ones(edge_index.size(1), 1)
             y = torch.tensor(y, dtype=torch.long).reshape(-1)
 
