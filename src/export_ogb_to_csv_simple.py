@@ -25,6 +25,12 @@ except ImportError:
     print("  pip install ogb torch pandas")
     exit(1)
 
+try:
+    from graph_to_smiles_utils import verify_smiles_vs_graph
+    _VERIFY_AVAILABLE = True
+except ImportError:
+    _VERIFY_AVAILABLE = False
+
 # Patch for OGB bug with NaN in metadata
 def patch_ogb_metadata():
     """
@@ -56,14 +62,15 @@ except:
     pass  # If patching fails, continue anyway
 
 
-def export_ogb_dataset(dataset_name: str, data_dir: Path, output_dir: Path):
+def export_ogb_dataset(dataset_name: str, data_dir: Path, output_dir: Path, verify_sample: int = 0):
     """
     Export OGB molecular dataset to CSV.
-    
+
     Args:
         dataset_name: OGB dataset name (e.g., 'ogbg-molhiv', 'ogbg-molbbbp')
         data_dir: Directory to store/load raw data
         output_dir: Directory to save CSV files
+        verify_sample: If > 0, verify this many SMILES vs graph (using shared utils)
     """
     print("\n" + "="*80)
     print(f"Exporting {dataset_name}")
@@ -150,12 +157,13 @@ def export_ogb_dataset(dataset_name: str, data_dir: Path, output_dir: Path):
         smiles_list = []
         labels_list = []
         split_list = []
-        
+        verify_count = 0
+
         # Process all splits
         for split_name, indices in split_idx.items():
             for idx in tqdm(indices, desc=f"  {split_name:5s}"):
                 idx = int(idx)
-                
+
                 # Get SMILES using smiles_data (works with all methods)
                 try:
                     smiles = smiles_data[idx]
@@ -168,8 +176,8 @@ def export_ogb_dataset(dataset_name: str, data_dir: Path, output_dir: Path):
                 except Exception as e:
                     print(f"    Warning: Could not get SMILES for idx {idx}: {e}, skipping...")
                     continue
-                
-                # Get label from data object
+
+                # Get label and optional verification
                 try:
                     data = dataset[idx]
                     if hasattr(data, 'y'):
@@ -189,7 +197,14 @@ def export_ogb_dataset(dataset_name: str, data_dir: Path, output_dir: Path):
                 except Exception as e:
                     print(f"    Warning: Could not get label for idx {idx}: {e}, skipping...")
                     continue
-                
+
+                # Optional: verify SMILES vs graph (shared utils)
+                if verify_sample > 0 and verify_count < verify_sample and _VERIFY_AVAILABLE:
+                    v = verify_smiles_vs_graph(smiles, data)
+                    status = "✓" if v.get('match') else "✗"
+                    print(f"    Verify [{verify_count+1}/{verify_sample}] idx {idx}: {status} {v.get('reason', '')}")
+                    verify_count += 1
+
                 smiles_list.append(smiles)
                 labels_list.append(label)
                 split_list.append(split_name)
@@ -269,7 +284,10 @@ Example:
                         default=['ogbg-molhiv', 'ogbg-molbbbp', 'ogbg-molbace',
                                 'ogbg-molclintox', 'ogbg-molsider', 'ogbg-moltox21'],
                         help='List of OGB datasets to export')
-    
+
+    parser.add_argument('--verify', type=int, default=0, metavar='N',
+                        help='Verify first N SMILES against graph (uses graph_to_smiles_utils); 0=off')
+
     args = parser.parse_args()
     
     # Create directories
@@ -290,7 +308,7 @@ Example:
     
     # Export each dataset
     for dataset_name in args.datasets:
-        success = export_ogb_dataset(dataset_name, data_dir, output_dir)
+        success = export_ogb_dataset(dataset_name, data_dir, output_dir, verify_sample=args.verify)
         results[dataset_name] = success
     
     # Print summary

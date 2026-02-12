@@ -15,6 +15,11 @@ except ImportError:
     RDKIT_AVAILABLE = False
     print("Warning: RDKit not available. SMILES conversion will be skipped.")
 
+try:
+    from graph_to_smiles_utils import mutag_graph_to_smiles as _mutag_graph_to_smiles
+except ImportError:
+    _mutag_graph_to_smiles = None
+
 
 class Mutag(InMemoryDataset):
     def __init__(self, root, add_smiles=False, add_motifs=False):
@@ -59,48 +64,25 @@ class Mutag(InMemoryDataset):
     def graph_to_smiles(self, edge_index, node_type):
         """
         Convert molecular graph to SMILES string.
-        
-        Args:
-            edge_index: Edge indices [2, num_edges]
-            node_type: Node types (atom types)
-            
-        Returns:
-            SMILES string or None if conversion fails
+        Uses shared graph_to_smiles_utils.mutag_graph_to_smiles when available.
         """
+        if _mutag_graph_to_smiles is not None:
+            return _mutag_graph_to_smiles(edge_index, node_type)
         if not RDKIT_AVAILABLE:
             return None
-        
+        # Fallback: inline implementation if utils not importable
         try:
-            # Create RDKit molecule
             mol = Chem.RWMol()
-            
-            # Map node type to atomic number
-            # Based on Mutagenicity dataset encoding
             atom_type_map = {
-                0: 6,   # C (Carbon)
-                1: 7,   # N (Nitrogen)
-                2: 8,   # O (Oxygen)
-                3: 9,   # F (Fluorine)
-                4: 15,  # P (Phosphorus)
-                5: 16,  # S (Sulfur)
-                6: 17,  # Cl (Chlorine)
-                7: 35,  # Br (Bromine)
-                8: 53,  # I (Iodine)
+                0: 6, 1: 7, 2: 8, 3: 9, 4: 15, 5: 16, 6: 17, 7: 35, 8: 53,
             }
-            
-            # Add atoms
             atom_idx_map = {}
             for idx, atom_type_idx in enumerate(node_type):
                 atom_type_idx = int(atom_type_idx)
                 if atom_type_idx in atom_type_map:
-                    atomic_num = atom_type_map[atom_type_idx]
-                    atom_idx = mol.AddAtom(Chem.Atom(atomic_num))
-                    atom_idx_map[idx] = atom_idx
+                    atom_idx_map[idx] = mol.AddAtom(Chem.Atom(atom_type_map[atom_type_idx]))
                 else:
-                    # Unknown atom type
                     return None
-            
-            # Add bonds (avoid duplicates for undirected graph)
             added_bonds = set()
             for i in range(edge_index.shape[1]):
                 src, dst = edge_index[0, i].item(), edge_index[1, i].item()
@@ -109,16 +91,10 @@ class Mutag(InMemoryDataset):
                     if bond_tuple not in added_bonds:
                         mol.AddBond(atom_idx_map[src], atom_idx_map[dst], Chem.BondType.SINGLE)
                         added_bonds.add(bond_tuple)
-            
-            # Convert to SMILES
             mol = mol.GetMol()
             Chem.SanitizeMol(mol)
-            smiles = Chem.MolToSmiles(mol)
-            
-            return smiles
-            
-        except Exception as e:
-            # Conversion failed
+            return Chem.MolToSmiles(mol)
+        except Exception:
             return None
     
     def extract_brics_motifs_with_atom_mapping(self, smiles):
