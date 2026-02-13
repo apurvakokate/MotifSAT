@@ -10,21 +10,37 @@ from datasets import SynGraphDataset, Mutag, SPMotif, MNIST75sp, graph_sst2
 
 
 class OGBDatasetWithSmiles:
-    """Wraps an OGB PyG dataset so each Data has a .smiles attribute from mapping/mol.csv.gz."""
+    """
+    Wraps an OGB PyG dataset so each Data has a .smiles attribute.
+
+    SMILES are integrated at the full-dataset level (not per-batch):
+    - The full mapping CSV is loaded once; one list of N SMILES in strict row order.
+    - OGB guarantees: i-th data object = i-th row in mapping/mol.csv.gz (see OGB readme).
+    - _smiles[i] is the SMILES for dataset index i; we only index by this integer, never reorder or batch the list.
+    """
 
     def __init__(self, ogb_dataset, smiles_list):
         self._dataset = ogb_dataset
+        # Full-dataset list: one SMILES per graph in exact CSV row order (index i = row i)
         self._smiles = list(smiles_list)
         assert len(self._smiles) == len(self._dataset), (
-            f"smiles length {len(self._smiles)} != dataset length {len(self._dataset)}"
+            f"1-1 mapping broken: smiles count {len(self._smiles)} != dataset size {len(self._dataset)}"
         )
 
     def __len__(self):
         return len(self._dataset)
 
     def __getitem__(self, idx):
-        # OGB split_idx can be tensors; ensure Python int for indexing
+        from torch.utils.data import Subset
+        try:
+            n = idx.numel() if hasattr(idx, 'numel') else len(idx)
+        except TypeError:
+            n = 1
+        if n > 1:
+            return Subset(self, idx)
+        # Single index: use same integer for both dataset and _smiles (strict 1-1)
         idx = int(idx.item() if hasattr(idx, 'item') else idx)
+        assert 0 <= idx < len(self._smiles), f"index {idx} out of range [0, {len(self._smiles)})"
         data = self._dataset[idx]
         data.smiles = self._smiles[idx]
         return data
@@ -33,7 +49,6 @@ class OGBDatasetWithSmiles:
         return self._dataset.get_idx_split()
 
     def copy(self, indices):
-        """Return a Subset so that test_set[i] still yields Data with .smiles (for visualization)."""
         from torch.utils.data import Subset
         return Subset(self, indices)
 
@@ -97,17 +112,21 @@ def get_data_loaders(data_dir, dataset_name, batch_size, splits, random_state, m
 
     elif 'ogbg' in dataset_name:
         dataset = PygGraphPropPredDataset(root=data_dir, name='-'.join(dataset_name.split('_')))
-        # Attach SMILES from mapping/mol.csv.gz (i-th row = i-th graph)
+        n_dataset = len(dataset)
+        # Load full mapping CSV once; OGB guarantees i-th row = i-th data object (no batching, strict 1-1)
         mol_csv = Path(data_dir) / dataset_name / 'mapping' / 'mol.csv.gz'
         if mol_csv.exists():
             import pandas as pd
             df_mol = pd.read_csv(mol_csv)
-            if 'smiles' in df_mol.columns and len(df_mol) == len(dataset):
-                smiles_list = df_mol['smiles'].astype(str).tolist()
-                dataset = OGBDatasetWithSmiles(dataset, smiles_list)
-                print('[INFO] Attached data.smiles from mapping/mol.csv.gz')
+            if 'smiles' not in df_mol.columns:
+                print('[WARNING] mapping/mol.csv.gz has no "smiles" column; data.smiles not set')
+            elif len(df_mol) != n_dataset:
+                print(f'[WARNING] mapping/mol.csv.gz row count {len(df_mol)} != dataset size {n_dataset}; data.smiles not set')
             else:
-                print('[WARNING] mapping/mol.csv.gz missing or length mismatch; data.smiles not set')
+                # Full dataset: one SMILES per row in strict CSV order (row i -> dataset index i)
+                smiles_list = [str(df_mol['smiles'].iloc[i]) for i in range(n_dataset)]
+                dataset = OGBDatasetWithSmiles(dataset, smiles_list)
+                print(f'[INFO] Attached data.smiles from mapping/mol.csv.gz (full dataset, 1-1 row order, n={n_dataset})')
         else:
             print('[WARNING] mapping/mol.csv.gz not found; data.smiles not set')
         split_idx = dataset.get_idx_split()
