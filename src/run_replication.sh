@@ -33,6 +33,11 @@ DATASETS=(
     "spmotif_0.9"
     "Graph-SST2"
     "ogbg_molhiv"
+    "ogbg_molbace"
+    "ogbg_molbbbp"
+    "ogbg_molclintox"
+    "ogbg_moltox21"
+    "ogbg_molsider"
 )
 
 # Architectures to test

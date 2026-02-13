@@ -1,11 +1,39 @@
 import torch
 import numpy as np
+from pathlib import Path
 from torch_geometric.data import Batch, InMemoryDataset
 from torch_geometric.utils import degree
 from torch_geometric.loader import DataLoader
 from DataLoader import MolDataset, get_setup_files_with_folds
 from ogb.graphproppred import PygGraphPropPredDataset
 from datasets import SynGraphDataset, Mutag, SPMotif, MNIST75sp, graph_sst2
+
+
+class OGBDatasetWithSmiles:
+    """Wraps an OGB PyG dataset so each Data has a .smiles attribute from mapping/mol.csv.gz."""
+
+    def __init__(self, ogb_dataset, smiles_list):
+        self._dataset = ogb_dataset
+        self._smiles = list(smiles_list)
+        assert len(self._smiles) == len(self._dataset), (
+            f"smiles length {len(self._smiles)} != dataset length {len(self._dataset)}"
+        )
+
+    def __len__(self):
+        return len(self._dataset)
+
+    def __getitem__(self, idx):
+        data = self._dataset[idx]
+        data.smiles = self._smiles[idx]
+        return data
+
+    def get_idx_split(self):
+        return self._dataset.get_idx_split()
+
+    def copy(self, indices):
+        """Return a Subset so that test_set[i] still yields Data with .smiles (for visualization)."""
+        from torch.utils.data import Subset
+        return Subset(self, indices)
 
 DATASET_COLUMN = {
                   'Mutagenicity':['Mutagenicity'], 
@@ -67,6 +95,19 @@ def get_data_loaders(data_dir, dataset_name, batch_size, splits, random_state, m
 
     elif 'ogbg' in dataset_name:
         dataset = PygGraphPropPredDataset(root=data_dir, name='-'.join(dataset_name.split('_')))
+        # Attach SMILES from mapping/mol.csv.gz (i-th row = i-th graph)
+        mol_csv = Path(data_dir) / dataset_name / 'mapping' / 'mol.csv.gz'
+        if mol_csv.exists():
+            import pandas as pd
+            df_mol = pd.read_csv(mol_csv)
+            if 'smiles' in df_mol.columns and len(df_mol) == len(dataset):
+                smiles_list = df_mol['smiles'].astype(str).tolist()
+                dataset = OGBDatasetWithSmiles(dataset, smiles_list)
+                print('[INFO] Attached data.smiles from mapping/mol.csv.gz')
+            else:
+                print('[WARNING] mapping/mol.csv.gz missing or length mismatch; data.smiles not set')
+        else:
+            print('[WARNING] mapping/mol.csv.gz not found; data.smiles not set')
         split_idx = dataset.get_idx_split()
         print('[INFO] Using default splits!')
         loaders, test_set = get_loaders_and_test_set(batch_size, dataset=dataset, split_idx=split_idx)

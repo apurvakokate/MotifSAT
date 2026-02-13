@@ -47,10 +47,15 @@ PAPER_DATASETS = [
     'mutag',
     'mnist',
     'spmotif_0.5',
-    'spmotif_0.7', 
+    'spmotif_0.7',
     'spmotif_0.9',
     'Graph-SST2',
     'ogbg_molhiv',
+    'ogbg_molbace',
+    'ogbg_molbbbp',
+    'ogbg_molclintox',
+    'ogbg_moltox21',
+    'ogbg_molsider',
 ]
 
 # Architectures to test
@@ -108,6 +113,41 @@ PAPER_HYPERPARAMS = {
         'GCN': {'r': 0.7, 'epochs': 100, 'lr': 1e-3, 'batch_size': 128},
     },
     'ogbg_molhiv': {
+        'GIN': {'r': 0.7, 'epochs': 200, 'lr': 1e-3, 'batch_size': 128},
+        'PNA': {'r': 0.7, 'epochs': 200, 'lr': 1e-3, 'batch_size': 128},
+        'GAT': {'r': 0.7, 'epochs': 200, 'lr': 1e-3, 'batch_size': 128},
+        'SAGE': {'r': 0.7, 'epochs': 200, 'lr': 1e-3, 'batch_size': 128},
+        'GCN': {'r': 0.7, 'epochs': 200, 'lr': 1e-3, 'batch_size': 128},
+    },
+    'ogbg_molbace': {
+        'GIN': {'r': 0.7, 'epochs': 200, 'lr': 1e-3, 'batch_size': 128},
+        'PNA': {'r': 0.7, 'epochs': 200, 'lr': 1e-3, 'batch_size': 128},
+        'GAT': {'r': 0.7, 'epochs': 200, 'lr': 1e-3, 'batch_size': 128},
+        'SAGE': {'r': 0.7, 'epochs': 200, 'lr': 1e-3, 'batch_size': 128},
+        'GCN': {'r': 0.7, 'epochs': 200, 'lr': 1e-3, 'batch_size': 128},
+    },
+    'ogbg_molbbbp': {
+        'GIN': {'r': 0.7, 'epochs': 200, 'lr': 1e-3, 'batch_size': 128},
+        'PNA': {'r': 0.7, 'epochs': 200, 'lr': 1e-3, 'batch_size': 128},
+        'GAT': {'r': 0.7, 'epochs': 200, 'lr': 1e-3, 'batch_size': 128},
+        'SAGE': {'r': 0.7, 'epochs': 200, 'lr': 1e-3, 'batch_size': 128},
+        'GCN': {'r': 0.7, 'epochs': 200, 'lr': 1e-3, 'batch_size': 128},
+    },
+    'ogbg_molclintox': {
+        'GIN': {'r': 0.7, 'epochs': 200, 'lr': 1e-3, 'batch_size': 128},
+        'PNA': {'r': 0.7, 'epochs': 200, 'lr': 1e-3, 'batch_size': 128},
+        'GAT': {'r': 0.7, 'epochs': 200, 'lr': 1e-3, 'batch_size': 128},
+        'SAGE': {'r': 0.7, 'epochs': 200, 'lr': 1e-3, 'batch_size': 128},
+        'GCN': {'r': 0.7, 'epochs': 200, 'lr': 1e-3, 'batch_size': 128},
+    },
+    'ogbg_moltox21': {
+        'GIN': {'r': 0.7, 'epochs': 200, 'lr': 1e-3, 'batch_size': 128},
+        'PNA': {'r': 0.7, 'epochs': 200, 'lr': 1e-3, 'batch_size': 128},
+        'GAT': {'r': 0.7, 'epochs': 200, 'lr': 1e-3, 'batch_size': 128},
+        'SAGE': {'r': 0.7, 'epochs': 200, 'lr': 1e-3, 'batch_size': 128},
+        'GCN': {'r': 0.7, 'epochs': 200, 'lr': 1e-3, 'batch_size': 128},
+    },
+    'ogbg_molsider': {
         'GIN': {'r': 0.7, 'epochs': 200, 'lr': 1e-3, 'batch_size': 128},
         'PNA': {'r': 0.7, 'epochs': 200, 'lr': 1e-3, 'batch_size': 128},
         'GAT': {'r': 0.7, 'epochs': 200, 'lr': 1e-3, 'batch_size': 128},

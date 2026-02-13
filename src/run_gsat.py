@@ -1743,7 +1743,8 @@ class GSAT(nn.Module):
                 x = np.linspace(0, 1, num_nodes)
                 y = np.ones_like(x)
                 coor = np.stack([x, y], axis=1)
-            elif self.dataset_name == 'ogbg_molhiv':
+            elif 'ogbg' in self.dataset_name:
+                # OGB node feature x[:, 0] is atomic number index (0-based); +1 for element symbol
                 element_idxs = {k: int(v+1) for k, v in enumerate(viz_set[i].x[:, 0])}
                 mol_type = {k: Chem.PeriodicTable.GetElementSymbol(Chem.GetPeriodicTable(), int(v)) for k, v in element_idxs.items()}
             elif self.dataset_name == 'mnist':
