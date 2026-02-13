@@ -23,6 +23,8 @@ class OGBDatasetWithSmiles:
         return len(self._dataset)
 
     def __getitem__(self, idx):
+        # OGB split_idx can be tensors; ensure Python int for indexing
+        idx = int(idx.item() if hasattr(idx, 'item') else idx)
         data = self._dataset[idx]
         data.smiles = self._smiles[idx]
         return data
