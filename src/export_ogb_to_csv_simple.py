@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
-Simple script to export OGB molecular datasets to CSV format for BRICS motif generation.
+Export OGB molecular datasets to CSV (smiles, label, split).
 
-This is a standalone script that only requires ogb and pandas.
+SMILES and labels are read from the dataset mapping file:
+  {data_dir}/{dataset_name}/mapping/mol.csv.gz
+
+Format (see OGB readme): columns are [task_1, ... task_n], SMILES, mol_id.
+The i-th PyG data object corresponds to the i-th row in mol.csv.gz.
 
 Usage:
-    python export_ogb_to_csv_simple.py --output_dir ../dataset_csvs
-    
-    # Or specific datasets
-    python export_ogb_to_csv_simple.py --datasets ogbg-molhiv ogbg-molbbbp
+  python export_ogb_to_csv_simple.py --output_dir ../dataset_csvs
+  python export_ogb_to_csv_simple.py --datasets ogbg-molhiv ogbg-molbbbp --verify 5
 """
 
 import argparse
@@ -30,6 +32,22 @@ try:
     _VERIFY_AVAILABLE = True
 except ImportError:
     _VERIFY_AVAILABLE = False
+
+try:
+    from torch_geometric.utils import to_smiles as pyg_to_smiles
+    _PYG_TO_SMILES_AVAILABLE = True
+except ImportError:
+    _PYG_TO_SMILES_AVAILABLE = False
+
+
+def _canonical_smiles(smiles):
+    """Return canonical SMILES or None if invalid."""
+    try:
+        from rdkit import Chem
+        mol = Chem.MolFromSmiles(smiles)
+        return Chem.MolToSmiles(mol) if mol is not None else None
+    except Exception:
+        return None
 
 # Patch for OGB bug with NaN in metadata
 def patch_ogb_metadata():
@@ -62,193 +80,141 @@ except:
     pass  # If patching fails, continue anyway
 
 
+def _load_mol_csv(data_dir: Path, dataset_name: str):
+    """Load mapping/mol.csv.gz. Columns: [task_1,...,task_n], smiles, mol_id. i-th row = i-th graph."""
+    mapping_path = data_dir / dataset_name.replace('-', '_') / 'mapping' / 'mol.csv.gz'
+    if not mapping_path.exists():
+        return None, f"File not found: {mapping_path}"
+    df = pd.read_csv(mapping_path)
+    if 'smiles' not in df.columns:
+        return None, f"No 'smiles' column in {mapping_path}. Columns: {list(df.columns)}"
+    return df, None
+
+
 def export_ogb_dataset(dataset_name: str, data_dir: Path, output_dir: Path, verify_sample: int = 0):
     """
-    Export OGB molecular dataset to CSV.
-
-    Args:
-        dataset_name: OGB dataset name (e.g., 'ogbg-molhiv', 'ogbg-molbbbp')
-        data_dir: Directory to store/load raw data
-        output_dir: Directory to save CSV files
-        verify_sample: If > 0, verify this many SMILES vs graph (using shared utils)
+    Export OGB molecular dataset to CSV from mapping/mol.csv.gz.
+    i-th data object = i-th row in mol.csv.gz (see OGB readme).
     """
     print("\n" + "="*80)
     print(f"Exporting {dataset_name}")
     print("="*80)
-    
+
     try:
+        # Load mapping file first (single source of SMILES)
+        df_mol, err = _load_mol_csv(data_dir, dataset_name)
+        if df_mol is None:
+            print(f"\n✗ {err}")
+            return False
+        print(f"✓ Loaded {len(df_mol)} rows from mapping/mol.csv.gz")
+
         # Load dataset
         print(f"Loading dataset from {data_dir}...")
-        
-        # Note: OGB may prompt for dataset updates
-        # If prompted, type 'y' to update or 'N' to use cached version
         try:
             dataset = PygGraphPropPredDataset(root=str(data_dir), name=dataset_name)
         except AttributeError as e:
             if "'float' object has no attribute 'split'" in str(e):
-                print("\n⚠️  OGB metadata bug detected!")
-                print("   This is a known issue with OGB when metadata contains NaN values.")
-                print("\n   Trying workaround: clearing cache and re-downloading...")
-                
-                # Clear cache
                 import shutil
                 cache_dir = data_dir / dataset_name.replace('-', '_')
                 if cache_dir.exists():
                     shutil.rmtree(cache_dir)
-                    print(f"   Deleted: {cache_dir}")
-                
-                # Try again
-                print("   Re-downloading dataset...")
+                    print("   Cleared cache, re-downloading...")
                 dataset = PygGraphPropPredDataset(root=str(data_dir), name=dataset_name)
             else:
                 raise
-        
-        print(f"✓ Loaded {len(dataset)} graphs")
-        
-        # Get split indices
+
+        n_data = len(dataset)
+        if len(df_mol) != n_data:
+            print(f"\n✗ Row count mismatch: mol.csv.gz has {len(df_mol)}, dataset has {n_data}")
+            return False
+        print(f"✓ Loaded {n_data} graphs")
+
         split_idx = dataset.get_idx_split()
         print(f"  Train: {len(split_idx['train'])}, Valid: {len(split_idx['valid'])}, Test: {len(split_idx['test'])}")
-        
-        # Check for SMILES - try multiple methods
-        smiles_data = None
-        
-        # Method 1: Direct attribute
-        if hasattr(dataset, 'smiles'):
-            smiles_data = dataset.smiles
-            print(f"✓ Dataset has {len(smiles_data)} SMILES strings (via .smiles attribute)")
-        
-        # Method 2: Check in graphs dict (some OGB versions)
-        elif hasattr(dataset, 'graphs') and isinstance(dataset.graphs, dict):
-            if 'smiles' in dataset.graphs:
-                smiles_data = dataset.graphs['smiles']
-                print(f"✓ Dataset has {len(smiles_data)} SMILES strings (via .graphs['smiles'])")
-        
-        # Method 3: Load from mapping directory
-        if smiles_data is None:
-            try:
-                import pandas as pd
-                mapping_dir = data_dir / dataset_name.replace('-', '_') / 'mapping'
-                smiles_file = mapping_dir / 'mol.csv.gz'
-                if smiles_file.exists():
-                    df_mapping = pd.read_csv(smiles_file)
-                    if 'smiles' in df_mapping.columns:
-                        smiles_data = df_mapping['smiles'].tolist()
-                        print(f"✓ Dataset has {len(smiles_data)} SMILES strings (loaded from mapping/mol.csv.gz)")
-            except Exception as e:
-                pass
-        
-        # If still no SMILES found
-        if smiles_data is None:
-            print(f"\n✗ Error: Could not find SMILES for dataset {dataset_name}")
-            print("   Tried:")
-            print("     • dataset.smiles attribute")
-            print("     • dataset.graphs['smiles']")
-            print("     • mapping/mol.csv.gz file")
-            print(f"\n   Dataset attributes: {[a for a in dir(dataset) if not a.startswith('_')][:15]}")
-            print(f"\n   This may indicate:")
-            print("     • OGB version is too old (need >= 1.3.0)")
-            print("     • Dataset is corrupted")
-            print("     • Not a molecular dataset")
-            print(f"\n   Check OGB version: python -c \"import ogb; print(ogb.__version__)\"")
-            return False
-        
-        # Extract SMILES and labels
+
+        # Extract SMILES and labels (i-th row = i-th graph)
         print("\nExtracting SMILES and labels...")
         smiles_list = []
         labels_list = []
         split_list = []
-        verify_count = 0
 
-        # Process all splits
         for split_name, indices in split_idx.items():
             for idx in tqdm(indices, desc=f"  {split_name:5s}"):
                 idx = int(idx)
-
-                # Get SMILES using smiles_data (works with all methods)
-                try:
-                    smiles = smiles_data[idx]
-                    if not smiles or smiles == '':
-                        print(f"    Warning: Empty SMILES at idx {idx}, skipping...")
-                        continue
-                except IndexError:
-                    print(f"    Warning: Index {idx} out of range for SMILES list, skipping...")
+                smiles = df_mol['smiles'].iloc[idx]
+                if pd.isna(smiles) or not str(smiles).strip():
                     continue
-                except Exception as e:
-                    print(f"    Warning: Could not get SMILES for idx {idx}: {e}, skipping...")
+                data = dataset[idx]
+                if not hasattr(data, 'y'):
                     continue
-
-                # Get label and optional verification
-                try:
-                    data = dataset[idx]
-                    if hasattr(data, 'y'):
-                        label = data.y.squeeze()
-                        # Handle multi-dimensional labels
-                        if label.dim() > 0:
-                            if label.numel() == 1:
-                                label = float(label.item())
-                            else:
-                                # Multi-task: convert to list
-                                label = label.cpu().numpy().tolist()
-                        else:
-                            label = float(label.item())
-                    else:
-                        print(f"    Warning: No label for idx {idx}, skipping...")
-                        continue
-                except Exception as e:
-                    print(f"    Warning: Could not get label for idx {idx}: {e}, skipping...")
-                    continue
-
-                # Optional: verify SMILES vs graph (shared utils)
-                if verify_sample > 0 and verify_count < verify_sample and _VERIFY_AVAILABLE:
-                    v = verify_smiles_vs_graph(smiles, data)
-                    status = "✓" if v.get('match') else "✗"
-                    print(f"    Verify [{verify_count+1}/{verify_sample}] idx {idx}: {status} {v.get('reason', '')}")
-                    verify_count += 1
-
+                label = data.y.squeeze()
+                if label.dim() > 0:
+                    label = float(label.item()) if label.numel() == 1 else label.cpu().numpy().tolist()
+                else:
+                    label = float(label.item())
                 smiles_list.append(smiles)
                 labels_list.append(label)
                 split_list.append(split_name)
-        
-        # Check if we got any data
+
         if len(smiles_list) == 0:
-            print("\n✗ Error: No SMILES extracted from dataset!")
-            print("   Possible issues:")
-            print("     • Dataset SMILES attribute is empty")
-            print("     • All indices failed to extract")
-            print("     • Dataset structure is unexpected")
+            print("\n✗ No valid SMILES/labels extracted")
             return False
-        
-        # Create DataFrame
-        df = pd.DataFrame({
-            'smiles': smiles_list,
-            'label': labels_list,
-            'split': split_list
-        })
-        
-        # Save to CSV
+
+        # Optional: verify random sample (SMILES→graph and graph→SMILES)
+        if verify_sample > 0:
+            rng = np.random.default_rng()
+            n_verify = min(verify_sample, n_data)
+            indices = rng.choice(n_data, size=n_verify, replace=False)
+            print(f"\n🔍 Verifying {n_verify} randomly sampled rows (SMILES↔graph)...")
+            ok_s2g = 0
+            ok_g2s = 0
+            for k, idx in enumerate(indices):
+                idx = int(idx)
+                smiles_orig = df_mol['smiles'].iloc[idx]
+                data = dataset[idx]
+                # (a) SMILES → graph: does CSV SMILES match dataset graph?
+                if _VERIFY_AVAILABLE:
+                    v = verify_smiles_vs_graph(smiles_orig, data)
+                    s2g = v.get('match')
+                    if s2g:
+                        ok_s2g += 1
+                    status_s2g = "✓" if s2g else "✗"
+                else:
+                    status_s2g = "?"
+                    s2g = None
+                # (b) Graph → SMILES: round-trip and compare canonical SMILES
+                g2s_ok = False
+                if _PYG_TO_SMILES_AVAILABLE and hasattr(data, 'edge_attr') and data.edge_attr is not None:
+                    try:
+                        smiles_from_graph = pyg_to_smiles(data)
+                        can_orig = _canonical_smiles(str(smiles_orig))
+                        can_graph = _canonical_smiles(smiles_from_graph) if smiles_from_graph else None
+                        g2s_ok = (can_orig is not None and can_graph is not None and can_orig == can_graph)
+                        if g2s_ok:
+                            ok_g2s += 1
+                    except Exception:
+                        pass
+                status_g2s = "✓" if g2s_ok else "✗"
+                print(f"  [{k+1}/{n_verify}] idx {idx}: SMILES→graph {status_s2g}  graph→SMILES {status_g2s}")
+            if _VERIFY_AVAILABLE:
+                print(f"  SMILES→graph match: {ok_s2g}/{n_verify}")
+            if _PYG_TO_SMILES_AVAILABLE:
+                print(f"  graph→SMILES match: {ok_g2s}/{n_verify}")
+
+        # Write CSV
+        df = pd.DataFrame({'smiles': smiles_list, 'label': labels_list, 'split': split_list})
         output_file = output_dir / f'{dataset_name.replace("-", "_")}.csv'
         df.to_csv(output_file, index=False)
-        
         print(f"\n✓ Exported {len(df)} samples to {output_file}")
         print(f"  Columns: {list(df.columns)}")
-        print(f"  Split distribution:")
-        print(f"{df['split'].value_counts().to_string(header=False)}")
-        
-        # Print label info (only if we have data)
-        if len(df) > 0:
-            if isinstance(df['label'].iloc[0], list):
-                num_tasks = len(df['label'].iloc[0])
-                print(f"  Multi-task dataset with {num_tasks} tasks")
-            else:
-                print(f"  Label statistics:")
-                print(f"    Count: {df['label'].count()}")
-                print(f"    Unique: {df['label'].nunique()}")
-                if df['label'].nunique() <= 10:
-                    print(f"  Label distribution:")
-                    print(f"{df['label'].value_counts().sort_index().to_string()}")
-        
+        print(f"  Split distribution:\n{df['split'].value_counts().to_string(header=False)}")
+        if len(df) > 0 and isinstance(df['label'].iloc[0], list):
+            print(f"  Multi-task: {len(df['label'].iloc[0])} tasks")
+        elif df['label'].nunique() <= 10:
+            print(f"  Label distribution:\n{df['label'].value_counts().sort_index().to_string()}")
+
         return True
-        
+
     except Exception as e:
         print(f"✗ Failed to export {dataset_name}: {e}")
         import traceback
