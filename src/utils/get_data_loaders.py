@@ -227,12 +227,18 @@ def get_data_loaders(data_dir, dataset_name, batch_size, splits, random_state, m
 
     x_dim = test_set[0].x.shape[1]
     edge_attr_dim = 0 if test_set[0].edge_attr is None else test_set[0].edge_attr.shape[1]
+    # test_set can be a list, an InMemoryDataset (.data), or a Subset (e.g. OGB wrapper)
     if isinstance(test_set, list):
-        num_class = Batch.from_data_list(test_set).y.unique().shape[0]
-    elif test_set.data.y.shape[-1] == 1 or len(test_set.data.y.shape) == 1:
-        num_class = test_set.data.y.unique().shape[0]
+        y_all = Batch.from_data_list(test_set).y
+    elif hasattr(test_set, 'data') and getattr(test_set.data, 'y', None) is not None:
+        y_all = test_set.data.y
     else:
-        num_class = test_set.data.y.shape[-1]
+        # Subset or other iterable without .data (e.g. OGBDatasetWithSmiles.copy())
+        y_all = Batch.from_data_list([test_set[i] for i in range(len(test_set))]).y
+    if y_all.shape[-1] == 1 or len(y_all.shape) == 1:
+        num_class = y_all.unique().shape[0]
+    else:
+        num_class = y_all.shape[-1]
         multi_label = True
 
     print(f'[INFO] Num Classes {num_class} : Calculating degree...')
