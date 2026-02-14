@@ -181,35 +181,37 @@ def get_base_config(model_name, dataset_name):
         sage_dropout = 0.0
         
         gat_hidden = 64
+        backbone_dropout = 0.3  # GIN, PNA, GAT (synthetic)
     else:
         # Real-world datasets: use standard configurations
         gcn_hidden = 64
         gcn_normalize = True   # Standard normalization
-        gcn_dropout = 0.3
+        gcn_dropout = 0.4 if dataset_name == 'ogbg_molbace' else 0.3  # Higher dropout for small MOLBACE (~1.5k graphs)
         
         sage_hidden = 64
         sage_aggr = 'mean'     # Standard SAGE uses MEAN
-        sage_dropout = 0.3
+        sage_dropout = 0.4 if dataset_name == 'ogbg_molbace' else 0.3
         
         gat_hidden = 64
+        backbone_dropout = 0.4 if dataset_name == 'ogbg_molbace' else 0.3  # GIN, PNA, GAT
     
     model_defaults = {
         'GIN': {
             'hidden_size': 64,
             'n_layers': 2,
-            'dropout_p': 0.3,
+            'dropout_p': backbone_dropout,
         },
         'PNA': {
             'hidden_size': 80,
             'n_layers': 4,
-            'dropout_p': 0.3,
+            'dropout_p': backbone_dropout,
             'aggregators': ['mean', 'min', 'max', 'std', 'sum'],
             'scalers': False,
         },
         'GAT': {
             'hidden_size': gat_hidden,
             'n_layers': 3,
-            'dropout_p': 0.3,
+            'dropout_p': backbone_dropout,
         },
         'SAGE': {
             'hidden_size': sage_hidden,
@@ -254,7 +256,7 @@ def get_base_config(model_name, dataset_name):
             'num_viz_samples': 0,  # Disable visualization for replication
             'viz_interval': 10,
             'viz_norm_att': True,
-            'extractor_dropout_p': 0.5,
+            'extractor_dropout_p': 0.6 if dataset_name == 'ogbg_molbace' else 0.5,  # Higher for small MOLBACE
         },
         'GSAT_config': {
             'method_name': 'GSAT',

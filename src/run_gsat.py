@@ -805,6 +805,10 @@ class GSAT(nn.Module):
         self.info_loss_coef = method_config['info_loss_coef']
         self.motif_loss_coef = method_config['motif_loss_coef']
 
+        # Early stopping: stop when validation metric does not improve for this many epochs
+        self.early_stopping_patience = method_config.get('early_stopping_patience', None)  # None = disabled
+        self.early_stopping_min_epochs = method_config.get('early_stopping_min_epochs', 20)  # don't stop before this
+
         self.fix_r = method_config.get('fix_r', None)
         self.decay_interval = method_config.get('decay_interval', None)
         self.decay_r = method_config.get('decay_r', None)
@@ -1203,6 +1207,7 @@ class GSAT(nn.Module):
 
     def train(self, loaders, test_set, metric_dict, use_edge_attr):
         # viz_set = self.get_viz_idx(test_set, self.dataset_name)
+        epochs_without_improvement = 0
         for epoch in range(self.epochs):
             train_res = self.run_one_epoch(loaders['train'], epoch, 'train', use_edge_attr)
             valid_res = self.run_one_epoch(loaders['valid'], epoch, 'valid', use_edge_attr)
@@ -1234,10 +1239,19 @@ class GSAT(nn.Module):
                                'metric/best_x_precision_train': train_res[1], 'metric/best_x_precision_valid': valid_res[1], 'metric/best_x_precision_test': test_res[1]}
                 save_checkpoint(self.clf, self.model_dir, model_name='gsat_clf_epoch_' + str(epoch))
                 save_checkpoint(self.extractor, self.model_dir, model_name='gsat_att_epoch_' + str(epoch))
+                epochs_without_improvement = 0
+            elif (r == self.final_r or self.fix_r) and epoch > 10:
+                epochs_without_improvement += 1
 
             for metric, value in metric_dict.items():
                 metric = metric.split('/')[-1]
                 self.writer.add_scalar(f'gsat_best/{metric}', value, epoch)
+
+            # Early stopping: stop when validation has not improved for patience epochs
+            if (self.early_stopping_patience is not None and epoch >= self.early_stopping_min_epochs
+                    and epochs_without_improvement >= self.early_stopping_patience):
+                print(f'[INFO] Early stopping at epoch {epoch} (no valid improvement for {self.early_stopping_patience} epochs). Best epoch: {metric_dict["metric/best_clf_epoch"]}')
+                break
 
             # Calculate explainer performance every 10 epochs (resource intensive)
             if epoch % 10 == 0 and epoch > 0:
