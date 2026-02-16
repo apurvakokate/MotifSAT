@@ -2211,7 +2211,7 @@ def calculate_explainer_performance(model, extractor, data_loader, device, epoch
 def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_name, method_name, device, random_state,  fold, task_type='classification'):
     
     # path = "/nfs/stak/users/kokatea/hpc-share/ChemIntuit/MOSE-GNN/DICTIONARY"
-    path = "/nfs/stak/users/kokatea/hpc-share/ChemIntuit/MotifBreakdown/DICTIONARY_NOFILTER"
+    path = "/nfs/stak/users/kokatea/hpc-share/ChemIntuit/MotifBreakdown/DICTIONARY_CREATE"
     
     # Build the deterministic seed_dir path to check for artifacts
     gsat_config = local_config.get('GSAT_config', {})
