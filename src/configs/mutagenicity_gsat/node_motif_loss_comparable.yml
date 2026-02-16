@@ -1,0 +1,4 @@
+# 4. Node attention + motif consistency loss (comparable to pred/info loss)
+tuning_id: node_motif_loss_comparable
+motif_incorporation_method: loss
+motif_loss_coef: 1

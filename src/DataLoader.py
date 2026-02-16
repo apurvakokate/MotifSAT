@@ -90,7 +90,7 @@ def get_setup_files_with_folds(dataset_name, date_tag, fold, algorithm, path = "
             
 #     else:
 #         base_path = f'{path}/FOLDS/{dataset_name}_{algorithm}_fold_{fold}_{date_tag}'
-    base_path = f'{path}/FOLDS/{dataset_name}_{algorithm}_fold_{fold}_nofilter'
+    base_path = f'{path}/FOLDS/nofilter/{dataset_name}_{algorithm}_fold_{fold}_{algorithm}_nofilter'
     
     
     return load_required_files(base_path)

@@ -1,0 +1,4 @@
+# 1. Node attention, no motif (loss/readout/graph)
+tuning_id: node_baseline
+motif_incorporation_method: null
+motif_loss_coef: 0

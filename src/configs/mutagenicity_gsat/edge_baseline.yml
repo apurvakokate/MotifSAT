@@ -1,0 +1,4 @@
+# 2. Edge attention, no motif (use with --learn_edge_att)
+tuning_id: edge_baseline
+motif_incorporation_method: null
+motif_loss_coef: 0

@@ -1,0 +1,4 @@
+# 3. Node attention + motif consistency loss (very high weight)
+tuning_id: node_motif_loss_high
+motif_incorporation_method: loss
+motif_loss_coef: 10
