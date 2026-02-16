@@ -1434,9 +1434,12 @@ class GSAT(nn.Module):
 
                             else:
                                 sample_results['edge_att'] = att.detach().cpu().numpy()
+                                sample_results['sample'] = data
+                                sample_results['node_att'] = None  # edge-level attention only
 
-                            # Save scores for each sample in the batch
-                            self.save_sample_scores(sample_results, split_name, di, node_f, edge_f)
+                            # Save scores for each sample in the batch (requires 'sample', 'node_att', 'edge_att')
+                            if 'sample' in sample_results:
+                                self.save_sample_scores(sample_results, split_name, di, node_f, edge_f)
                         
                 print(f"[INFO] Successfully saved attention scores to {node_jsonl_path} and {edge_jsonl_path}")
                 
