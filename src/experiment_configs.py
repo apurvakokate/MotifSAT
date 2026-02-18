@@ -236,6 +236,7 @@ def get_base_config(model_name, dataset_name, gsat_overrides=None):
         'pred_loss_coef': 1,
         'info_loss_coef': 1,
         'motif_loss_coef': 0,
+        'between_motif_coef': 0,
         'epochs': hp['epochs'],
         'lr': hp['lr'],
         'from_scratch': True,

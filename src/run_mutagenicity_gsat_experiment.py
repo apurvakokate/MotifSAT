@@ -28,11 +28,13 @@ DATASET = 'Mutagenicity'
 
 # Variant id -> (GSAT overrides, use_edge_att)
 MUTAGENICITY_VARIANTS = {
+    # --- Baselines (no motif loss) ---
     'node_baseline': {
         'gsat_overrides': {
             'tuning_id': 'node_baseline',
             'motif_incorporation_method': None,
             'motif_loss_coef': 0,
+            'between_motif_coef': 0,
         },
         'learn_edge_att': False,
     },
@@ -41,14 +43,17 @@ MUTAGENICITY_VARIANTS = {
             'tuning_id': 'edge_baseline',
             'motif_incorporation_method': None,
             'motif_loss_coef': 0,
+            'between_motif_coef': 0,
         },
         'learn_edge_att': True,
     },
+    # --- Within-only motif consistency (original formulation) ---
     'node_motif_loss_high': {
         'gsat_overrides': {
             'tuning_id': 'node_motif_loss_high',
             'motif_incorporation_method': 'loss',
             'motif_loss_coef': 10,
+            'between_motif_coef': 0,
         },
         'learn_edge_att': False,
     },
@@ -57,6 +62,26 @@ MUTAGENICITY_VARIANTS = {
             'tuning_id': 'node_motif_loss_comparable',
             'motif_incorporation_method': 'loss',
             'motif_loss_coef': 1,
+            'between_motif_coef': 0,
+        },
+        'learn_edge_att': False,
+    },
+    # --- Fisher-style: within-motif consistency + between-motif discrimination ---
+    'node_motif_fisher_balanced': {
+        'gsat_overrides': {
+            'tuning_id': 'node_motif_fisher_balanced',
+            'motif_incorporation_method': 'loss',
+            'motif_loss_coef': 1,
+            'between_motif_coef': 1,
+        },
+        'learn_edge_att': False,
+    },
+    'node_motif_fisher_high': {
+        'gsat_overrides': {
+            'tuning_id': 'node_motif_fisher_high',
+            'motif_incorporation_method': 'loss',
+            'motif_loss_coef': 10,
+            'between_motif_coef': 10,
         },
         'learn_edge_att': False,
     },

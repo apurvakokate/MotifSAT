@@ -4,10 +4,13 @@ Collect Mutagenicity GSAT results and generate two summary tables:
   1. Model prediction performance (test ROC) by architecture, averaged over folds (and seeds).
   2. Explainer performance (motif attention–impact correlation) by architecture, averaged over folds (and seeds).
 
-Rows = 3 motif loss configurations (from run_mutagenicity_gsat_experiment.py):
-  - No motif loss (0)
-  - Motif loss comparable (1)
-  - Motif loss high (10)
+Rows = motif loss configurations (from run_mutagenicity_gsat_experiment.py), keyed by
+(motif_loss_coef, between_motif_coef):
+  - No motif loss (w=0, b=0)
+  - Within-only comparable (w=1, b=0)
+  - Within-only high (w=10, b=0)
+  - Fisher balanced (w=1, b=1)
+  - Fisher high (w=10, b=10)
 
 No retraining: reads from saved final_metrics.json and experiment_summary.json under RESULTS_DIR/Mutagenicity/...
 
@@ -23,24 +26,31 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 
-# Row order for tables: the 3 motif loss configurations (match run_mutagenicity_gsat_experiment.py)
+# Row order: (motif_loss_coef, between_motif_coef) tuples
 MOTIF_LOSS_ROW_ORDER = [
-    0,   # No motif loss (node_baseline, edge_baseline)
-    1,   # Motif loss comparable
-    10,  # Motif loss high
+    (0, 0),     # No motif loss
+    (1, 0),     # Within-only comparable
+    (10, 0),    # Within-only high
+    (1, 1),     # Fisher balanced
+    (10, 10),   # Fisher high
 ]
 MOTIF_LOSS_ROW_LABELS = {
-    0: 'No motif loss (0)',
-    1: 'Motif loss comparable (1)',
-    10: 'Motif loss high (10)',
+    (0, 0):   'No motif loss',
+    (1, 0):   'Within-only (w=1)',
+    (10, 0):  'Within-only (w=10)',
+    (1, 1):   'Fisher (w=1, b=1)',
+    (10, 10): 'Fisher (w=10, b=10)',
 }
 
 
-def _motif_loss_to_row_label(motif_coef):
-    """Map motif_loss_coef to table row label."""
-    if motif_coef in MOTIF_LOSS_ROW_LABELS:
-        return MOTIF_LOSS_ROW_LABELS[motif_coef]
-    return f'Motif loss ({motif_coef})'
+def _coefs_to_row_label(motif_coef, between_coef):
+    """Map (motif_loss_coef, between_motif_coef) to a table row label."""
+    key = (motif_coef, between_coef)
+    if key in MOTIF_LOSS_ROW_LABELS:
+        return MOTIF_LOSS_ROW_LABELS[key]
+    if between_coef == 0:
+        return f'Within-only (w={motif_coef})'
+    return f'Fisher (w={motif_coef}, b={between_coef})'
 
 
 def find_mutagenicity_results(results_dir: Path, experiment_name: str):
@@ -75,20 +85,25 @@ def find_mutagenicity_results(results_dir: Path, experiment_name: str):
                 continue
             with open(fm_path) as f:
                 metrics = json.load(f)
-            # Get motif_loss_coef for row label (one of 3 motif losses)
+            # Get loss coefficients for row label
             seed_dir = fm_path.parent
             summary_path = seed_dir / 'experiment_summary.json'
             motif_coef = 0
+            between_coef = 0
             if summary_path.exists():
                 with open(summary_path) as f:
                     summary = json.load(f)
-                motif_coef = summary.get('loss_coefficients', {}).get('motif_loss_coef', 0)
+                loss_coefs = summary.get('loss_coefficients', {})
+                motif_coef = loss_coefs.get('motif_loss_coef', 0)
+                between_coef = loss_coefs.get('between_motif_coef', 0)
             motif_coef = int(motif_coef) if isinstance(motif_coef, (int, float)) else 0
-            row_label = _motif_loss_to_row_label(motif_coef)
+            between_coef = int(between_coef) if isinstance(between_coef, (int, float)) else 0
+            row_label = _coefs_to_row_label(motif_coef, between_coef)
             records.append({
                 'model': model_name,
                 'variant': tuning_id,
-                'motif_loss_coef': motif_coef,  # 0, 1, or 10 for the 3 rows
+                'motif_loss_coef': motif_coef,
+                'between_motif_coef': between_coef,
                 'row': row_label,
                 'fold': fold,
                 'seed': seed,
@@ -108,15 +123,14 @@ def build_prediction_table(records, metric_key='metric/best_clf_roc_test'):
     agg = df.groupby(['row', 'model'])['value'].agg(['mean', 'std', 'count']).reset_index()
     pivot_mean = agg.pivot(index='row', columns='model', values='mean')
     pivot_std = agg.pivot(index='row', columns='model', values='std')
-    # Ensure row order: No motif loss (0), comparable (1), high (10)
-    order = [_motif_loss_to_row_label(c) for c in MOTIF_LOSS_ROW_ORDER]
-    pivot_mean = pivot_mean.reindex(order)
-    pivot_std = pivot_std.reindex(order)
+    order = [_coefs_to_row_label(*c) for c in MOTIF_LOSS_ROW_ORDER]
+    pivot_mean = pivot_mean.reindex(order).dropna(how='all')
+    pivot_std = pivot_std.reindex(order).dropna(how='all')
     return pivot_mean, pivot_std
 
 
 def build_explainer_table(records, metric_key='motif/att_impact_correlation'):
-    """Table: rows = 3 motif loss configs, columns = architectures, values = mean correlation."""
+    """Table: rows = motif loss configs, columns = architectures, values = mean correlation."""
     if not records:
         return None
     df = pd.DataFrame(records)
@@ -124,9 +138,9 @@ def build_explainer_table(records, metric_key='motif/att_impact_correlation'):
     agg = df.groupby(['row', 'model'])['value'].agg(['mean', 'std', 'count']).reset_index()
     pivot_mean = agg.pivot(index='row', columns='model', values='mean')
     pivot_std = agg.pivot(index='row', columns='model', values='std')
-    order = [_motif_loss_to_row_label(c) for c in MOTIF_LOSS_ROW_ORDER]
-    pivot_mean = pivot_mean.reindex(order)
-    pivot_std = pivot_std.reindex(order)
+    order = [_coefs_to_row_label(*c) for c in MOTIF_LOSS_ROW_ORDER]
+    pivot_mean = pivot_mean.reindex(order).dropna(how='all')
+    pivot_std = pivot_std.reindex(order).dropna(how='all')
     return pivot_mean, pivot_std
 
 

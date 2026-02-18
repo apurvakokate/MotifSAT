@@ -47,51 +47,76 @@ def check_no_unmapped_nodes(nodes_to_motifs):
 
 def motif_consistency_loss(att, nodes_to_motifs, batch):
     """
-    Compute motif consistency loss at GRAPH level, not batch level.
+    Compute within-motif variance and between-motif variance at GRAPH level.
     
-    For each graph, and for each motif within that graph, compute the
-    variance of attention scores among nodes belonging to that motif.
+    Within-motif: for each motif, variance of node attentions (want low).
+    Between-motif: for each graph, variance of motif mean attentions (want high).
     
     Args:
-        att: [N, 1] or [N] node attentions, same device as nodes_to_motifs
+        att: [N, 1] or [N] node attentions
         nodes_to_motifs: [N] LongTensor with global motif id per node
-        batch: [N] LongTensor with graph id per node (for batched graphs)
+        batch: [N] LongTensor with graph id per node
     
     Returns:
-        Scalar loss value (mean variance across all graph-motif pairs)
+        (within_var, between_var) — both scalar tensors on the same device as att.
+        within_var: mean intra-motif variance (lower = more consistent within motifs)
+        between_var: mean inter-motif variance per graph (higher = more discriminative)
     """
-    # Flatten attentions to [N]
     att = att.view(-1)
     device = att.device
 
-    # Make sure types/devices line up
     nodes_to_motifs = nodes_to_motifs.to(device=device, dtype=torch.long)
     batch = batch.to(device=device, dtype=torch.long)
 
-    # Create unique (graph_id, motif_id) pairs using encoding trick
-    # This ensures consistency is computed per-graph, not across the batch
     max_motif_id = nodes_to_motifs.max().item() + 1
     graph_motif_id = batch * max_motif_id + nodes_to_motifs
 
     unique_graph_motifs = graph_motif_id.unique()
-    total_loss = att.new_tensor(0.0)
-    motif_count = 0
+
+    # --- Within-motif variance ---
+    within_total = att.new_tensor(0.0)
+    within_count = 0
+    # Also collect (graph_id, motif_mean) for between-motif variance
+    graph_ids_for_motifs = []
+    motif_means = []
 
     for gm_id in unique_graph_motifs:
         mask = (graph_motif_id == gm_id)
         num_nodes = mask.sum()
-        if num_nodes <= 1:
-            continue  # no variance within this motif-graph pair
+        vals = att[mask]
+        mean_val = vals.mean()
 
-        vals = att[mask]               # [k]
-        mean_val = vals.mean()         # scalar
-        total_loss = total_loss + (vals - mean_val).pow(2).mean()
-        motif_count += 1
+        graph_id = gm_id.item() // max_motif_id
+        graph_ids_for_motifs.append(graph_id)
+        motif_means.append(mean_val)
 
-    if motif_count == 0:
-        return att.new_tensor(0.0)
+        if num_nodes > 1:
+            within_total = within_total + (vals - mean_val).pow(2).mean()
+            within_count += 1
 
-    return total_loss / motif_count
+    within_var = within_total / within_count if within_count > 0 else att.new_tensor(0.0)
+
+    # --- Between-motif variance (per graph, then averaged) ---
+    if len(motif_means) < 2:
+        return within_var, att.new_tensor(0.0)
+
+    motif_means_t = torch.stack(motif_means)
+    graph_ids_t = torch.tensor(graph_ids_for_motifs, device=device, dtype=torch.long)
+    unique_graphs = graph_ids_t.unique()
+
+    between_total = att.new_tensor(0.0)
+    between_count = 0
+    for g_id in unique_graphs:
+        g_mask = (graph_ids_t == g_id)
+        if g_mask.sum() < 2:
+            continue
+        g_means = motif_means_t[g_mask]
+        between_total = between_total + g_means.var()
+        between_count += 1
+
+    between_var = between_total / between_count if between_count > 0 else att.new_tensor(0.0)
+
+    return within_var, between_var
 
 
 def motif_mean_pooling(emb, nodes_to_motifs, batch):
@@ -804,6 +829,7 @@ class GSAT(nn.Module):
         self.pred_loss_coef = method_config['pred_loss_coef']
         self.info_loss_coef = method_config['info_loss_coef']
         self.motif_loss_coef = method_config['motif_loss_coef']
+        self.between_motif_coef = method_config.get('between_motif_coef', 0.0)
 
         # Early stopping: stop when validation metric does not improve for this many epochs
         self.early_stopping_patience = method_config.get('early_stopping_patience', None)  # None = disabled
@@ -859,7 +885,7 @@ class GSAT(nn.Module):
             f'experiment_{experiment_name}',
             f'tuning_{tuning_id}',
             f'method_{motif_method_str}_{train_motif_str}_{separate_model_str}',
-            f'pred{self.pred_loss_coef}_info{self.info_loss_coef}_motif{self.motif_loss_coef}',
+            f'pred{self.pred_loss_coef}_info{self.info_loss_coef}_motif{self.motif_loss_coef}_between{self.between_motif_coef}',
             f'init{self.init_r}_final{self.final_r}_decay{self.decay_r}',
             f'fold{self.fold}_seed{self.random_state}'  # NO TIMESTAMP!
         )
@@ -888,7 +914,8 @@ class GSAT(nn.Module):
             'loss_coefficients': {
                 'pred_loss_coef': self.pred_loss_coef,
                 'info_loss_coef': self.info_loss_coef,
-                'motif_loss_coef': self.motif_loss_coef
+                'motif_loss_coef': self.motif_loss_coef,
+                'between_motif_coef': self.between_motif_coef,
             },
             'weight_distribution_params': {
                 'init_r': self.init_r,
@@ -912,6 +939,8 @@ class GSAT(nn.Module):
             'loss': loss_dict['loss'],
             'pred_loss': loss_dict['pred'],
             'info_loss': loss_dict['info'],
+            'motif_within': loss_dict.get('motif_within', 0),
+            'motif_between': loss_dict.get('motif_between', 0),
             'motif_loss': loss_dict['motif_consistency'],
             'att_auroc': float(att_auroc) if att_auroc is not None else None,
             'precision_at_k': float(precision) if precision is not None else None,
@@ -996,12 +1025,21 @@ class GSAT(nn.Module):
         pred_loss = pred_loss * self.pred_loss_coef
         info_loss = info_loss * self.info_loss_coef
         
-        # Compute motif consistency loss only for 'loss' method
-        # For other methods, consistency is enforced structurally or not applicable
-        if self.motif_method == 'loss' and self.motif_loss_coef > 0 and nodes_to_motifs is not None:
-            motif_loss = motif_consistency_loss(att, nodes_to_motifs, batch) * self.motif_loss_coef
+        # Compute motif loss only for 'loss' method
+        # within_var: penalizes intra-motif variance (nodes in same motif should agree)
+        # between_var: rewards inter-motif variance (different motifs should differ)
+        has_motif_loss = (self.motif_method == 'loss'
+                         and (self.motif_loss_coef > 0 or self.between_motif_coef > 0)
+                         and nodes_to_motifs is not None)
+        if has_motif_loss:
+            within_var, between_var = motif_consistency_loss(att, nodes_to_motifs, batch)
+            within_term = within_var * self.motif_loss_coef
+            between_term = between_var * self.between_motif_coef
+            motif_loss = within_term - between_term
         else:
             motif_loss = att.new_tensor(0.0)
+            within_term = att.new_tensor(0.0)
+            between_term = att.new_tensor(0.0)
         
         loss = pred_loss + info_loss + motif_loss
         
@@ -1009,7 +1047,9 @@ class GSAT(nn.Module):
             'loss': loss.item(), 
             'pred': pred_loss.item(), 
             'info': info_loss.item(), 
-            'motif_consistency': motif_loss.item()
+            'motif_within': within_term.item(),
+            'motif_between': between_term.item(),
+            'motif_consistency': motif_loss.item(),
         }
         
         # Add auxiliary motif graph loss if applicable
@@ -1487,6 +1527,8 @@ class GSAT(nn.Module):
                     f'{phase}/loss': loss_dict['loss'],
                     f'{phase}/pred_loss': loss_dict['pred'],
                     f'{phase}/info_loss': loss_dict['info'],
+                    f'{phase}/motif_within': loss_dict.get('motif_within', 0),
+                    f'{phase}/motif_between': loss_dict.get('motif_between', 0),
                     f'{phase}/motif_loss': loss_dict.get('motif_consistency', 0),
                     f'{phase}/motif_graph_loss': loss_dict.get('motif_graph_loss', 0),
                     f'{phase}/att_auroc': att_auroc if att_auroc is not None else 0,
