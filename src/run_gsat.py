@@ -1284,6 +1284,8 @@ class GSAT(nn.Module):
                 epochs_without_improvement += 1
 
             for metric, value in metric_dict.items():
+                if not isinstance(value, (int, float)):
+                    continue
                 metric = metric.split('/')[-1]
                 self.writer.add_scalar(f'gsat_best/{metric}', value, epoch)
             # Log best prediction performance to wandb for verification
