@@ -95,7 +95,7 @@ def run_one(model_name, fold, variant_id, seed, cuda_id, data_dir):
     variant = MUTAGENICITY_VARIANTS[variant_id]
     config = get_base_config(model_name, DATASET, gsat_overrides=variant['gsat_overrides'])
     config['shared_config']['learn_edge_att'] = variant['learn_edge_att']
-    config['GSAT_config']['experiment_name'] = 'mutagenicity_gsat_experiment'
+    config['GSAT_config']['experiment_name'] = 'test_motif_loss'
 
     device = torch.device(f'cuda:{cuda_id}' if cuda_id >= 0 else 'cpu')
     log_dir = data_dir / f'{DATASET}-fold{fold}' / 'logs' / f'{model_name}-seed{seed}-GSAT-{variant_id}'
