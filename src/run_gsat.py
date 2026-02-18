@@ -1273,6 +1273,8 @@ class GSAT(nn.Module):
                         self.clf, self.extractor, loaders['valid'], self.device, epoch, self.learn_edge_att
                     )
                     wandb.log(explainer_metrics)
+                    # Persist explainer metrics so they can be collected later without retraining
+                    metric_dict.update(explainer_metrics)
                     print(f"[INFO] Fidelity-: {explainer_metrics['explainer/fidelity_minus']:.4f}, "
                           f"Fidelity+: {explainer_metrics['explainer/fidelity_plus']:.4f}, "
                           f"Sparsity: {explainer_metrics['explainer/sparsity']:.4f}")
