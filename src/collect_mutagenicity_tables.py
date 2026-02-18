@@ -53,19 +53,28 @@ def _coefs_to_row_label(motif_coef, between_coef):
     return f'Fisher (w={motif_coef}, b={between_coef})'
 
 
-def find_mutagenicity_results(results_dir: Path, experiment_name: str):
+def find_mutagenicity_results(results_dir: Path, experiment_name: str, verbose: bool = False):
     """Find all final_metrics.json under results_dir/Mutagenicity for the given experiment_name.
-    Loads motif_loss_coef from experiment_summary.json to set table row (one of 3 motif losses).
+    Loads motif_loss_coef from experiment_summary.json to set table row.
     """
     base = results_dir / 'Mutagenicity'
     if not base.exists():
+        print(f'[WARN] Directory does not exist: {base}')
         return []
     experiment_dir = f'experiment_{experiment_name}'
     records = []
-    for fm_path in base.rglob('final_metrics.json'):
+    all_final_metrics = list(base.rglob('final_metrics.json'))
+    if verbose:
+        print(f'[DEBUG] Found {len(all_final_metrics)} total final_metrics.json under {base}')
+    skipped_experiment = 0
+    skipped_parse = 0
+    for fm_path in all_final_metrics:
         try:
             parts = fm_path.parent.relative_to(base).parts
             if experiment_dir not in parts:
+                skipped_experiment += 1
+                if verbose:
+                    print(f'  [SKIP experiment] {fm_path.parent.relative_to(base)}')
                 continue
             model_name = None
             tuning_id = None
@@ -82,6 +91,9 @@ def find_mutagenicity_results(results_dir: Path, experiment_name: str):
                         fold = int(m.group(1))
                         seed = int(m.group(2))
             if model_name is None or tuning_id is None or fold is None or seed is None:
+                skipped_parse += 1
+                if verbose:
+                    print(f'  [SKIP parse] model={model_name} tuning={tuning_id} fold={fold} seed={seed} path={fm_path.parent.relative_to(base)}')
                 continue
             with open(fm_path) as f:
                 metrics = json.load(f)
@@ -110,7 +122,11 @@ def find_mutagenicity_results(results_dir: Path, experiment_name: str):
                 'metrics': metrics,
             })
         except Exception as e:
+            if verbose:
+                print(f'  [ERROR] {fm_path}: {e}')
             continue
+    if verbose:
+        print(f'[DEBUG] Skipped {skipped_experiment} (wrong experiment), {skipped_parse} (parse failure), collected {len(records)}')
     return records
 
 
@@ -152,13 +168,15 @@ def main():
                         help='Base results dir (default: RESULTS_DIR env or ../tuning_results)')
     parser.add_argument('--output_dir', type=str, default=None,
                         help='Where to write CSV and summary (default: results_dir)')
+    parser.add_argument('--verbose', '-v', action='store_true',
+                        help='Print debug info about which runs are found/skipped')
     args = parser.parse_args()
 
     results_dir = Path(args.results_dir or os.environ.get('RESULTS_DIR', '../tuning_results'))
     output_dir = Path(args.output_dir or results_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    records = find_mutagenicity_results(results_dir, args.experiment_name)
+    records = find_mutagenicity_results(results_dir, args.experiment_name, verbose=args.verbose)
     if not records:
         print(f'No final_metrics.json found under {results_dir / "Mutagenicity"} for experiment "{args.experiment_name}".')
         print(f'Looked for paths containing: experiment_{args.experiment_name}')
