@@ -4,11 +4,15 @@ Collect Mutagenicity GSAT results and generate two summary tables:
   1. Model prediction performance (test ROC) by architecture, averaged over folds (and seeds).
   2. Explainer performance (motif attention–impact correlation) by architecture, averaged over folds (and seeds).
 
-No retraining: reads from saved final_metrics.json under RESULTS_DIR/Mutagenicity/...
-Run after run_mutagenicity_gsat_experiment.py has completed.
+Rows = 3 motif loss configurations (from run_mutagenicity_gsat_experiment.py):
+  - No motif loss (0)
+  - Motif loss comparable (1)
+  - Motif loss high (10)
+
+No retraining: reads from saved final_metrics.json and experiment_summary.json under RESULTS_DIR/Mutagenicity/...
 
 Usage:
-  python collect_mutagenicity_tables.py --experiment_name mutagenicity_gsat_experiment [--results_dir ../tuning_results] [--output_dir .]
+  python collect_mutagenicity_tables.py --experiment_name default_experiment [--results_dir ../tuning_results] [--output_dir .]
 """
 
 import argparse
@@ -19,21 +23,40 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 
+# Row order for tables: the 3 motif loss configurations (match run_mutagenicity_gsat_experiment.py)
+MOTIF_LOSS_ROW_ORDER = [
+    0,   # No motif loss (node_baseline, edge_baseline)
+    1,   # Motif loss comparable
+    10,  # Motif loss high
+]
+MOTIF_LOSS_ROW_LABELS = {
+    0: 'No motif loss (0)',
+    1: 'Motif loss comparable (1)',
+    10: 'Motif loss high (10)',
+}
+
+
+def _motif_loss_to_row_label(motif_coef):
+    """Map motif_loss_coef to table row label."""
+    if motif_coef in MOTIF_LOSS_ROW_LABELS:
+        return MOTIF_LOSS_ROW_LABELS[motif_coef]
+    return f'Motif loss ({motif_coef})'
+
 
 def find_mutagenicity_results(results_dir: Path, experiment_name: str):
-    """Find all final_metrics.json under results_dir/Mutagenicity for the given experiment_name."""
+    """Find all final_metrics.json under results_dir/Mutagenicity for the given experiment_name.
+    Loads motif_loss_coef from experiment_summary.json to set table row (one of 3 motif losses).
+    """
     base = results_dir / 'Mutagenicity'
     if not base.exists():
         return []
     experiment_dir = f'experiment_{experiment_name}'
     records = []
-    # Path pattern: .../Mutagenicity/model_{model}/experiment_{name}/tuning_{tuning_id}/.../fold{f}_seed{s}/final_metrics.json
     for fm_path in base.rglob('final_metrics.json'):
         try:
             parts = fm_path.parent.relative_to(base).parts
             if experiment_dir not in parts:
                 continue
-            # parts like ('model_GIN', 'experiment_mutagenicity_gsat_experiment', 'tuning_node_baseline', ...)
             model_name = None
             tuning_id = None
             fold = None
@@ -52,9 +75,21 @@ def find_mutagenicity_results(results_dir: Path, experiment_name: str):
                 continue
             with open(fm_path) as f:
                 metrics = json.load(f)
+            # Get motif_loss_coef for row label (one of 3 motif losses)
+            seed_dir = fm_path.parent
+            summary_path = seed_dir / 'experiment_summary.json'
+            motif_coef = 0
+            if summary_path.exists():
+                with open(summary_path) as f:
+                    summary = json.load(f)
+                motif_coef = summary.get('loss_coefficients', {}).get('motif_loss_coef', 0)
+            motif_coef = int(motif_coef) if isinstance(motif_coef, (int, float)) else 0
+            row_label = _motif_loss_to_row_label(motif_coef)
             records.append({
                 'model': model_name,
                 'variant': tuning_id,
+                'motif_loss_coef': motif_coef,  # 0, 1, or 10 for the 3 rows
+                'row': row_label,
                 'fold': fold,
                 'seed': seed,
                 'metrics': metrics,
@@ -65,26 +100,33 @@ def find_mutagenicity_results(results_dir: Path, experiment_name: str):
 
 
 def build_prediction_table(records, metric_key='metric/best_clf_roc_test'):
-    """Table: rows = variants, columns = architectures, values = mean (over folds and seeds)."""
+    """Table: rows = 3 motif loss configs, columns = architectures, values = mean (over folds and seeds)."""
     if not records:
         return None
     df = pd.DataFrame(records)
     df['value'] = df['metrics'].apply(lambda m: m.get(metric_key, np.nan))
-    agg = df.groupby(['variant', 'model'])['value'].agg(['mean', 'std', 'count']).reset_index()
-    pivot_mean = agg.pivot(index='variant', columns='model', values='mean')
-    pivot_std = agg.pivot(index='variant', columns='model', values='std')
+    agg = df.groupby(['row', 'model'])['value'].agg(['mean', 'std', 'count']).reset_index()
+    pivot_mean = agg.pivot(index='row', columns='model', values='mean')
+    pivot_std = agg.pivot(index='row', columns='model', values='std')
+    # Ensure row order: No motif loss (0), comparable (1), high (10)
+    order = [_motif_loss_to_row_label(c) for c in MOTIF_LOSS_ROW_ORDER]
+    pivot_mean = pivot_mean.reindex(order)
+    pivot_std = pivot_std.reindex(order)
     return pivot_mean, pivot_std
 
 
 def build_explainer_table(records, metric_key='motif/att_impact_correlation'):
-    """Table: rows = variants, columns = architectures, values = mean correlation (over folds and seeds)."""
+    """Table: rows = 3 motif loss configs, columns = architectures, values = mean correlation."""
     if not records:
         return None
     df = pd.DataFrame(records)
     df['value'] = df['metrics'].apply(lambda m: m.get(metric_key, np.nan))
-    agg = df.groupby(['variant', 'model'])['value'].agg(['mean', 'std', 'count']).reset_index()
-    pivot_mean = agg.pivot(index='variant', columns='model', values='mean')
-    pivot_std = agg.pivot(index='variant', columns='model', values='std')
+    agg = df.groupby(['row', 'model'])['value'].agg(['mean', 'std', 'count']).reset_index()
+    pivot_mean = agg.pivot(index='row', columns='model', values='mean')
+    pivot_std = agg.pivot(index='row', columns='model', values='std')
+    order = [_motif_loss_to_row_label(c) for c in MOTIF_LOSS_ROW_ORDER]
+    pivot_mean = pivot_mean.reindex(order)
+    pivot_std = pivot_std.reindex(order)
     return pivot_mean, pivot_std
 
 
