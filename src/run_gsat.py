@@ -984,9 +984,9 @@ class GSAT(nn.Module):
     def save_final_metrics(self, metric_dict):
         """Save final best metrics after training completes."""
         final_metrics_path = os.path.join(self.seed_dir, 'final_metrics.json')
-
+        serializable = {k: v for k, v in metric_dict.items() if isinstance(v, (int, float, str, bool, type(None)))}
         with open(final_metrics_path, 'w') as f:
-            json.dump(metric_dict, f, indent=2)
+            json.dump(serializable, f, indent=2)
             
     @staticmethod
     def _calculate_entropy(weights, num_bins=20):

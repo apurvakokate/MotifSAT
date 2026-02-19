@@ -53,6 +53,24 @@ def _coefs_to_row_label(motif_coef, between_coef):
     return f'Fisher (w={motif_coef}, b={between_coef})'
 
 
+def _recover_truncated_json(raw: str):
+    """Try to recover a truncated JSON object by finding the last valid closing brace."""
+    raw = raw.strip()
+    if not raw.startswith('{'):
+        return None
+    for i in range(len(raw) - 1, 0, -1):
+        candidate = raw[:i]
+        last_comma = candidate.rfind(',')
+        if last_comma > 0:
+            candidate = candidate[:last_comma]
+        candidate = candidate.rstrip() + '\n}'
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+    return None
+
+
 def find_mutagenicity_results(results_dir: Path, experiment_name: str, verbose: bool = False):
     """Find all final_metrics.json under results_dir/Mutagenicity for the given experiment_name.
     Loads motif_loss_coef from experiment_summary.json to set table row.
@@ -68,6 +86,7 @@ def find_mutagenicity_results(results_dir: Path, experiment_name: str, verbose: 
         print(f'[DEBUG] Found {len(all_final_metrics)} total final_metrics.json under {base}')
     skipped_experiment = 0
     skipped_parse = 0
+    skipped_error = 0
     for fm_path in all_final_metrics:
         try:
             parts = fm_path.parent.relative_to(base).parts
@@ -96,7 +115,18 @@ def find_mutagenicity_results(results_dir: Path, experiment_name: str, verbose: 
                     print(f'  [SKIP parse] model={model_name} tuning={tuning_id} fold={fold} seed={seed} path={fm_path.parent.relative_to(base)}')
                 continue
             with open(fm_path) as f:
-                metrics = json.load(f)
+                raw = f.read()
+            try:
+                metrics = json.loads(raw)
+            except json.JSONDecodeError:
+                metrics = _recover_truncated_json(raw)
+                if metrics is None:
+                    skipped_error += 1
+                    if verbose:
+                        print(f'  [ERROR] Unrecoverable JSON: {fm_path}')
+                    continue
+                if verbose:
+                    print(f'  [RECOVERED] Partial JSON ({len(metrics)} keys): {fm_path}')
             # Get loss coefficients for row label
             seed_dir = fm_path.parent
             summary_path = seed_dir / 'experiment_summary.json'
@@ -122,11 +152,14 @@ def find_mutagenicity_results(results_dir: Path, experiment_name: str, verbose: 
                 'metrics': metrics,
             })
         except Exception as e:
+            skipped_error += 1
             if verbose:
                 print(f'  [ERROR] {fm_path}: {e}')
             continue
-    if verbose:
-        print(f'[DEBUG] Skipped {skipped_experiment} (wrong experiment), {skipped_parse} (parse failure), collected {len(records)}')
+    if verbose or skipped_error > 0:
+        print(f'[DEBUG] Total final_metrics.json: {len(all_final_metrics)}, '
+              f'skipped {skipped_experiment} (wrong experiment), {skipped_parse} (parse failure), '
+              f'{skipped_error} (error), collected {len(records)}')
     return records
 
 
@@ -186,11 +219,11 @@ def main():
     print(f'Found {len(records)} runs (fold/seed/model/variant).')
 
     # Table 1: Model prediction performance (test ROC), averaged by fold (and seed)
-    pred_mean, pred_std = build_prediction_table(records, metric_key='metric/best_clf_roc_test')
+    pred_mean, pred_std = build_prediction_table(records, metric_key='metric/best_clf_roc_valid')
     if pred_mean is not None:
         pred_path = output_dir / 'mutagenicity_prediction_performance.csv'
         pred_mean.to_csv(pred_path)
-        print(f'\n--- Model prediction performance (test ROC, mean over folds/seeds) ---')
+        print(f'\n--- Model prediction performance (valid ROC, mean over folds/seeds) ---')
         print(pred_mean.to_string())
         print(f'\nSaved: {pred_path}')
         # Optional: mean ± std
