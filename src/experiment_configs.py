@@ -124,13 +124,13 @@ PAPER_HYPERPARAMS = {
         'SAGE': {'r': 0.7, 'epochs': 200, 'lr': 1e-3, 'batch_size': 128},
         'GCN': {'r': 0.7, 'epochs': 200, 'lr': 1e-3, 'batch_size': 128},
     },
-    # Molecular datasets with folds (same defaults as OGB molecular)
+    # Molecular datasets with folds (Mutagenicity has GT explanations → r=0.5 like mutag)
     'Mutagenicity': {
-        'GIN': {'r': 0.7, 'epochs': 200, 'lr': 1e-3, 'batch_size': 128},
-        'PNA': {'r': 0.7, 'epochs': 200, 'lr': 1e-3, 'batch_size': 128},
-        'GAT': {'r': 0.7, 'epochs': 200, 'lr': 1e-3, 'batch_size': 128},
-        'SAGE': {'r': 0.7, 'epochs': 200, 'lr': 1e-3, 'batch_size': 128},
-        'GCN': {'r': 0.7, 'epochs': 200, 'lr': 1e-3, 'batch_size': 128},
+        'GIN': {'r': 0.5, 'epochs': 200, 'lr': 1e-3, 'batch_size': 128},
+        'PNA': {'r': 0.5, 'epochs': 200, 'lr': 1e-3, 'batch_size': 128},
+        'GAT': {'r': 0.5, 'epochs': 200, 'lr': 1e-3, 'batch_size': 128},
+        'SAGE': {'r': 0.5, 'epochs': 200, 'lr': 1e-3, 'batch_size': 128},
+        'GCN': {'r': 0.5, 'epochs': 200, 'lr': 1e-3, 'batch_size': 128},
     },
     'BBBP': {
         'GIN': {'r': 0.7, 'epochs': 200, 'lr': 1e-3, 'batch_size': 128},

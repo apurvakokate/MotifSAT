@@ -1,21 +1,19 @@
 #!/usr/bin/env python
 """
-Collect Mutagenicity GSAT results and generate two summary tables:
-  1. Model prediction performance (test ROC) by architecture, averaged over folds (and seeds).
-  2. Explainer performance (motif attention–impact correlation) by architecture, averaged over folds (and seeds).
+Collect Mutagenicity GSAT results and generate summary tables.
 
-Rows = motif loss configurations (from run_mutagenicity_gsat_experiment.py), keyed by
-(motif_loss_coef, between_motif_coef):
-  - No motif loss (w=0, b=0)
-  - Within-only comparable (w=1, b=0)
-  - Within-only high (w=10, b=0)
-  - Fisher balanced (w=1, b=1)
-  - Fisher high (w=10, b=10)
+Tables: columns = architectures, rows = the varying hyperparameter for that experiment.
 
-No retraining: reads from saved final_metrics.json and experiment_summary.json under RESULTS_DIR/Mutagenicity/...
+Experiment-specific rows:
+  r_impact_node / r_impact_edge       → rows = final_r  (0.4, 0.5, 0.6)
+  within_motif_consistency_impact      → rows = motif_loss_coef  (1.0, 2.0)
+  between_motif_consistency_impact     → rows = between_motif_coef (1.0, 2.0)
+
+Reads from saved final_metrics.json and experiment_summary.json (no retraining).
 
 Usage:
-  python collect_mutagenicity_tables.py --experiment_name default_experiment [--results_dir ../tuning_results] [--output_dir .]
+  python collect_mutagenicity_tables.py --experiment_name r_impact_node
+  python collect_mutagenicity_tables.py --experiment_name within_motif_consistency_impact --verbose
 """
 
 import argparse
@@ -26,31 +24,41 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 
-# Row order: (motif_loss_coef, between_motif_coef) tuples
-MOTIF_LOSS_ROW_ORDER = [
-    (0, 0),     # No motif loss
-    (1, 0),     # Within-only comparable
-    (10, 0),    # Within-only high
-    (1, 1),     # Fisher balanced
-    (10, 10),   # Fisher high
-]
-MOTIF_LOSS_ROW_LABELS = {
-    (0, 0):   'No motif loss',
-    (1, 0):   'Within-only (w=1)',
-    (10, 0):  'Within-only (w=10)',
-    (1, 1):   'Fisher (w=1, b=1)',
-    (10, 10): 'Fisher (w=10, b=10)',
+# Map experiment_name → (key in experiment_summary to read, display name)
+EXPERIMENT_ROW_CONFIG = {
+    'r_impact_node': {
+        'summary_path': ('weight_distribution_params', 'final_r'),
+        'row_label_prefix': 'r',
+    },
+    'r_impact_edge': {
+        'summary_path': ('weight_distribution_params', 'final_r'),
+        'row_label_prefix': 'r',
+    },
+    'within_motif_consistency_impact': {
+        'summary_path': ('loss_coefficients', 'motif_loss_coef'),
+        'row_label_prefix': 'motif_loss_coef',
+    },
+    'between_motif_consistency_impact': {
+        'summary_path': ('loss_coefficients', 'between_motif_coef'),
+        'row_label_prefix': 'between_motif_coef',
+    },
 }
 
 
-def _coefs_to_row_label(motif_coef, between_coef):
-    """Map (motif_loss_coef, between_motif_coef) to a table row label."""
-    key = (motif_coef, between_coef)
-    if key in MOTIF_LOSS_ROW_LABELS:
-        return MOTIF_LOSS_ROW_LABELS[key]
-    if between_coef == 0:
-        return f'Within-only (w={motif_coef})'
-    return f'Fisher (w={motif_coef}, b={between_coef})'
+def _get_row_value(summary: dict, experiment_name: str):
+    """Extract the varying hyperparameter value from experiment_summary.json."""
+    cfg = EXPERIMENT_ROW_CONFIG.get(experiment_name)
+    if cfg is None:
+        return 'unknown'
+    section, key = cfg['summary_path']
+    val = summary.get(section, {}).get(key, '?')
+    return val
+
+
+def _make_row_label(val, experiment_name: str):
+    cfg = EXPERIMENT_ROW_CONFIG.get(experiment_name)
+    prefix = cfg['row_label_prefix'] if cfg else 'param'
+    return f'{prefix}={val}'
 
 
 def _recover_truncated_json(raw: str):
@@ -71,10 +79,8 @@ def _recover_truncated_json(raw: str):
     return None
 
 
-def find_mutagenicity_results(results_dir: Path, experiment_name: str, verbose: bool = False):
-    """Find all final_metrics.json under results_dir/Mutagenicity for the given experiment_name.
-    Loads motif_loss_coef from experiment_summary.json to set table row.
-    """
+def find_results(results_dir: Path, experiment_name: str, verbose: bool = False):
+    """Find all final_metrics.json under results_dir/Mutagenicity for the given experiment_name."""
     base = results_dir / 'Mutagenicity'
     if not base.exists():
         print(f'[WARN] Directory does not exist: {base}')
@@ -92,8 +98,6 @@ def find_mutagenicity_results(results_dir: Path, experiment_name: str, verbose: 
             parts = fm_path.parent.relative_to(base).parts
             if experiment_dir not in parts:
                 skipped_experiment += 1
-                if verbose:
-                    print(f'  [SKIP experiment] {fm_path.parent.relative_to(base)}')
                 continue
             model_name = None
             tuning_id = None
@@ -127,25 +131,19 @@ def find_mutagenicity_results(results_dir: Path, experiment_name: str, verbose: 
                     continue
                 if verbose:
                     print(f'  [RECOVERED] Partial JSON ({len(metrics)} keys): {fm_path}')
-            # Get loss coefficients for row label
+            # Read experiment_summary.json for the row value
             seed_dir = fm_path.parent
             summary_path = seed_dir / 'experiment_summary.json'
-            motif_coef = 0
-            between_coef = 0
+            summary = {}
             if summary_path.exists():
                 with open(summary_path) as f:
                     summary = json.load(f)
-                loss_coefs = summary.get('loss_coefficients', {})
-                motif_coef = loss_coefs.get('motif_loss_coef', 0)
-                between_coef = loss_coefs.get('between_motif_coef', 0)
-            motif_coef = int(motif_coef) if isinstance(motif_coef, (int, float)) else 0
-            between_coef = int(between_coef) if isinstance(between_coef, (int, float)) else 0
-            row_label = _coefs_to_row_label(motif_coef, between_coef)
+            row_val = _get_row_value(summary, experiment_name)
+            row_label = _make_row_label(row_val, experiment_name)
             records.append({
                 'model': model_name,
                 'variant': tuning_id,
-                'motif_loss_coef': motif_coef,
-                'between_motif_coef': between_coef,
+                'row_val': row_val,
                 'row': row_label,
                 'fold': fold,
                 'seed': seed,
@@ -157,93 +155,94 @@ def find_mutagenicity_results(results_dir: Path, experiment_name: str, verbose: 
                 print(f'  [ERROR] {fm_path}: {e}')
             continue
     if verbose or skipped_error > 0:
-        print(f'[DEBUG] Total final_metrics.json: {len(all_final_metrics)}, '
-              f'skipped {skipped_experiment} (wrong experiment), {skipped_parse} (parse failure), '
+        print(f'[DEBUG] Total: {len(all_final_metrics)}, '
+              f'skipped {skipped_experiment} (wrong experiment), {skipped_parse} (parse), '
               f'{skipped_error} (error), collected {len(records)}')
     return records
 
 
-def build_prediction_table(records, metric_key='metric/best_clf_roc_test'):
-    """Table: rows = 3 motif loss configs, columns = architectures, values = mean (over folds and seeds)."""
+def build_table(records, metric_key):
+    """Build a pivot table: rows = hyperparameter values, columns = architectures."""
     if not records:
-        return None
+        return None, None
     df = pd.DataFrame(records)
     df['value'] = df['metrics'].apply(lambda m: m.get(metric_key, np.nan))
-    agg = df.groupby(['row', 'model'])['value'].agg(['mean', 'std', 'count']).reset_index()
+    agg = df.groupby(['row', 'row_val', 'model'])['value'].agg(['mean', 'std', 'count']).reset_index()
+    agg = agg.sort_values('row_val')
     pivot_mean = agg.pivot(index='row', columns='model', values='mean')
     pivot_std = agg.pivot(index='row', columns='model', values='std')
-    order = [_coefs_to_row_label(*c) for c in MOTIF_LOSS_ROW_ORDER]
-    pivot_mean = pivot_mean.reindex(order).dropna(how='all')
-    pivot_std = pivot_std.reindex(order).dropna(how='all')
-    return pivot_mean, pivot_std
-
-
-def build_explainer_table(records, metric_key='motif/att_impact_correlation'):
-    """Table: rows = motif loss configs, columns = architectures, values = mean correlation."""
-    if not records:
-        return None
-    df = pd.DataFrame(records)
-    df['value'] = df['metrics'].apply(lambda m: m.get(metric_key, np.nan))
-    agg = df.groupby(['row', 'model'])['value'].agg(['mean', 'std', 'count']).reset_index()
-    pivot_mean = agg.pivot(index='row', columns='model', values='mean')
-    pivot_std = agg.pivot(index='row', columns='model', values='std')
-    order = [_coefs_to_row_label(*c) for c in MOTIF_LOSS_ROW_ORDER]
-    pivot_mean = pivot_mean.reindex(order).dropna(how='all')
-    pivot_std = pivot_std.reindex(order).dropna(how='all')
+    # Sort rows by the numeric value
+    row_order = agg.drop_duplicates('row').sort_values('row_val')['row'].tolist()
+    pivot_mean = pivot_mean.reindex(row_order).dropna(how='all')
+    pivot_std = pivot_std.reindex(row_order).dropna(how='all')
     return pivot_mean, pivot_std
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Collect Mutagenicity results into prediction and explainer tables')
+    parser = argparse.ArgumentParser(description='Collect Mutagenicity experiment results into tables')
     parser.add_argument('--experiment_name', type=str, required=True,
-                        help='Experiment name (e.g. mutagenicity_gsat_experiment). Only results under experiment_{name}/ are collected.')
+                        help='Experiment name (r_impact_node, r_impact_edge, within_motif_consistency_impact, between_motif_consistency_impact)')
     parser.add_argument('--results_dir', type=str, default=None,
                         help='Base results dir (default: RESULTS_DIR env or ../tuning_results)')
     parser.add_argument('--output_dir', type=str, default=None,
-                        help='Where to write CSV and summary (default: results_dir)')
-    parser.add_argument('--verbose', '-v', action='store_true',
-                        help='Print debug info about which runs are found/skipped')
+                        help='Where to write CSV (default: results_dir)')
+    parser.add_argument('--verbose', '-v', action='store_true')
     args = parser.parse_args()
 
     results_dir = Path(args.results_dir or os.environ.get('RESULTS_DIR', '../tuning_results'))
     output_dir = Path(args.output_dir or results_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    records = find_mutagenicity_results(results_dir, args.experiment_name, verbose=args.verbose)
+    records = find_results(results_dir, args.experiment_name, verbose=args.verbose)
     if not records:
-        print(f'No final_metrics.json found under {results_dir / "Mutagenicity"} for experiment "{args.experiment_name}".')
-        print(f'Looked for paths containing: experiment_{args.experiment_name}')
+        print(f'No results found for experiment "{args.experiment_name}" under {results_dir / "Mutagenicity"}.')
         return
 
     print(f'Experiment: {args.experiment_name}')
-    print(f'Found {len(records)} runs (fold/seed/model/variant).')
+    print(f'Found {len(records)} runs.')
 
-    # Table 1: Model prediction performance (test ROC), averaged by fold (and seed)
-    pred_mean, pred_std = build_prediction_table(records, metric_key='metric/best_clf_roc_valid')
+    prefix = args.experiment_name
+
+    # Table 1: Prediction performance (valid ROC)
+    pred_mean, pred_std = build_table(records, metric_key='metric/best_clf_roc_valid')
     if pred_mean is not None:
-        pred_path = output_dir / 'mutagenicity_prediction_performance.csv'
-        pred_mean.to_csv(pred_path)
-        print(f'\n--- Model prediction performance (valid ROC, mean over folds/seeds) ---')
+        path = output_dir / f'{prefix}_prediction_valid_roc.csv'
+        pred_mean.to_csv(path)
+        print(f'\n--- Prediction performance (valid ROC, mean over folds/seeds) ---')
         print(pred_mean.to_string())
-        print(f'\nSaved: {pred_path}')
-        # Optional: mean ± std
-        pred_path_std = output_dir / 'mutagenicity_prediction_performance_std.csv'
-        pred_std.to_csv(pred_path_std)
-        print(f'Saved (std): {pred_path_std}')
+        print(f'\nSaved: {path}')
+        path_std = output_dir / f'{prefix}_prediction_valid_roc_std.csv'
+        pred_std.to_csv(path_std)
 
-    # Table 2: Explainer performance (correlation between attention weights and motif impact)
-    exp_mean, exp_std = build_explainer_table(records, metric_key='motif/att_impact_correlation')
-    if exp_mean is not None:
-        exp_path = output_dir / 'mutagenicity_explainer_correlation.csv'
-        exp_mean.to_csv(exp_path)
-        print(f'\n--- Explainer performance (motif att–impact correlation, mean over folds/seeds) ---')
+    # Table 2: Explainer performance (motif att–impact correlation)
+    exp_mean, exp_std = build_table(records, metric_key='motif/att_impact_correlation')
+    if exp_mean is not None and not exp_mean.isna().all().all():
+        path = output_dir / f'{prefix}_explainer_correlation.csv'
+        exp_mean.to_csv(path)
+        print(f'\n--- Explainer (motif att–impact correlation, mean over folds/seeds) ---')
         print(exp_mean.to_string())
-        print(f'\nSaved: {exp_path}')
-        exp_path_std = output_dir / 'mutagenicity_explainer_correlation_std.csv'
-        exp_std.to_csv(exp_path_std)
-        print(f'Saved (std): {exp_path_std}')
+        print(f'\nSaved: {path}')
+        path_std = output_dir / f'{prefix}_explainer_correlation_std.csv'
+        exp_std.to_csv(path_std)
     else:
-        print('\nNo motif/att_impact_correlation in any run (ensure explainer metrics were saved; run with latest run_gsat.py).')
+        print('\nNo motif/att_impact_correlation data found.')
+
+    # Table 3: Motif edge attention range (max - min per motif)
+    range_mean, range_std = build_table(records, metric_key='motif_edge_att/max_mean')
+    if range_mean is not None and not range_mean.isna().all().all():
+        path = output_dir / f'{prefix}_motif_edge_att_max.csv'
+        range_mean.to_csv(path)
+        print(f'\n--- Motif edge att max (mean over folds/seeds) ---')
+        print(range_mean.to_string())
+        print(f'\nSaved: {path}')
+
+    min_mean, _ = build_table(records, metric_key='motif_edge_att/min_mean')
+    if min_mean is not None and not min_mean.isna().all().all():
+        path = output_dir / f'{prefix}_motif_edge_att_min.csv'
+        min_mean.to_csv(path)
+        print(f'\n--- Motif edge att min (mean over folds/seeds) ---')
+        print(min_mean.to_string())
+        print(f'\nSaved: {path}')
 
 
 if __name__ == '__main__':
