@@ -851,6 +851,7 @@ class GSAT(nn.Module):
         self.motif_method = method_config.get('motif_incorporation_method', None)
         self.train_motif_graph = method_config.get('train_motif_graph', False)
         self.separate_motif_model = method_config.get('separate_motif_model', False)
+        self.motif_level_info_loss = method_config.get('motif_level_info_loss', False)
         
         # If method is None (baseline), disable motif loss automatically
         if self.motif_method is None:
@@ -865,6 +866,7 @@ class GSAT(nn.Module):
         print(f'[INFO] Motif incorporation method: {self.motif_method}')
         print(f'[INFO] Train motif graph: {self.train_motif_graph}')
         print(f'[INFO] Separate motif model: {self.separate_motif_model}')
+        print(f'[INFO] Motif-level info loss: {self.motif_level_info_loss}')
         
         # Create deterministic directory for saving scores (NO TIMESTAMP!)
         tuning_id = method_config.get('tuning_id', 'default')
@@ -909,7 +911,8 @@ class GSAT(nn.Module):
             'motif_incorporation': {
                 'method': self.motif_method,
                 'train_motif_graph': self.train_motif_graph,
-                'separate_motif_model': self.separate_motif_model
+                'separate_motif_model': self.separate_motif_model,
+                'motif_level_info_loss': self.motif_level_info_loss
             },
             'loss_coefficients': {
                 'pred_loss_coef': self.pred_loss_coef,
@@ -1132,8 +1135,9 @@ class GSAT(nn.Module):
             # Step 7: Run classifier on original graph with motif-derived attention
             clf_logits = self.clf(data.x, data.edge_index, data.batch, edge_attr=data.edge_attr, edge_atten=edge_att)
             
-            # Use node attention for loss computation (for info_loss consistency)
-            att = node_att
+            # Use motif-level attention for info_loss to avoid size-weighting bias,
+            # or fall back to broadcast node attention for backward compatibility
+            att = motif_att if self.motif_level_info_loss else node_att
             
         elif self.motif_method == 'graph':
             # =================================================================
@@ -2461,6 +2465,8 @@ def main():
                         help='For graph method: also train classifier on motif graph (auxiliary loss)')
     parser.add_argument('--separate_motif_model', action='store_true', default=False,
                         help='For graph method: use separate GNN for motif graph processing (vs shared parameters)')
+    parser.add_argument('--motif_level_info_loss', action='store_true', default=False,
+                        help='Compute info_loss at motif level (1 term per motif) instead of node level (avoids size-weighting bias)')
     parser.add_argument('--run_test_graphs', type=int, default=0,
                         help='Run N graphs through the pipeline and save detailed outputs to file (0 = disabled)')
     parser.add_argument('--config', type=str, default=None,
@@ -2512,6 +2518,11 @@ def main():
     elif 'separate_motif_model' not in local_config['GSAT_config']:
         local_config['GSAT_config']['separate_motif_model'] = False
     
+    if args.motif_level_info_loss:
+        local_config['GSAT_config']['motif_level_info_loss'] = True
+    elif 'motif_level_info_loss' not in local_config['GSAT_config']:
+        local_config['GSAT_config']['motif_level_info_loss'] = False
+    
     if args.learn_edge_att:
         local_config['shared_config']['learn_edge_att'] = True
     if args.no_learn_edge_att:
@@ -2521,6 +2532,7 @@ def main():
     print(f'[INFO] Learn edge attention: {local_config["shared_config"].get("learn_edge_att", False)}')
     print(f'[INFO] Train motif graph: {local_config["GSAT_config"].get("train_motif_graph", False)}')
     print(f'[INFO] Separate motif model: {local_config["GSAT_config"].get("separate_motif_model", False)}')
+    print(f'[INFO] Motif-level info loss: {local_config["GSAT_config"].get("motif_level_info_loss", False)}')
 
     data_dir = Path(global_config['data_dir'])
     num_seeds = global_config['num_seeds']
