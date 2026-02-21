@@ -18,11 +18,14 @@ Usage:
 
 import argparse
 import json
+import math
 import os
 import re
+from collections import defaultdict
 from pathlib import Path
 import pandas as pd
 import numpy as np
+from scipy.stats import pearsonr
 
 # Map experiment_name → (key in experiment_summary to read, display name)
 EXPERIMENT_ROW_CONFIG = {
@@ -148,6 +151,7 @@ def find_results(results_dir: Path, experiment_name: str, verbose: bool = False)
                 'fold': fold,
                 'seed': seed,
                 'metrics': metrics,
+                'seed_dir': seed_dir,
             })
         except Exception as e:
             skipped_error += 1
@@ -159,6 +163,106 @@ def find_results(results_dir: Path, experiment_name: str, verbose: bool = False)
               f'skipped {skipped_experiment} (wrong experiment), {skipped_parse} (parse), '
               f'{skipped_error} (error), collected {len(records)}')
     return records
+
+
+def _sigmoid(x: float) -> float:
+    if x >= 0:
+        z = math.exp(-x)
+        return 1.0 / (1.0 + z)
+    else:
+        z = math.exp(x)
+        return z / (1.0 + z)
+
+
+def _read_jsonl(path: Path):
+    with path.open('r') as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                yield json.loads(line)
+
+
+def compute_posthoc_correlation(seed_dir: Path, split: str = 'test'):
+    """
+    Compute Pearson correlation between mean motif attention score and mean motif impact
+    using saved JSONL files, aggregated per motif type (motif_idx).
+
+    Mirrors the logic in Results_for_mose.ipynb:
+      score  = mean node attention per (split, motif_idx)
+      impact = mean |sigmoid(old) - sigmoid(new)| per (split, motif_idx)  [masked-edge-impact]
+
+    Returns (pearson_r, p_value, n_motifs) or (nan, nan, 0) if insufficient data.
+    """
+    node_scores_path = seed_dir / 'node_scores.jsonl'
+    impact_path = seed_dir / 'masked-edge-impact.jsonl'
+
+    if not node_scores_path.exists() or not impact_path.exists():
+        return np.nan, np.nan, 0
+
+    # Collect node scores grouped by (split, motif_idx)
+    scores = defaultdict(list)
+    for rec in _read_jsonl(node_scores_path):
+        if rec.get('split') != split:
+            continue
+        motif_idx = rec.get('motif_index', rec.get('motif_idx'))
+        if motif_idx is None or motif_idx < 0:
+            continue
+        scores[motif_idx].append(rec['score'])
+
+    # Collect impacts grouped by (split, motif_idx)
+    impacts = defaultdict(list)
+    for rec in _read_jsonl(impact_path):
+        if rec.get('split') != split:
+            continue
+        motif_idx = rec.get('motif_idx', rec.get('motif_index'))
+        if motif_idx is None or motif_idx < 0:
+            continue
+        imp = abs(_sigmoid(rec['new_prediction']) - _sigmoid(rec['old_prediction']))
+        impacts[motif_idx].append(imp)
+
+    # Average per motif type, keep only motifs present in both
+    common = set(scores.keys()) & set(impacts.keys())
+    if len(common) < 3:
+        return np.nan, np.nan, len(common)
+
+    avg_scores = np.array([np.mean(scores[m]) for m in sorted(common)])
+    avg_impacts = np.array([np.mean(impacts[m]) for m in sorted(common)])
+
+    if np.allclose(avg_scores, avg_scores[0]) or np.allclose(avg_impacts, avg_impacts[0]):
+        return np.nan, np.nan, len(common)
+
+    r, p = pearsonr(avg_scores, avg_impacts)
+    return float(r), float(p), len(common)
+
+
+def build_posthoc_table(records, split='test'):
+    """
+    Build a pivot table of post-hoc motif score-to-impact Pearson correlation.
+    Reads node_scores.jsonl + masked-edge-impact.jsonl from each run's seed_dir.
+    """
+    rows = []
+    for rec in records:
+        seed_dir = rec['seed_dir']
+        r, p, n = compute_posthoc_correlation(seed_dir, split=split)
+        rows.append({
+            'model': rec['model'],
+            'row': rec['row'],
+            'row_val': rec['row_val'],
+            'pearson_r': r,
+            'p_value': p,
+            'n_motifs': n,
+        })
+    if not rows:
+        return None, None
+    df = pd.DataFrame(rows)
+    agg = df.groupby(['row', 'row_val', 'model'])['pearson_r'].agg(['mean', 'std', 'count']).reset_index()
+    agg = agg.sort_values('row_val')
+    pivot_mean = agg.pivot(index='row', columns='model', values='mean')
+    pivot_std = agg.pivot(index='row', columns='model', values='std')
+    row_order = agg.drop_duplicates('row').sort_values('row_val')['row'].tolist()
+    pivot_mean = pivot_mean.reindex(row_order).dropna(how='all')
+    pivot_std = pivot_std.reindex(row_order).dropna(how='all')
+    return pivot_mean, pivot_std
 
 
 def build_table(records, metric_key):
@@ -243,6 +347,18 @@ def main():
         print(f'\n--- Motif edge att min (mean over folds/seeds) ---')
         print(min_mean.to_string())
         print(f'\nSaved: {path}')
+
+    # Table: Post-hoc motif score vs impact correlation (per split)
+    for split in ['train', 'valid', 'test']:
+        ph_mean, ph_std = build_posthoc_table(records, split=split)
+        if ph_mean is not None and not ph_mean.isna().all().all():
+            path = output_dir / f'{prefix}_posthoc_correlation_{split}.csv'
+            ph_mean.to_csv(path)
+            print(f'\n--- Post-hoc score–impact correlation ({split}, mean over folds/seeds) ---')
+            print(ph_mean.to_string())
+            print(f'\nSaved: {path}')
+            path_std = output_dir / f'{prefix}_posthoc_correlation_{split}_std.csv'
+            ph_std.to_csv(path_std)
 
 
 if __name__ == '__main__':
