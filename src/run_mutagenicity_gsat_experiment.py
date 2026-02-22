@@ -7,6 +7,7 @@ Experiment groups (each has its own experiment_name):
   2. r_impact_edge:  Base GSAT, edge attention, varying final_r in {0.4, 0.5, 0.6}
   3. within_motif_consistency_impact:  Node attention, motif_loss_coef in {1.0, 2.0}
   4. between_motif_consistency_impact: Node attention, motif_loss_coef=1.0, between_motif_coef in {1.0, 2.0}
+  5. motif_readout_info_loss: Motif readout with motif-level info loss (r=0.5, learn_edge_att=False)
 
 Usage:
   python run_mutagenicity_gsat_experiment.py --experiments r_impact_node r_impact_edge
@@ -160,6 +161,23 @@ EXPERIMENT_GROUPS = {
                     'motif_incorporation_method': 'loss',
                     'motif_loss_coef': 1.0,
                     'between_motif_coef': 2.0,
+                },
+                'learn_edge_att': False,
+            },
+        ],
+    },
+    'motif_readout_info_loss': {
+        'experiment_name': 'motif_readout_info_loss',
+        'variants': [
+            {
+                'variant_id': 'readout_motif_info_r0.5',
+                'gsat_overrides': {
+                    'tuning_id': 'readout_motif_info_r0.5',
+                    'final_r': 0.5,
+                    'motif_incorporation_method': 'readout',
+                    'motif_level_info_loss': True,
+                    'motif_loss_coef': 0,
+                    'between_motif_coef': 0,
                 },
                 'learn_edge_att': False,
             },
