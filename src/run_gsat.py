@@ -852,6 +852,7 @@ class GSAT(nn.Module):
         self.train_motif_graph = method_config.get('train_motif_graph', False)
         self.separate_motif_model = method_config.get('separate_motif_model', False)
         self.motif_level_info_loss = method_config.get('motif_level_info_loss', False)
+        self.target_k = method_config.get('target_k', None)  # Graph-adaptive r: r_g = target_k / M_g
         
         # If method is None (baseline), disable motif loss automatically
         if self.motif_method is None:
@@ -867,6 +868,8 @@ class GSAT(nn.Module):
         print(f'[INFO] Train motif graph: {self.train_motif_graph}')
         print(f'[INFO] Separate motif model: {self.separate_motif_model}')
         print(f'[INFO] Motif-level info loss: {self.motif_level_info_loss}')
+        if self.target_k is not None:
+            print(f'[INFO] Graph-adaptive r: target_k={self.target_k} (r_g = {self.target_k} / M_g)')
         
         # Create deterministic directory for saving scores (NO TIMESTAMP!)
         tuning_id = method_config.get('tuning_id', 'default')
@@ -912,7 +915,8 @@ class GSAT(nn.Module):
                 'method': self.motif_method,
                 'train_motif_graph': self.train_motif_graph,
                 'separate_motif_model': self.separate_motif_model,
-                'motif_level_info_loss': self.motif_level_info_loss
+                'motif_level_info_loss': self.motif_level_info_loss,
+                'target_k': self.target_k
             },
             'loss_coefficients': {
                 'pred_loss_coef': self.pred_loss_coef,
@@ -999,7 +1003,8 @@ class GSAT(nn.Module):
         hist = hist[hist > 0]  # Remove zero bins
         return -np.sum(hist * np.log(hist))
 
-    def __loss__(self, att, clf_logits, clf_labels, epoch, nodes_to_motifs, batch, aux_clf_logits=None):
+    def __loss__(self, att, clf_logits, clf_labels, epoch, nodes_to_motifs, batch,
+                 aux_clf_logits=None, motif_batch=None):
         """
         Compute the total loss for GSAT training.
         
@@ -1012,6 +1017,7 @@ class GSAT(nn.Module):
             batch: Batch assignment for nodes
             aux_clf_logits: (Optional) Auxiliary classifier predictions from motif graph
                            Only used when motif_method='graph' and train_motif_graph=True
+            motif_batch: (Optional) [M] batch assignment for motifs, needed for graph-adaptive r
         
         Returns:
             loss: Total loss value
@@ -1022,7 +1028,16 @@ class GSAT(nn.Module):
         
         pred_loss = self.criterion(clf_logits, clf_labels)
 
-        r = self.fix_r if self.fix_r else self.get_r(self.decay_interval, self.decay_r, epoch, final_r=self.final_r, init_r=self.init_r)
+        if self.target_k is not None and motif_batch is not None:
+            # Graph-adaptive r: r_g = target_k / M_g for each graph g
+            # Each motif gets r based on how many motifs are in its graph
+            motifs_per_graph = scatter(torch.ones_like(motif_batch, dtype=att.dtype),
+                                       motif_batch, dim=0, reduce='sum')
+            r_per_motif = self.target_k / motifs_per_graph[motif_batch]
+            r_per_motif = r_per_motif.clamp(min=0.01, max=0.99).unsqueeze(-1)
+            r = r_per_motif
+        else:
+            r = self.fix_r if self.fix_r else self.get_r(self.decay_interval, self.decay_r, epoch, final_r=self.final_r, init_r=self.init_r)
         info_loss = (att * torch.log(att/r + 1e-6) + (1-att) * torch.log((1-att)/(1-r+1e-6) + 1e-6)).mean()
 
         pred_loss = pred_loss * self.pred_loss_coef
@@ -1086,6 +1101,7 @@ class GSAT(nn.Module):
             check_no_unmapped_nodes(nodes_to_motifs)
         
         aux_clf_logits = None  # Auxiliary predictions from motif graph (if applicable)
+        motif_batch = None    # Batch assignment for motifs (used for graph-adaptive r)
         
         if self.motif_method in [None, 'loss']:
             # =================================================================
@@ -1189,7 +1205,8 @@ class GSAT(nn.Module):
 
         # Get nodes_to_motifs if available (only needed for motif_method='loss')
         nodes_to_motifs = getattr(data, 'nodes_to_motifs', None)
-        loss, loss_dict = self.__loss__(att, clf_logits, data.y, epoch, nodes_to_motifs, data.batch, aux_clf_logits)
+        loss, loss_dict = self.__loss__(att, clf_logits, data.y, epoch, nodes_to_motifs, data.batch,
+                                        aux_clf_logits=aux_clf_logits, motif_batch=motif_batch)
         return edge_att, loss, loss_dict, clf_logits
 
     @torch.no_grad()
@@ -2467,6 +2484,9 @@ def main():
                         help='For graph method: use separate GNN for motif graph processing (vs shared parameters)')
     parser.add_argument('--motif_level_info_loss', action='store_true', default=False,
                         help='Compute info_loss at motif level (1 term per motif) instead of node level (avoids size-weighting bias)')
+    parser.add_argument('--target_k', type=float, default=None,
+                        help='Graph-adaptive r: r_g = target_k / M_g (expected number of important motifs per graph). '
+                             'Overrides fix_r/final_r for motif-level methods.')
     parser.add_argument('--run_test_graphs', type=int, default=0,
                         help='Run N graphs through the pipeline and save detailed outputs to file (0 = disabled)')
     parser.add_argument('--config', type=str, default=None,
@@ -2523,6 +2543,11 @@ def main():
     elif 'motif_level_info_loss' not in local_config['GSAT_config']:
         local_config['GSAT_config']['motif_level_info_loss'] = False
     
+    if args.target_k is not None:
+        local_config['GSAT_config']['target_k'] = args.target_k
+    elif 'target_k' not in local_config['GSAT_config']:
+        local_config['GSAT_config']['target_k'] = None
+    
     if args.learn_edge_att:
         local_config['shared_config']['learn_edge_att'] = True
     if args.no_learn_edge_att:
@@ -2533,6 +2558,7 @@ def main():
     print(f'[INFO] Train motif graph: {local_config["GSAT_config"].get("train_motif_graph", False)}')
     print(f'[INFO] Separate motif model: {local_config["GSAT_config"].get("separate_motif_model", False)}')
     print(f'[INFO] Motif-level info loss: {local_config["GSAT_config"].get("motif_level_info_loss", False)}')
+    print(f'[INFO] Target k (graph-adaptive r): {local_config["GSAT_config"].get("target_k", None)}')
 
     data_dir = Path(global_config['data_dir'])
     num_seeds = global_config['num_seeds']
