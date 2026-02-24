@@ -30,6 +30,7 @@ from experiment_configs import get_base_config, ARCHITECTURES
 from utils import set_seed
 
 DATASET = 'Mutagenicity'
+MOTIF_SCORES_TEMPLATE = 'hpc-share/ChemIntuit/MOSE-GNN/All0.5_learn_unk+motif_scores/{dataset}_{model}_motif_scores.csv'
 
 # ---------------------------------------------------------------------------
 # Experiment group definitions
@@ -214,8 +215,8 @@ EXPERIMENT_GROUPS = {
             },
         ],
     },
-    'motif_readout_score_r': {
-        'experiment_name': 'motif_readout_score_r',
+    'motif_readout_score_r_by_dataset_model': {
+        'experiment_name': 'motif_readout_score_r_by_dataset_model',
         'variants': [
             {
                 'variant_id': 'readout_score_r',
@@ -223,7 +224,7 @@ EXPERIMENT_GROUPS = {
                     'tuning_id': 'readout_score_r',
                     'motif_incorporation_method': 'readout',
                     'motif_level_info_loss': True,
-                    'motif_scores_path': 'hpc-share/ChemIntuit/MOSE-GNN/All0.5_learn_unk+motif_scores/Mutagenicity_motif_scores.csv',
+                    'motif_scores_path': MOTIF_SCORES_TEMPLATE,
                     'motif_loss_coef': 0,
                     'between_motif_coef': 0,
                 },
@@ -243,6 +244,13 @@ def run_one(model_name, fold, variant, experiment_name, seed, cuda_id, data_dir)
     config = get_base_config(model_name, DATASET, gsat_overrides=variant['gsat_overrides'])
     config['shared_config']['learn_edge_att'] = variant['learn_edge_att']
     config['GSAT_config']['experiment_name'] = experiment_name
+
+    # Resolve motif_scores_path template with dataset and model name
+    scores_path = config['GSAT_config'].get('motif_scores_path')
+    if scores_path and '{' in scores_path:
+        config['GSAT_config']['motif_scores_path'] = scores_path.format(
+            dataset=DATASET, model=model_name
+        )
 
     device = torch.device(f'cuda:{cuda_id}' if cuda_id >= 0 else 'cpu')
     variant_id = variant['variant_id']
