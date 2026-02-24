@@ -26,11 +26,59 @@ from utils import Writer, Criterion, MLP, visualize_a_graph, save_checkpoint, lo
 from utils import get_local_config_name, get_model, get_data_loaders, write_stat_from_metric_dicts, reorder_like, init_metric_dict
 
 from torch_geometric.utils import scatter  # or from torch_scatter import scatter
+import pandas as pd
 
 
 # =============================================================================
 # MOTIF INCORPORATION HELPER FUNCTIONS
 # =============================================================================
+
+def load_motif_scores_as_r(csv_path, fold, motif_list):
+    """
+    Load pre-computed motif importance scores from CSV and build an r-value
+    tensor indexed by motif ID.
+
+    Args:
+        csv_path: Path to the motif scores CSV (columns: dataset, motif string,
+                  fold_0, fold_1, ..., fold_4).
+        fold: Current fold number (0-4). Used to pick the fold-specific column;
+              if a value is missing, the mean across available folds is used.
+        motif_list: List of motif strings where motif_list[i] is the SMILES for
+                    motif index i (loaded from *_motif_list.pickle).
+
+    Returns:
+        motif_r: FloatTensor of shape [len(motif_list)] mapping motif_id -> r value.
+    """
+    df = pd.read_csv(csv_path)
+
+    fold_cols = [c for c in df.columns if c.startswith('fold_')]
+    fold_col = f'fold_{fold}'
+
+    # Build motif_string -> r mapping
+    score_map = {}
+    unk_r = 0.5  # fallback if UNK row is also missing
+    for _, row in df.iterrows():
+        motif_str = str(row['motif string']).strip()
+        if fold_col in df.columns and pd.notna(row.get(fold_col)):
+            r_val = float(row[fold_col])
+        else:
+            vals = [float(row[c]) for c in fold_cols if pd.notna(row.get(c))]
+            r_val = float(np.mean(vals)) if vals else 0.5
+        score_map[motif_str] = r_val
+        if motif_str == 'UNK':
+            unk_r = r_val
+
+    motif_r = torch.full((len(motif_list),), unk_r, dtype=torch.float)
+    for idx, motif_str in enumerate(motif_list):
+        if motif_str in score_map:
+            motif_r[idx] = score_map[motif_str]
+
+    motif_r = motif_r.clamp(min=0.01, max=0.99)
+    print(f'[INFO] Loaded motif scores from {csv_path} (fold={fold})')
+    print(f'[INFO]   {len(score_map)} motifs in CSV, {len(motif_list)} in vocabulary, UNK r={unk_r:.4f}')
+    print(f'[INFO]   r range: [{motif_r.min().item():.4f}, {motif_r.max().item():.4f}]')
+    return motif_r
+
 
 def check_no_unmapped_nodes(nodes_to_motifs):
     """
@@ -136,6 +184,7 @@ def motif_mean_pooling(emb, nodes_to_motifs, batch):
         motif_emb: [M, hidden] motif embeddings (M = number of unique graph-motif pairs)
         motif_batch: [M] batch assignment for motifs
         inverse_indices: [N] mapping from each node to its motif index (0..M-1)
+        motif_ids: [M] original global motif index for each pooled motif
     """
     # Create unique (graph_id, motif_id) pairs to keep motifs separate per-graph
     max_motif_id = nodes_to_motifs.max().item() + 1
@@ -143,11 +192,12 @@ def motif_mean_pooling(emb, nodes_to_motifs, batch):
     
     unique_graph_motifs, inverse_indices = graph_motif_id.unique(return_inverse=True)
     
-    # Decode to get batch assignment for motifs
+    # Decode to get batch assignment and original motif IDs
     motif_batch = unique_graph_motifs // max_motif_id
+    motif_ids = unique_graph_motifs % max_motif_id
     
     motif_emb = scatter(emb, inverse_indices, dim=0, reduce='mean')
-    return motif_emb, motif_batch, inverse_indices
+    return motif_emb, motif_batch, inverse_indices, motif_ids
 
 
 def lift_motif_att_to_node_att(motif_att, inverse_indices):
@@ -517,7 +567,7 @@ def run_test_graphs_pipeline(n_graphs, model, extractor, data_loader, device, ou
                 with torch.no_grad():
                     # Step 1: Motif pooling
                     f.write("Step 1: Motif Mean Pooling\n")
-                    motif_emb, motif_batch, inverse_indices = motif_mean_pooling(
+                    motif_emb, motif_batch, inverse_indices, _ = motif_mean_pooling(
                         emb, batch_data.nodes_to_motifs, batch_data.batch
                     )
                     
@@ -799,7 +849,8 @@ def parse_batch_attention_to_samples(batch_att, batch_data, original_samples, ba
 class GSAT(nn.Module):
 
     def __init__(self, clf, extractor, optimizer, scheduler, writer, device, model_dir, dataset_name, num_class, multi_label, random_state,
-                 method_config, shared_config, fold, task_type='classification', datasets=None, masked_data=None, motif_clf=None):
+                 method_config, shared_config, fold, task_type='classification', datasets=None, masked_data=None, motif_clf=None,
+                 motif_list=None):
         super().__init__()
         self.clf = clf
         self.extractor = extractor
@@ -854,6 +905,15 @@ class GSAT(nn.Module):
         self.motif_level_info_loss = method_config.get('motif_level_info_loss', False)
         self.target_k = method_config.get('target_k', None)  # Graph-adaptive r: r_g = target_k / M_g
         
+        # Score-based per-motif r: load pre-computed motif importance scores
+        motif_scores_path = method_config.get('motif_scores_path', None)
+        if motif_scores_path is not None and motif_list is not None:
+            self.motif_r_values = load_motif_scores_as_r(motif_scores_path, fold, motif_list).to(device)
+        else:
+            self.motif_r_values = None
+            if motif_scores_path is not None and motif_list is None:
+                print(f'[WARNING] motif_scores_path set but motif_list not provided — score-based r disabled')
+        
         # If method is None (baseline), disable motif loss automatically
         if self.motif_method is None:
             self.motif_loss_coef = 0.0
@@ -870,6 +930,8 @@ class GSAT(nn.Module):
         print(f'[INFO] Motif-level info loss: {self.motif_level_info_loss}')
         if self.target_k is not None:
             print(f'[INFO] Graph-adaptive r: target_k={self.target_k} (r_g = {self.target_k} / M_g)')
+        if self.motif_r_values is not None:
+            print(f'[INFO] Score-based per-motif r: loaded {len(self.motif_r_values)} values')
         
         # Create deterministic directory for saving scores (NO TIMESTAMP!)
         tuning_id = method_config.get('tuning_id', 'default')
@@ -916,7 +978,8 @@ class GSAT(nn.Module):
                 'train_motif_graph': self.train_motif_graph,
                 'separate_motif_model': self.separate_motif_model,
                 'motif_level_info_loss': self.motif_level_info_loss,
-                'target_k': self.target_k
+                'target_k': self.target_k,
+                'motif_scores_path': method_config.get('motif_scores_path', None),
             },
             'loss_coefficients': {
                 'pred_loss_coef': self.pred_loss_coef,
@@ -1004,7 +1067,7 @@ class GSAT(nn.Module):
         return -np.sum(hist * np.log(hist))
 
     def __loss__(self, att, clf_logits, clf_labels, epoch, nodes_to_motifs, batch,
-                 aux_clf_logits=None, motif_batch=None):
+                 aux_clf_logits=None, motif_batch=None, motif_ids=None):
         """
         Compute the total loss for GSAT training.
         
@@ -1018,6 +1081,7 @@ class GSAT(nn.Module):
             aux_clf_logits: (Optional) Auxiliary classifier predictions from motif graph
                            Only used when motif_method='graph' and train_motif_graph=True
             motif_batch: (Optional) [M] batch assignment for motifs, needed for graph-adaptive r
+            motif_ids: (Optional) [M] original motif indices, needed for score-based r
         
         Returns:
             loss: Total loss value
@@ -1028,14 +1092,15 @@ class GSAT(nn.Module):
         
         pred_loss = self.criterion(clf_logits, clf_labels)
 
-        if self.target_k is not None and motif_batch is not None:
+        if self.motif_r_values is not None and motif_ids is not None:
+            # Score-based per-motif r: each motif gets its pre-computed importance score
+            r = self.motif_r_values[motif_ids].unsqueeze(-1)
+        elif self.target_k is not None and motif_batch is not None:
             # Graph-adaptive r: r_g = target_k / M_g for each graph g
-            # Each motif gets r based on how many motifs are in its graph
             motifs_per_graph = scatter(torch.ones_like(motif_batch, dtype=att.dtype),
                                        motif_batch, dim=0, reduce='sum')
             r_per_motif = self.target_k / motifs_per_graph[motif_batch]
-            r_per_motif = r_per_motif.clamp(min=0.01, max=0.99).unsqueeze(-1)
-            r = r_per_motif
+            r = r_per_motif.clamp(min=0.01, max=0.99).unsqueeze(-1)
         else:
             r = self.fix_r if self.fix_r else self.get_r(self.decay_interval, self.decay_r, epoch, final_r=self.final_r, init_r=self.init_r)
         info_loss = (att * torch.log(att/r + 1e-6) + (1-att) * torch.log((1-att)/(1-r+1e-6) + 1e-6)).mean()
@@ -1102,6 +1167,7 @@ class GSAT(nn.Module):
         
         aux_clf_logits = None  # Auxiliary predictions from motif graph (if applicable)
         motif_batch = None    # Batch assignment for motifs (used for graph-adaptive r)
+        motif_ids = None      # Original motif IDs per pooled motif (used for score-based r)
         
         if self.motif_method in [None, 'loss']:
             # =================================================================
@@ -1135,7 +1201,7 @@ class GSAT(nn.Module):
             nodes_to_motifs = getattr(data, 'nodes_to_motifs', None)
             if nodes_to_motifs is None:
                 raise ValueError("'readout' method requires nodes_to_motifs attribute in data")
-            motif_emb, motif_batch, inverse_indices = motif_mean_pooling(emb, nodes_to_motifs, data.batch)
+            motif_emb, motif_batch, inverse_indices, motif_ids = motif_mean_pooling(emb, nodes_to_motifs, data.batch)
             
             # Step 3: Get motif attention scores
             # Note: edge_index is not used when learn_edge_att=False
@@ -1163,7 +1229,7 @@ class GSAT(nn.Module):
             if nodes_to_motifs is None:
                 raise ValueError("'graph' method requires nodes_to_motifs attribute in data")
             # Step 1: Construct motif graph
-            motif_x, motif_edge_index, motif_edge_attr, motif_batch, unique_motifs, inverse_indices = \
+            motif_x, motif_edge_index, motif_edge_attr, motif_batch, motif_ids, inverse_indices = \
                 construct_motif_graph(data.x, data.edge_index, data.edge_attr, nodes_to_motifs, data.batch)
             
             # Step 2: Get motif embeddings from GNN on motif graph
@@ -1206,7 +1272,8 @@ class GSAT(nn.Module):
         # Get nodes_to_motifs if available (only needed for motif_method='loss')
         nodes_to_motifs = getattr(data, 'nodes_to_motifs', None)
         loss, loss_dict = self.__loss__(att, clf_logits, data.y, epoch, nodes_to_motifs, data.batch,
-                                        aux_clf_logits=aux_clf_logits, motif_batch=motif_batch)
+                                        aux_clf_logits=aux_clf_logits, motif_batch=motif_batch,
+                                        motif_ids=motif_ids)
         return edge_att, loss, loss_dict, clf_logits
 
     @torch.no_grad()
@@ -2385,16 +2452,20 @@ def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_nam
     
     # get_data_loaders returns different number of values depending on dataset:
     # - Paper datasets (ba_2motifs, mutag, etc.): 6 values
-    # - Molecular datasets with motif info (BBBP, Mutagenicity, etc.): 8 values
+    # - Molecular datasets with motif info (BBBP, Mutagenicity, etc.): 9 values
     loader_result = get_data_loaders(data_dir, dataset_name, batch_size, splits, random_state, data_config.get('mutag_x', False), fold, path=path)
     
-    if len(loader_result) == 8:
+    if len(loader_result) == 9:
+        loaders, test_set, x_dim, edge_attr_dim, num_class, aux_info, datasets, masked_data_features, motif_list = loader_result
+    elif len(loader_result) == 8:
         loaders, test_set, x_dim, edge_attr_dim, num_class, aux_info, datasets, masked_data_features = loader_result
+        motif_list = None
     else:
         # Paper datasets don't have motif information
         loaders, test_set, x_dim, edge_attr_dim, num_class, aux_info = loader_result
         datasets = None
         masked_data_features = None
+        motif_list = None
 
     model_config['deg'] = aux_info['deg']
     model = get_model(x_dim, edge_attr_dim, num_class, aux_info['multi_label'], model_config, device)
@@ -2439,7 +2510,7 @@ def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_nam
 
     print('====================================')
     print('[INFO] Training GSAT...')
-    gsat = GSAT(model, extractor, optimizer, scheduler, writer, device, log_dir, dataset_name, num_class, aux_info['multi_label'], random_state, method_config, shared_config, fold, task_type, datasets, masked_data_features, motif_clf=motif_clf)
+    gsat = GSAT(model, extractor, optimizer, scheduler, writer, device, log_dir, dataset_name, num_class, aux_info['multi_label'], random_state, method_config, shared_config, fold, task_type, datasets, masked_data_features, motif_clf=motif_clf, motif_list=motif_list)
     metric_dict = gsat.train(loaders, test_set, metric_dict, model_config.get('use_edge_attr', True))
     writer.add_hparams(hparam_dict=hparam_dict, metric_dict=metric_dict)
     
@@ -2487,6 +2558,9 @@ def main():
     parser.add_argument('--target_k', type=float, default=None,
                         help='Graph-adaptive r: r_g = target_k / M_g (expected number of important motifs per graph). '
                              'Overrides fix_r/final_r for motif-level methods.')
+    parser.add_argument('--motif_scores_path', type=str, default=None,
+                        help='Path to CSV with pre-computed motif importance scores to use as per-motif r values. '
+                             'Overrides target_k and fix_r/final_r.')
     parser.add_argument('--run_test_graphs', type=int, default=0,
                         help='Run N graphs through the pipeline and save detailed outputs to file (0 = disabled)')
     parser.add_argument('--config', type=str, default=None,
@@ -2548,6 +2622,11 @@ def main():
     elif 'target_k' not in local_config['GSAT_config']:
         local_config['GSAT_config']['target_k'] = None
     
+    if args.motif_scores_path is not None:
+        local_config['GSAT_config']['motif_scores_path'] = args.motif_scores_path
+    elif 'motif_scores_path' not in local_config['GSAT_config']:
+        local_config['GSAT_config']['motif_scores_path'] = None
+    
     if args.learn_edge_att:
         local_config['shared_config']['learn_edge_att'] = True
     if args.no_learn_edge_att:
@@ -2559,6 +2638,7 @@ def main():
     print(f'[INFO] Separate motif model: {local_config["GSAT_config"].get("separate_motif_model", False)}')
     print(f'[INFO] Motif-level info loss: {local_config["GSAT_config"].get("motif_level_info_loss", False)}')
     print(f'[INFO] Target k (graph-adaptive r): {local_config["GSAT_config"].get("target_k", None)}')
+    print(f'[INFO] Motif scores path: {local_config["GSAT_config"].get("motif_scores_path", None)}')
 
     data_dir = Path(global_config['data_dir'])
     num_seeds = global_config['num_seeds']
@@ -2577,9 +2657,13 @@ def main():
 
         path = "/nfs/stak/users/kokatea/hpc-share/ChemIntuit/MotifBreakdown/DICTIONARY_NOFILTER"
         
-        loaders, test_set, x_dim, edge_attr_dim, num_class, aux_info, datasets, _ = get_data_loaders(
+        loader_result = get_data_loaders(
             data_dir, dataset_name, batch_size, splits, 0, data_config.get('mutag_x', False), fold, path = path
         )
+        if len(loader_result) == 9:
+            loaders, test_set, x_dim, edge_attr_dim, num_class, aux_info, datasets, _, _ = loader_result
+        else:
+            loaders, test_set, x_dim, edge_attr_dim, num_class, aux_info, datasets, _ = loader_result
         
         # Create model and extractor
         model_config['deg'] = aux_info['deg']

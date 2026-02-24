@@ -9,6 +9,7 @@ Experiment groups (each has its own experiment_name):
   4. between_motif_consistency_impact: Node attention, motif_loss_coef=1.0, between_motif_coef in {1.0, 2.0}
   5. motif_readout_info_loss: Motif readout with motif-level info loss (r=0.5, learn_edge_att=False)
   6. motif_readout_adaptive_r: Motif readout with graph-adaptive r (target_k in {1, 2})
+  7. motif_readout_score_r: Motif readout with pre-computed motif score r values
 
 Usage:
   python run_mutagenicity_gsat_experiment.py --experiments r_impact_node r_impact_edge
@@ -206,6 +207,23 @@ EXPERIMENT_GROUPS = {
                     'motif_incorporation_method': 'readout',
                     'motif_level_info_loss': True,
                     'target_k': 2.0,
+                    'motif_loss_coef': 0,
+                    'between_motif_coef': 0,
+                },
+                'learn_edge_att': False,
+            },
+        ],
+    },
+    'motif_readout_score_r': {
+        'experiment_name': 'motif_readout_score_r',
+        'variants': [
+            {
+                'variant_id': 'readout_score_r',
+                'gsat_overrides': {
+                    'tuning_id': 'readout_score_r',
+                    'motif_incorporation_method': 'readout',
+                    'motif_level_info_loss': True,
+                    'motif_scores_path': 'hpc-share/ChemIntuit/MOSE-GNN/All0.5_learn_unk+motif_scores/Mutagenicity_motif_scores.csv',
                     'motif_loss_coef': 0,
                     'between_motif_coef': 0,
                 },

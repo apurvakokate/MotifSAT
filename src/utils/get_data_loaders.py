@@ -167,7 +167,7 @@ def get_data_loaders(data_dir, dataset_name, batch_size, splits, random_state, m
         base_name = dataset_name
         csv_path = f"/nfs/stak/users/kokatea/hpc-share/ChemIntuit/MOSE-GNN/DomainDrivenGlobalExpl/datasets/FOLDS/{base_name}_{fold}.csv"
 
-        lookup, _, _, _, _, _, test_data_lookup, _, train_mask_data,val_mask_data,test_mask_data = get_setup_files_with_folds(
+        lookup, motif_list, _, _, _, _, test_data_lookup, _, train_mask_data,val_mask_data,test_mask_data = get_setup_files_with_folds(
             base_name, date_tag, fold, algorithm, path=path
         )
         
@@ -221,7 +221,7 @@ def get_data_loaders(data_dir, dataset_name, batch_size, splits, random_state, m
         d = degree(batched_train.edge_index[1], num_nodes=batched_train.num_nodes, dtype=torch.long)
         deg = torch.bincount(d, minlength=10)
         aux_info = {'deg': deg, 'multi_label': False}
-        return loaders, test_set, x_dim, edge_attr_dim, num_class, aux_info, datasets, masked_data_features
+        return loaders, test_set, x_dim, edge_attr_dim, num_class, aux_info, datasets, masked_data_features, motif_list
     else:
         raise ValueError(f"[ERROR] Unknown dataset: {dataset_name}")
 
