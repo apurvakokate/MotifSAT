@@ -903,6 +903,7 @@ class GSAT(nn.Module):
         self.train_motif_graph = method_config.get('train_motif_graph', False)
         self.separate_motif_model = method_config.get('separate_motif_model', False)
         self.motif_level_info_loss = method_config.get('motif_level_info_loss', False)
+        self.motif_level_sampling = method_config.get('motif_level_sampling', False)
         self.target_k = method_config.get('target_k', None)  # Graph-adaptive r: r_g = target_k / M_g
         # 'interpolate': r(t) = alpha(t)*init_r + (1-alpha(t))*score_r, alpha decays from 1→0
         # 'max': r(t) = max(score_r, get_r(t)), score kicks in once global r decays below it
@@ -932,6 +933,7 @@ class GSAT(nn.Module):
         print(f'[INFO] Train motif graph: {self.train_motif_graph}')
         print(f'[INFO] Separate motif model: {self.separate_motif_model}')
         print(f'[INFO] Motif-level info loss: {self.motif_level_info_loss}')
+        print(f'[INFO] Motif-level sampling: {self.motif_level_sampling}')
         if self.target_k is not None:
             print(f'[INFO] Graph-adaptive r: target_k={self.target_k} (r_g = {self.target_k} / M_g)')
         if self.motif_r_values is not None:
@@ -982,6 +984,7 @@ class GSAT(nn.Module):
                 'train_motif_graph': self.train_motif_graph,
                 'separate_motif_model': self.separate_motif_model,
                 'motif_level_info_loss': self.motif_level_info_loss,
+                'motif_level_sampling': self.motif_level_sampling,
                 'target_k': self.target_k,
                 'motif_scores_path': method_config.get('motif_scores_path', None),
             },
@@ -1071,7 +1074,8 @@ class GSAT(nn.Module):
         return -np.sum(hist * np.log(hist))
 
     def __loss__(self, att, clf_logits, clf_labels, epoch, nodes_to_motifs, batch,
-                 aux_clf_logits=None, motif_batch=None, motif_ids=None):
+                 aux_clf_logits=None, motif_batch=None, motif_ids=None,
+                 node_att_for_motif_loss=None):
         """
         Compute the total loss for GSAT training.
         
@@ -1086,6 +1090,8 @@ class GSAT(nn.Module):
                            Only used when motif_method='graph' and train_motif_graph=True
             motif_batch: (Optional) [M] batch assignment for motifs, needed for graph-adaptive r
             motif_ids: (Optional) [M] original motif indices, needed for score-based r
+            node_att_for_motif_loss: (Optional) [N, 1] broadcast node-level att for motif
+                           consistency loss when att is motif-level (motif_level_sampling=True)
         
         Returns:
             loss: Total loss value
@@ -1129,7 +1135,8 @@ class GSAT(nn.Module):
                          and (self.motif_loss_coef > 0 or self.between_motif_coef > 0)
                          and nodes_to_motifs is not None)
         if has_motif_loss:
-            within_var, between_var = motif_consistency_loss(att, nodes_to_motifs, batch)
+            att_for_consistency = node_att_for_motif_loss if node_att_for_motif_loss is not None else att
+            within_var, between_var = motif_consistency_loss(att_for_consistency, nodes_to_motifs, batch)
             within_term = within_var * self.motif_loss_coef
             between_term = between_var * self.between_motif_coef
             motif_loss = within_term - between_term
@@ -1172,10 +1179,12 @@ class GSAT(nn.Module):
             'graph': Motif-level graph (construct motif graph, run GNN on it)
         """
         # Check for unmapped nodes if using motif incorporation methods
-        if self.motif_method in ['loss', 'readout', 'graph']:
+        needs_motifs = self.motif_method in ['loss', 'readout', 'graph'] or self.motif_level_sampling
+        if needs_motifs:
             nodes_to_motifs = getattr(data, 'nodes_to_motifs', None)
             if nodes_to_motifs is None:
-                raise ValueError(f"motif_method='{self.motif_method}' requires nodes_to_motifs attribute in data. "
+                raise ValueError(f"motif_method='{self.motif_method}' / motif_level_sampling={self.motif_level_sampling} "
+                                f"requires nodes_to_motifs attribute in data. "
                                 f"This dataset may not support motif incorporation methods.")
             check_no_unmapped_nodes(nodes_to_motifs)
         
@@ -1183,23 +1192,39 @@ class GSAT(nn.Module):
         motif_batch = None    # Batch assignment for motifs (used for graph-adaptive r)
         motif_ids = None      # Original motif IDs per pooled motif (used for score-based r)
         
+        node_att_for_motif_loss = None  # Only set when motif_level_sampling pools att to motif level
+
         if self.motif_method in [None, 'loss']:
             # =================================================================
             # BASELINE / LOSS METHOD: Node-level attention
             # =================================================================
             emb = self.clf.get_emb(data.x, data.edge_index, batch=data.batch, edge_attr=data.edge_attr)
             att_log_logits = self.extractor(emb, data.edge_index, data.batch)
-            att = self.sampling(att_log_logits, epoch, training)
 
-            if self.learn_edge_att:
-                if is_undirected(data.edge_index):
-                    trans_idx, trans_val = transpose(data.edge_index, att, None, None, coalesced=False)
-                    trans_val_perm = reorder_like(trans_idx, data.edge_index, trans_val)
-                    edge_att = (att + trans_val_perm) / 2
-                else:
-                    edge_att = att
+            if self.motif_level_sampling and not self.learn_edge_att:
+                # Pool node logits to motif level, sample once per motif, broadcast back
+                nodes_to_motifs = data.nodes_to_motifs
+                motif_logits, motif_batch, inverse_indices, motif_ids = motif_mean_pooling(
+                    att_log_logits, nodes_to_motifs, data.batch)
+                motif_att = self.sampling(motif_logits, epoch, training)
+                node_att = lift_motif_att_to_node_att(motif_att, inverse_indices)
+                edge_att = self.lift_node_att_to_edge_att(node_att, data.edge_index)
+                # info_loss uses motif-level att (avoids size-weighting)
+                att = motif_att
+                # motif_consistency_loss needs node-level att (broadcast) + nodes_to_motifs
+                node_att_for_motif_loss = node_att
             else:
-                edge_att = self.lift_node_att_to_edge_att(att, data.edge_index)
+                att = self.sampling(att_log_logits, epoch, training)
+
+                if self.learn_edge_att:
+                    if is_undirected(data.edge_index):
+                        trans_idx, trans_val = transpose(data.edge_index, att, None, None, coalesced=False)
+                        trans_val_perm = reorder_like(trans_idx, data.edge_index, trans_val)
+                        edge_att = (att + trans_val_perm) / 2
+                    else:
+                        edge_att = att
+                else:
+                    edge_att = self.lift_node_att_to_edge_att(att, data.edge_index)
 
             clf_logits = self.clf(data.x, data.edge_index, data.batch, edge_attr=data.edge_attr, edge_atten=edge_att)
             
@@ -1283,11 +1308,12 @@ class GSAT(nn.Module):
         else:
             raise ValueError(f"Unknown motif_incorporation_method: {self.motif_method}")
 
-        # Get nodes_to_motifs if available (only needed for motif_method='loss')
+        # Get nodes_to_motifs if available (needed for motif_method='loss' and motif_level_sampling)
         nodes_to_motifs = getattr(data, 'nodes_to_motifs', None)
         loss, loss_dict = self.__loss__(att, clf_logits, data.y, epoch, nodes_to_motifs, data.batch,
                                         aux_clf_logits=aux_clf_logits, motif_batch=motif_batch,
-                                        motif_ids=motif_ids)
+                                        motif_ids=motif_ids,
+                                        node_att_for_motif_loss=node_att_for_motif_loss)
         return edge_att, loss, loss_dict, clf_logits
 
     @torch.no_grad()
@@ -2569,6 +2595,9 @@ def main():
                         help='For graph method: use separate GNN for motif graph processing (vs shared parameters)')
     parser.add_argument('--motif_level_info_loss', action='store_true', default=False,
                         help='Compute info_loss at motif level (1 term per motif) instead of node level (avoids size-weighting bias)')
+    parser.add_argument('--motif_level_sampling', action='store_true', default=False,
+                        help='Pool node logits to motif level, sample once per motif (shared Gumbel noise), '
+                             'broadcast back. Requires motif_method=loss and learn_edge_att=False.')
     parser.add_argument('--target_k', type=float, default=None,
                         help='Graph-adaptive r: r_g = target_k / M_g (expected number of important motifs per graph). '
                              'Overrides fix_r/final_r for motif-level methods.')
@@ -2635,6 +2664,11 @@ def main():
     elif 'motif_level_info_loss' not in local_config['GSAT_config']:
         local_config['GSAT_config']['motif_level_info_loss'] = False
     
+    if args.motif_level_sampling:
+        local_config['GSAT_config']['motif_level_sampling'] = True
+    elif 'motif_level_sampling' not in local_config['GSAT_config']:
+        local_config['GSAT_config']['motif_level_sampling'] = False
+    
     if args.target_k is not None:
         local_config['GSAT_config']['target_k'] = args.target_k
     elif 'target_k' not in local_config['GSAT_config']:
@@ -2660,6 +2694,7 @@ def main():
     print(f'[INFO] Train motif graph: {local_config["GSAT_config"].get("train_motif_graph", False)}')
     print(f'[INFO] Separate motif model: {local_config["GSAT_config"].get("separate_motif_model", False)}')
     print(f'[INFO] Motif-level info loss: {local_config["GSAT_config"].get("motif_level_info_loss", False)}')
+    print(f'[INFO] Motif-level sampling: {local_config["GSAT_config"].get("motif_level_sampling", False)}')
     print(f'[INFO] Target k (graph-adaptive r): {local_config["GSAT_config"].get("target_k", None)}')
     print(f'[INFO] Motif scores path: {local_config["GSAT_config"].get("motif_scores_path", None)}')
 

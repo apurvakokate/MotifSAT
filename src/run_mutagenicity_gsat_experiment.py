@@ -12,6 +12,8 @@ Experiment groups (each has its own experiment_name):
   7. motif_readout_score_r_by_dataset_model: Motif readout with fixed per-motif score r (no decay)
   8. motif_readout_score_r_interpolate: Score r with interpolation (init_r → score_r over decay)
   9. motif_readout_score_r_max: Score r with max schedule (global_r until it drops below score_r)
+ 10. motif_loss_motif_sampling: Motif consistency loss with motif-level stochastic sampling
+     (pool node logits to motif, sample once per motif, broadcast back)
 
 Usage:
   python run_mutagenicity_gsat_experiment.py --experiments r_impact_node r_impact_edge
@@ -266,6 +268,44 @@ EXPERIMENT_GROUPS = {
                     'score_r_schedule': 'max',
                     'motif_loss_coef': 0,
                     'between_motif_coef': 0,
+                },
+                'learn_edge_att': False,
+            },
+        ],
+    },
+    'motif_loss_motif_sampling': {
+        'experiment_name': 'motif_loss_motif_sampling',
+        'variants': [
+            {
+                'variant_id': 'motif_samp_w1_b1',
+                'gsat_overrides': {
+                    'tuning_id': 'motif_samp_w1_b1',
+                    'motif_incorporation_method': 'loss',
+                    'motif_level_sampling': True,
+                    'motif_loss_coef': 1.0,
+                    'between_motif_coef': 1.0,
+                },
+                'learn_edge_att': False,
+            },
+            {
+                'variant_id': 'motif_samp_w0_b1',
+                'gsat_overrides': {
+                    'tuning_id': 'motif_samp_w0_b1',
+                    'motif_incorporation_method': 'loss',
+                    'motif_level_sampling': True,
+                    'motif_loss_coef': 0.0,
+                    'between_motif_coef': 1.0,
+                },
+                'learn_edge_att': False,
+            },
+            {
+                'variant_id': 'motif_samp_w0_b2',
+                'gsat_overrides': {
+                    'tuning_id': 'motif_samp_w0_b2',
+                    'motif_incorporation_method': 'loss',
+                    'motif_level_sampling': True,
+                    'motif_loss_coef': 0.0,
+                    'between_motif_coef': 2.0,
                 },
                 'learn_edge_att': False,
             },
