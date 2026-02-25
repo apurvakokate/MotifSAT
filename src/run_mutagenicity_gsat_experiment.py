@@ -9,7 +9,9 @@ Experiment groups (each has its own experiment_name):
   4. between_motif_consistency_impact: Node attention, motif_loss_coef=1.0, between_motif_coef in {1.0, 2.0}
   5. motif_readout_info_loss: Motif readout with motif-level info loss (r=0.5, learn_edge_att=False)
   6. motif_readout_adaptive_r: Motif readout with graph-adaptive r (target_k in {1, 2})
-  7. motif_readout_score_r: Motif readout with pre-computed motif score r values
+  7. motif_readout_score_r_by_dataset_model: Motif readout with fixed per-motif score r (no decay)
+  8. motif_readout_score_r_interpolate: Score r with interpolation (init_r → score_r over decay)
+  9. motif_readout_score_r_max: Score r with max schedule (global_r until it drops below score_r)
 
 Usage:
   python run_mutagenicity_gsat_experiment.py --experiments r_impact_node r_impact_edge
@@ -226,6 +228,42 @@ EXPERIMENT_GROUPS = {
                     'motif_incorporation_method': 'readout',
                     'motif_level_info_loss': True,
                     'motif_scores_path': MOTIF_SCORES_TEMPLATE,
+                    'motif_loss_coef': 0,
+                    'between_motif_coef': 0,
+                },
+                'learn_edge_att': False,
+            },
+        ],
+    },
+    'motif_readout_score_r_interpolate': {
+        'experiment_name': 'motif_readout_score_r_interpolate',
+        'variants': [
+            {
+                'variant_id': 'readout_score_r_interp',
+                'gsat_overrides': {
+                    'tuning_id': 'readout_score_r_interp',
+                    'motif_incorporation_method': 'readout',
+                    'motif_level_info_loss': True,
+                    'motif_scores_path': MOTIF_SCORES_TEMPLATE,
+                    'score_r_schedule': 'interpolate',
+                    'motif_loss_coef': 0,
+                    'between_motif_coef': 0,
+                },
+                'learn_edge_att': False,
+            },
+        ],
+    },
+    'motif_readout_score_r_max': {
+        'experiment_name': 'motif_readout_score_r_max',
+        'variants': [
+            {
+                'variant_id': 'readout_score_r_max',
+                'gsat_overrides': {
+                    'tuning_id': 'readout_score_r_max',
+                    'motif_incorporation_method': 'readout',
+                    'motif_level_info_loss': True,
+                    'motif_scores_path': MOTIF_SCORES_TEMPLATE,
+                    'score_r_schedule': 'max',
                     'motif_loss_coef': 0,
                     'between_motif_coef': 0,
                 },

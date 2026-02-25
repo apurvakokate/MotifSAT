@@ -904,6 +904,10 @@ class GSAT(nn.Module):
         self.separate_motif_model = method_config.get('separate_motif_model', False)
         self.motif_level_info_loss = method_config.get('motif_level_info_loss', False)
         self.target_k = method_config.get('target_k', None)  # Graph-adaptive r: r_g = target_k / M_g
+        # 'interpolate': r(t) = alpha(t)*init_r + (1-alpha(t))*score_r, alpha decays from 1→0
+        # 'max': r(t) = max(score_r, get_r(t)), score kicks in once global r decays below it
+        # None: fixed score-based r from epoch 0
+        self.score_r_schedule = method_config.get('score_r_schedule', None)
         
         # Score-based per-motif r: load pre-computed motif importance scores
         motif_scores_path = method_config.get('motif_scores_path', None)
@@ -1093,8 +1097,18 @@ class GSAT(nn.Module):
         pred_loss = self.criterion(clf_logits, clf_labels)
 
         if self.motif_r_values is not None and motif_ids is not None:
-            # Score-based per-motif r: each motif gets its pre-computed importance score
-            r = self.motif_r_values[motif_ids].unsqueeze(-1)
+            score_r = self.motif_r_values[motif_ids].unsqueeze(-1)
+            if self.score_r_schedule == 'interpolate':
+                # Blend from init_r → score_r using the same decay timing as standard GSAT
+                global_r = self.fix_r if self.fix_r else self.get_r(self.decay_interval, self.decay_r, epoch, final_r=self.final_r, init_r=self.init_r)
+                alpha = (global_r - self.final_r) / max(self.init_r - self.final_r, 1e-8)
+                r = alpha * self.init_r + (1 - alpha) * score_r
+            elif self.score_r_schedule == 'max':
+                # Use standard decaying r until it drops below the motif's score
+                global_r = self.fix_r if self.fix_r else self.get_r(self.decay_interval, self.decay_r, epoch, final_r=self.final_r, init_r=self.init_r)
+                r = torch.clamp(score_r, min=global_r)
+            else:
+                r = score_r
         elif self.target_k is not None and motif_batch is not None:
             # Graph-adaptive r: r_g = target_k / M_g for each graph g
             motifs_per_graph = scatter(torch.ones_like(motif_batch, dtype=att.dtype),
@@ -2561,6 +2575,10 @@ def main():
     parser.add_argument('--motif_scores_path', type=str, default=None,
                         help='Path to CSV with pre-computed motif importance scores to use as per-motif r values. '
                              'Overrides target_k and fix_r/final_r.')
+    parser.add_argument('--score_r_schedule', type=str, default=None,
+                        choices=[None, 'interpolate', 'max'],
+                        help='Schedule for score-based r: interpolate=blend init_r→score_r, '
+                             'max=use max(score_r, decaying_global_r), None=fixed from epoch 0')
     parser.add_argument('--run_test_graphs', type=int, default=0,
                         help='Run N graphs through the pipeline and save detailed outputs to file (0 = disabled)')
     parser.add_argument('--config', type=str, default=None,
@@ -2626,6 +2644,11 @@ def main():
         local_config['GSAT_config']['motif_scores_path'] = args.motif_scores_path
     elif 'motif_scores_path' not in local_config['GSAT_config']:
         local_config['GSAT_config']['motif_scores_path'] = None
+    
+    if args.score_r_schedule is not None:
+        local_config['GSAT_config']['score_r_schedule'] = args.score_r_schedule
+    elif 'score_r_schedule' not in local_config['GSAT_config']:
+        local_config['GSAT_config']['score_r_schedule'] = None
     
     if args.learn_edge_att:
         local_config['shared_config']['learn_edge_att'] = True
