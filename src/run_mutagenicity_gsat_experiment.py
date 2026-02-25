@@ -31,7 +31,7 @@ from utils import set_seed
 
 SUPPORTED_DATASETS = ['Mutagenicity', 'BBBP', 'hERG', 'Benzene', 'Alkane_Carbonyl', 'Fluoride_Carbonyl']
 DATASET = 'Mutagenicity'  # default, overridden by --dataset CLI arg
-MOTIF_SCORES_TEMPLATE = 'hpc-share/ChemIntuit/MOSE-GNN/All0.5_learn_unk+motif_scores/{dataset}_{model}_motif_scores.csv'
+MOTIF_SCORES_TEMPLATE = '/nfs/stak/users/kokatea/hpc-share/ChemIntuit/MOSE-GNN/All0.5_learn_unk+motif_scores/{dataset}_{model}_motif_scores.csv'
 
 # ---------------------------------------------------------------------------
 # Experiment group definitions
