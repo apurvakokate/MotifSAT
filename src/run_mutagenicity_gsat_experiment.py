@@ -29,7 +29,8 @@ import torch
 from experiment_configs import get_base_config, ARCHITECTURES
 from utils import set_seed
 
-DATASET = 'Mutagenicity'
+SUPPORTED_DATASETS = ['Mutagenicity', 'BBBP', 'hERG', 'Benzene', 'Alkane_Carbonyl', 'Fluoride_Carbonyl']
+DATASET = 'Mutagenicity'  # default, overridden by --dataset CLI arg
 MOTIF_SCORES_TEMPLATE = 'hpc-share/ChemIntuit/MOSE-GNN/All0.5_learn_unk+motif_scores/{dataset}_{model}_motif_scores.csv'
 
 # ---------------------------------------------------------------------------
@@ -237,11 +238,11 @@ EXPERIMENT_GROUPS = {
 ALL_EXPERIMENT_NAMES = list(EXPERIMENT_GROUPS.keys())
 
 
-def run_one(model_name, fold, variant, experiment_name, seed, cuda_id, data_dir):
+def run_one(model_name, fold, variant, experiment_name, seed, cuda_id, data_dir, dataset_name):
     """Run a single experiment: one model, one fold, one variant, one seed."""
     from run_gsat import train_gsat_one_seed
 
-    config = get_base_config(model_name, DATASET, gsat_overrides=variant['gsat_overrides'])
+    config = get_base_config(model_name, dataset_name, gsat_overrides=variant['gsat_overrides'])
     config['shared_config']['learn_edge_att'] = variant['learn_edge_att']
     config['GSAT_config']['experiment_name'] = experiment_name
 
@@ -249,23 +250,25 @@ def run_one(model_name, fold, variant, experiment_name, seed, cuda_id, data_dir)
     scores_path = config['GSAT_config'].get('motif_scores_path')
     if scores_path and '{' in scores_path:
         config['GSAT_config']['motif_scores_path'] = scores_path.format(
-            dataset=DATASET, model=model_name
+            dataset=dataset_name, model=model_name
         )
 
     device = torch.device(f'cuda:{cuda_id}' if cuda_id >= 0 else 'cpu')
     variant_id = variant['variant_id']
-    log_dir = data_dir / f'{DATASET}-fold{fold}' / 'logs' / f'{model_name}-seed{seed}-GSAT-{variant_id}'
+    log_dir = data_dir / f'{dataset_name}-fold{fold}' / 'logs' / f'{model_name}-seed{seed}-GSAT-{variant_id}'
 
     set_seed(seed)
     hparam_dict, metric_dict = train_gsat_one_seed(
-        config, data_dir, log_dir, model_name, DATASET,
+        config, data_dir, log_dir, model_name, dataset_name,
         'GSAT', device, seed, fold=fold, task_type='classification'
     )
     return metric_dict
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Mutagenicity GSAT experiments')
+    parser = argparse.ArgumentParser(description='GSAT experiments for molecular datasets')
+    parser.add_argument('--dataset', type=str, default=DATASET,
+                        choices=SUPPORTED_DATASETS, help='Dataset to run experiments on')
     parser.add_argument('--experiments', type=str, nargs='+', default=ALL_EXPERIMENT_NAMES,
                         choices=ALL_EXPERIMENT_NAMES, help='Which experiment groups to run')
     parser.add_argument('--folds', type=int, nargs='+', default=[0, 1], help='Folds to run')
@@ -273,6 +276,8 @@ def main():
     parser.add_argument('--seeds', type=int, nargs='+', default=[0], help='Random seeds')
     parser.add_argument('--cuda', type=int, default=0, help='CUDA device id (-1 for CPU)')
     args = parser.parse_args()
+    
+    dataset_name = args.dataset
 
     config_dir = Path(__file__).resolve().parent / 'configs'
     with open(config_dir / 'global_config.yml') as f:
@@ -282,6 +287,8 @@ def main():
     total_variants = sum(len(EXPERIMENT_GROUPS[e]['variants']) for e in args.experiments)
     total = len(args.folds) * len(args.models) * total_variants * len(args.seeds)
     n = 0
+
+    print(f'\n[INFO] Dataset: {dataset_name}')
 
     for exp_key in args.experiments:
         group = EXPERIMENT_GROUPS[exp_key]
@@ -297,10 +304,10 @@ def main():
                         n += 1
                         vid = variant['variant_id']
                         print('=' * 80)
-                        print(f'[{n}/{total}] {experiment_name} fold={fold} model={model_name} variant={vid} seed={seed}')
+                        print(f'[{n}/{total}] {experiment_name} dataset={dataset_name} fold={fold} model={model_name} variant={vid} seed={seed}')
                         print('=' * 80)
                         try:
-                            run_one(model_name, fold, variant, experiment_name, seed, args.cuda, data_dir)
+                            run_one(model_name, fold, variant, experiment_name, seed, args.cuda, data_dir, dataset_name)
                         except Exception as e:
                             print(f'[ERROR] {e}')
                             import traceback
