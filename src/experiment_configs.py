@@ -204,6 +204,7 @@ def get_base_config(model_name, dataset_name, gsat_overrides=None):
         'ogbg' in dataset_name
         or 'spmotif' in dataset_name
     )
+    skip_node_encoder = dataset_name in MOL_DATASETS_WITH_FOLDS
 
     data_config = {
         'splits': {'train': 0.8, 'valid': 0.1, 'test': 0.1},
@@ -216,6 +217,7 @@ def get_base_config(model_name, dataset_name, gsat_overrides=None):
         **model_defaults[model_name],
         'atom_encoder': use_atom_encoder,
         'use_edge_attr': use_edge_attr,
+        'skip_node_encoder': skip_node_encoder,
         'pretrain_lr': 1e-3,
         'pretrain_epochs': 100 if model_name != 'PNA' else 50,
     }
