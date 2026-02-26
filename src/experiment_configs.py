@@ -203,7 +203,6 @@ def get_base_config(model_name, dataset_name, gsat_overrides=None):
     use_edge_attr = (
         'ogbg' in dataset_name
         or 'spmotif' in dataset_name
-        or dataset_name in MOL_DATASETS_WITH_FOLDS
     )
 
     data_config = {
