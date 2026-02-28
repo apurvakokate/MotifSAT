@@ -48,6 +48,23 @@ MOTIF_SCORES_TEMPLATE = '/nfs/stak/users/kokatea/hpc-share/ChemIntuit/MOSE-GNN/A
 # ---------------------------------------------------------------------------
 
 EXPERIMENT_GROUPS = {
+    'r_impact_node_no_encoder_2_linear_clf': {
+        'experiment_name': 'r_impact_node_no_encoder_2_linear_clf',
+        'variants': [
+            {
+                'variant_id': 'node_r0.5',
+                'gsat_overrides': {
+                    'tuning_id': 'node_r0.5',
+                    'final_r': 0.5,
+                    'motif_incorporation_method': None,
+                    'motif_loss_coef': 0,
+                    'between_motif_coef': 0,
+                },
+                'learn_edge_att': False,
+            },
+        ],
+
+    },
     'r_impact_node': {
         'experiment_name': 'r_impact_node',
         'variants': [
