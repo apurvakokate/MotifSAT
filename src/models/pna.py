@@ -62,9 +62,13 @@ class PNA(torch.nn.Module):
             self.batch_norms.append(BatchNorm(hidden_size))
 
         self.pool = global_mean_pool
-        self.fc_out = Sequential(Linear(hidden_size, hidden_size//2), ReLU(),
-                                 Linear(hidden_size//2, hidden_size//4), ReLU(),
-                                 Linear(hidden_size//4, 1 if num_class == 2 and not multi_label else num_class))
+        out_dim = 1 if num_class == 2 and not multi_label else num_class
+        self.fc_out = Sequential(
+            Linear(hidden_size, hidden_size),
+            ReLU(),
+            torch.nn.Dropout(0.5),
+            Linear(hidden_size, out_dim),
+        )
 
     def forward(self, x, edge_index, batch, edge_attr, edge_atten=None):
         if self.use_atom_encoder:

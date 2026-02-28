@@ -40,10 +40,13 @@ class SAGE(nn.Module):
             in_dim = first_dim if i == 0 else hidden_size
             self.convs.append(SAGEConvWithAtten(in_dim, hidden_size, aggr=self.aggr))
 
-        if self.task_type == 'regression':
-            self.fc_out = nn.Sequential(nn.Linear(hidden_size, 1))
-        else:
-            self.fc_out = nn.Sequential(nn.Linear(hidden_size, 1 if num_class == 2 and not multi_label else num_class))
+        out_dim = 1 if (self.task_type == 'regression' or (num_class == 2 and not multi_label)) else num_class
+        self.fc_out = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size),
+            nn.ReLU(),
+            nn.Dropout(0.5),
+            nn.Linear(hidden_size, out_dim),
+        )
 
     def forward(self, x, edge_index, batch, edge_attr=None, edge_atten=None):
         if self.use_atom_encoder:
