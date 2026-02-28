@@ -16,6 +16,7 @@ class PNA(torch.nn.Module):
         self.n_layers = model_config['n_layers']
         self.dropout_p = model_config['dropout_p']
         self.edge_attr_dim = edge_attr_dim
+        self.skip_node_encoder = model_config.get('skip_node_encoder', False)
 
         self.use_atom_encoder = model_config.get('atom_encoder', False)
         self.use_edge_attr = model_config.get('use_edge_attr', True)
@@ -23,10 +24,23 @@ class PNA(torch.nn.Module):
             self.node_encoder = AtomEncoder(emb_dim=hidden_size)
             if edge_attr_dim != 0 and self.use_edge_attr:
                 self.edge_encoder = BondEncoder(emb_dim=hidden_size)
+            first_dim = hidden_size
+        elif self.skip_node_encoder:
+            self.node_encoder = None
+            if edge_attr_dim != 0 and self.use_edge_attr:
+                self.edge_encoder = Linear(edge_attr_dim, hidden_size)
+            first_dim = x_dim
         else:
             self.node_encoder = Linear(x_dim, hidden_size)
             if edge_attr_dim != 0 and self.use_edge_attr:
                 self.edge_encoder = Linear(edge_attr_dim, hidden_size)
+            first_dim = hidden_size
+
+        # Residual projection for first layer when input dim != hidden_size
+        if first_dim != hidden_size:
+            self.residual_proj = Linear(first_dim, hidden_size)
+        else:
+            self.residual_proj = None
 
         aggregators = model_config['aggregators']
         scalers = ['identity', 'amplification', 'attenuation'] if model_config['scalers'] else ['identity']
@@ -35,12 +49,13 @@ class PNA(torch.nn.Module):
         self.convs = ModuleList()
         self.batch_norms = ModuleList()
 
-        if model_config.get('use_edge_attr', True):
-            in_channels = hidden_size * 2 if edge_attr_dim == 0 else hidden_size * 3
-        else:
-            in_channels = hidden_size * 2
+        for i in range(self.n_layers):
+            node_dim = first_dim if i == 0 else hidden_size
+            if self.use_edge_attr and edge_attr_dim != 0:
+                in_channels = node_dim * 2 + hidden_size
+            else:
+                in_channels = node_dim * 2
 
-        for _ in range(self.n_layers):
             conv = PNAConvSimple(in_channels=in_channels, out_channels=hidden_size, aggregators=aggregators,
                                  scalers=scalers, deg=deg, post_layers=1)
             self.convs.append(conv)
@@ -52,7 +67,6 @@ class PNA(torch.nn.Module):
                                  Linear(hidden_size//4, 1 if num_class == 2 and not multi_label else num_class))
 
     def forward(self, x, edge_index, batch, edge_attr, edge_atten=None):
-        # AtomEncoder/BondEncoder expect integer indices for embedding lookup
         if self.use_atom_encoder:
             x = x.long()
             if edge_attr is not None and hasattr(self, 'edge_encoder'):
@@ -60,18 +74,22 @@ class PNA(torch.nn.Module):
         else:
             if edge_attr is not None and hasattr(self, 'edge_encoder'):
                 edge_attr = self.edge_encoder(edge_attr.float())
-        x = self.node_encoder(x)
+
+        if self.node_encoder is not None:
+            x = self.node_encoder(x)
 
         for i, (conv, batch_norm) in enumerate(zip(self.convs, self.batch_norms)):
             h = F.relu(batch_norm(conv(x, edge_index, edge_attr, edge_atten=edge_atten)))
-            x = h + x  # residual#
+            if i == 0 and self.residual_proj is not None:
+                x = h + self.residual_proj(x)
+            else:
+                x = h + x
             x = F.dropout(x, self.dropout_p, training=self.training)
 
         x = self.pool(x, batch)
         return self.fc_out(x)
 
     def get_emb(self, x, edge_index, batch, edge_attr, edge_atten=None):
-        # AtomEncoder/BondEncoder expect integer indices for embedding lookup
         if self.use_atom_encoder:
             x = x.long()
             if edge_attr is not None and hasattr(self, 'edge_encoder'):
@@ -79,11 +97,16 @@ class PNA(torch.nn.Module):
         else:
             if edge_attr is not None and hasattr(self, 'edge_encoder'):
                 edge_attr = self.edge_encoder(edge_attr.float())
-        x = self.node_encoder(x)
+
+        if self.node_encoder is not None:
+            x = self.node_encoder(x)
 
         for i, (conv, batch_norm) in enumerate(zip(self.convs, self.batch_norms)):
             h = F.relu(batch_norm(conv(x, edge_index, edge_attr, edge_atten=edge_atten)))
-            x = h + x  # residual#
+            if i == 0 and self.residual_proj is not None:
+                x = h + self.residual_proj(x)
+            else:
+                x = h + x
             x = F.dropout(x, self.dropout_p, training=self.training)
 
         return x
