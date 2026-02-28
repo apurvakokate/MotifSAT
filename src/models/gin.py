@@ -71,8 +71,8 @@ class GIN(nn.Module):
 
         for i in range(self.n_layers):
             x = self.convs[i](x, edge_index, edge_attr=edge_attr, edge_atten=edge_atten)
+            x = F.normalize(x, p=2, dim=1)
             x = self.relu(x)
-            x = F.dropout(x, p=self.dropout_p, training=self.training)
         return self.fc_out(self.pool(x, batch))
 
     @staticmethod
@@ -98,8 +98,8 @@ class GIN(nn.Module):
 
         for i in range(self.n_layers):
             x = self.convs[i](x, edge_index, edge_attr=edge_attr, edge_atten=edge_atten)
+            x = F.normalize(x, p=2, dim=1)
             x = self.relu(x)
-            x = F.dropout(x, p=self.dropout_p, training=self.training)
         return x
 
     def get_pred_from_emb(self, emb, batch):

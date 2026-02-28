@@ -88,7 +88,7 @@ class PNA(torch.nn.Module):
                 x = h + self.residual_proj(x)
             else:
                 x = h + x
-            x = F.dropout(x, self.dropout_p, training=self.training)
+            x = F.normalize(x, p=2, dim=1)
 
         x = self.pool(x, batch)
         return self.fc_out(x)
@@ -111,7 +111,7 @@ class PNA(torch.nn.Module):
                 x = h + self.residual_proj(x)
             else:
                 x = h + x
-            x = F.dropout(x, self.dropout_p, training=self.training)
+            x = F.normalize(x, p=2, dim=1)
 
         return x
 
