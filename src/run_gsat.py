@@ -904,6 +904,12 @@ class GSAT(nn.Module):
         self.separate_motif_model = method_config.get('separate_motif_model', False)
         self.motif_level_info_loss = method_config.get('motif_level_info_loss', False)
         self.motif_level_sampling = method_config.get('motif_level_sampling', False)
+        
+        # Node attention injection points (only for learn_edge_att=False)
+        self.w_feat = method_config.get('w_feat', False)
+        self.w_message = method_config.get('w_message', True)
+        self.w_readout = method_config.get('w_readout', False)
+        
         self.target_k = method_config.get('target_k', None)  # Graph-adaptive r: r_g = target_k / M_g
         # 'interpolate': r(t) = alpha(t)*init_r + (1-alpha(t))*score_r, alpha decays from 1→0
         # 'max': r(t) = max(score_r, get_r(t)), score kicks in once global r decays below it
@@ -934,6 +940,8 @@ class GSAT(nn.Module):
         print(f'[INFO] Separate motif model: {self.separate_motif_model}')
         print(f'[INFO] Motif-level info loss: {self.motif_level_info_loss}')
         print(f'[INFO] Motif-level sampling: {self.motif_level_sampling}')
+        if not self.learn_edge_att:
+            print(f'[INFO] Node att injection: W_FEAT={self.w_feat} W_MESSAGE={self.w_message} W_READOUT={self.w_readout}')
         if self.target_k is not None:
             print(f'[INFO] Graph-adaptive r: target_k={self.target_k} (r_g = {self.target_k} / M_g)')
         if self.motif_r_values is not None:
@@ -985,6 +993,9 @@ class GSAT(nn.Module):
                 'separate_motif_model': self.separate_motif_model,
                 'motif_level_info_loss': self.motif_level_info_loss,
                 'motif_level_sampling': self.motif_level_sampling,
+                'w_feat': self.w_feat,
+                'w_message': self.w_message,
+                'w_readout': self.w_readout,
                 'target_k': self.target_k,
                 'motif_scores_path': method_config.get('motif_scores_path', None),
             },
@@ -1209,9 +1220,7 @@ class GSAT(nn.Module):
                 motif_att = self.sampling(motif_logits, epoch, training)
                 node_att = lift_motif_att_to_node_att(motif_att, inverse_indices)
                 edge_att = self.lift_node_att_to_edge_att(node_att, data.edge_index)
-                # info_loss uses motif-level att (avoids size-weighting)
                 att = motif_att
-                # motif_consistency_loss needs node-level att (broadcast) + nodes_to_motifs
                 node_att_for_motif_loss = node_att
             else:
                 att = self.sampling(att_log_logits, epoch, training)
@@ -1226,7 +1235,22 @@ class GSAT(nn.Module):
                 else:
                     edge_att = self.lift_node_att_to_edge_att(att, data.edge_index)
 
-            clf_logits = self.clf(data.x, data.edge_index, data.batch, edge_attr=data.edge_attr, edge_atten=edge_att)
+            # Classification with W_FEAT / W_MESSAGE / W_READOUT injection points
+            if not self.learn_edge_att and (self.w_feat or not self.w_message or self.w_readout):
+                # Decomposed path: need node_att for W_FEAT / W_READOUT
+                node_att_for_w = att if not self.motif_level_sampling else node_att
+
+                x_clf = data.x * node_att_for_w if self.w_feat else data.x
+                edge_atten_mp = edge_att if self.w_message else None
+                clf_emb = self.clf.get_emb(x_clf, data.edge_index, batch=data.batch,
+                                           edge_attr=data.edge_attr, edge_atten=edge_atten_mp)
+                if self.w_readout:
+                    clf_emb = clf_emb * node_att_for_w
+                clf_logits = self.clf.get_pred_from_emb(clf_emb, data.batch)
+            else:
+                # Standard path: full forward with edge_atten (current GSAT behavior)
+                clf_logits = self.clf(data.x, data.edge_index, data.batch,
+                                      edge_attr=data.edge_attr, edge_atten=edge_att)
             
         elif self.motif_method == 'readout':
             # =================================================================
@@ -2599,6 +2623,14 @@ def main():
     parser.add_argument('--motif_level_sampling', action='store_true', default=False,
                         help='Pool node logits to motif level, sample once per motif (shared Gumbel noise), '
                              'broadcast back. Requires motif_method=loss and learn_edge_att=False.')
+    parser.add_argument('--w_feat', action='store_true', default=False,
+                        help='Weight node features by attention before message passing (learn_edge_att=False only).')
+    parser.add_argument('--w_message', action='store_true', default=True,
+                        help='Weight messages by edge attention during message passing (default GSAT behavior).')
+    parser.add_argument('--no_w_message', dest='w_message', action='store_false',
+                        help='Disable message weighting by attention.')
+    parser.add_argument('--w_readout', action='store_true', default=False,
+                        help='Weight node embeddings by attention at readout before pooling (learn_edge_att=False only).')
     parser.add_argument('--target_k', type=float, default=None,
                         help='Graph-adaptive r: r_g = target_k / M_g (expected number of important motifs per graph). '
                              'Overrides fix_r/final_r for motif-level methods.')
@@ -2669,7 +2701,14 @@ def main():
         local_config['GSAT_config']['motif_level_sampling'] = True
     elif 'motif_level_sampling' not in local_config['GSAT_config']:
         local_config['GSAT_config']['motif_level_sampling'] = False
-    
+
+    if 'w_feat' not in local_config['GSAT_config']:
+        local_config['GSAT_config']['w_feat'] = args.w_feat
+    if 'w_message' not in local_config['GSAT_config']:
+        local_config['GSAT_config']['w_message'] = args.w_message
+    if 'w_readout' not in local_config['GSAT_config']:
+        local_config['GSAT_config']['w_readout'] = args.w_readout
+
     if args.target_k is not None:
         local_config['GSAT_config']['target_k'] = args.target_k
     elif 'target_k' not in local_config['GSAT_config']:

@@ -14,6 +14,8 @@ Experiment groups (each has its own experiment_name):
   9. motif_readout_score_r_max: Score r with max schedule (global_r until it drops below score_r)
  10. motif_loss_motif_sampling: Motif consistency loss with motif-level stochastic sampling
      (pool node logits to motif, sample once per motif, broadcast back)
+ 11. att_injection_point: Node attention injection ablation (W_FEAT / W_MESSAGE / W_READOUT)
+     4 variants: feat_only, message_only, readout_only, feat_readout
 
 Usage:
   python run_mutagenicity_gsat_experiment.py --experiments r_impact_node r_impact_edge
@@ -323,6 +325,52 @@ EXPERIMENT_GROUPS = {
                     'motif_level_sampling': True,
                     'motif_loss_coef': 0.0,
                     'between_motif_coef': 2.0,
+                },
+                'learn_edge_att': False,
+            },
+        ],
+    },
+
+    'att_injection_point': {
+        'experiment_name': 'att_injection_point',
+        'variants': [
+            {
+                'variant_id': 'w_feat_only',
+                'gsat_overrides': {
+                    'tuning_id': 'w_feat_only',
+                    'w_feat': True,
+                    'w_message': False,
+                    'w_readout': False,
+                },
+                'learn_edge_att': False,
+            },
+            {
+                'variant_id': 'w_message_only',
+                'gsat_overrides': {
+                    'tuning_id': 'w_message_only',
+                    'w_feat': False,
+                    'w_message': True,
+                    'w_readout': False,
+                },
+                'learn_edge_att': False,
+            },
+            {
+                'variant_id': 'w_readout_only',
+                'gsat_overrides': {
+                    'tuning_id': 'w_readout_only',
+                    'w_feat': False,
+                    'w_message': False,
+                    'w_readout': True,
+                },
+                'learn_edge_att': False,
+            },
+            {
+                'variant_id': 'w_feat_readout',
+                'gsat_overrides': {
+                    'tuning_id': 'w_feat_readout',
+                    'w_feat': True,
+                    'w_message': False,
+                    'w_readout': True,
                 },
                 'learn_edge_att': False,
             },
