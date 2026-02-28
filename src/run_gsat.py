@@ -2552,7 +2552,8 @@ def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_nam
     print('[INFO] Training GSAT...')
     gsat = GSAT(model, extractor, optimizer, scheduler, writer, device, log_dir, dataset_name, num_class, aux_info['multi_label'], random_state, method_config, shared_config, fold, task_type, datasets, masked_data_features, motif_clf=motif_clf, motif_list=motif_list)
     metric_dict = gsat.train(loaders, test_set, metric_dict, model_config.get('use_edge_attr', True))
-    writer.add_hparams(hparam_dict=hparam_dict, metric_dict=metric_dict)
+    scalar_metric_dict = {k: v for k, v in metric_dict.items() if isinstance(v, (int, float))}
+    writer.add_hparams(hparam_dict=hparam_dict, metric_dict=scalar_metric_dict)
     
     # Note: Artifacts are saved automatically by GSAT class to seed_dir
     # - experiment_summary.json (in GSAT.__init__)
