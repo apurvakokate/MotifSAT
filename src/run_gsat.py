@@ -1263,7 +1263,19 @@ class GSAT(nn.Module):
                     raw_att_for_loss = node_att_log_logits.sigmoid()
 
             edge_att = self.lift_node_att_to_edge_att(node_att, data.edge_index)
-            clf_logits = self.clf(data.x, data.edge_index, data.batch, edge_attr=data.edge_attr, edge_atten=edge_att)
+
+            # Classification with W_FEAT / W_MESSAGE / W_READOUT injection points
+            if not self.learn_edge_att and (self.w_feat or not self.w_message or self.w_readout):
+                x_clf = data.x * node_att if self.w_feat else data.x
+                edge_atten_mp = edge_att if self.w_message else None
+                clf_emb = self.clf.get_emb(x_clf, data.edge_index, batch=data.batch,
+                                           edge_attr=data.edge_attr, edge_atten=edge_atten_mp)
+                if self.w_readout:
+                    clf_emb = clf_emb * node_att
+                clf_logits = self.clf.get_pred_from_emb(clf_emb, data.batch)
+            else:
+                clf_logits = self.clf(data.x, data.edge_index, data.batch,
+                                      edge_attr=data.edge_attr, edge_atten=edge_att)
             
         # # GRAPH METHOD (commented out for simplification)
         # elif self.motif_method == 'graph':

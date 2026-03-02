@@ -17,6 +17,10 @@ Experiment groups (each has its own experiment_name):
      4 variants: feat_only, message_only, readout_only, feat_readout
  11. arch_ablation_l2_vs_dropout: 2x2 ablation of L2 norm vs inter-layer dropout
      4 variants: original_gsat, l2_only, no_dropout_only, both_l2_and_no_dropout
+ 12. base_gsat_clean: Base GSAT with clean model config (no dropout, no L2, no MLP head,
+     skip node encoder, no edge attr). Run across Mutagenicity/BBBP/Benzene/hERG.
+ 13. base_gsat_w_injection: Same as base_gsat_clean but with W flag ablation (4 variants)
+ 14. readout_w_injection: Motif readout + W flag ablation (4 variants)
 
 Usage:
   python run_mutagenicity_gsat_experiment.py --experiments r_impact_node r_impact_edge
@@ -48,7 +52,15 @@ MOTIF_SCORES_TEMPLATE = '/nfs/stak/users/kokatea/hpc-share/ChemIntuit/MOSE-GNN/A
 #       variant_id: str (tuning_id)
 #       gsat_overrides: dict
 #       learn_edge_att: bool
+#       model_overrides: dict (optional, merged into model_config)
 # ---------------------------------------------------------------------------
+
+# Shared model overrides: no dropout, no L2, basic clf head, skip node encoder
+_CLEAN_MODEL = {
+    'use_l2_norm': False,
+    'use_inter_layer_dropout': False,
+    'use_mlp_head': False,
+}
 
 EXPERIMENT_GROUPS = {
     'r_impact_node_no_encoder_2_linear_clf': {
@@ -400,6 +412,127 @@ EXPERIMENT_GROUPS = {
                     'use_l2_norm': True,
                     'use_inter_layer_dropout': False,
                 },
+                'learn_edge_att': False,
+            },
+        ],
+    },
+
+    # =========================================================================
+    # Cross-dataset experiments (Mutagenicity, BBBP, Benzene, hERG)
+    # All use: no dropout, no L2 norm, basic clf head, skip node encoder, no edge attr
+    # =========================================================================
+
+    'base_gsat_clean': {
+        'experiment_name': 'base_gsat_clean',
+        'variants': [
+            {
+                'variant_id': 'base_node',
+                'gsat_overrides': {
+                    'tuning_id': 'base_node',
+                    'motif_incorporation_method': None,
+                    'motif_loss_coef': 0,
+                },
+                'model_overrides': _CLEAN_MODEL,
+                'learn_edge_att': False,
+            },
+        ],
+    },
+
+    'base_gsat_w_injection': {
+        'experiment_name': 'base_gsat_w_injection',
+        'variants': [
+            {
+                'variant_id': 'w_feat_only',
+                'gsat_overrides': {
+                    'tuning_id': 'w_feat_only',
+                    'motif_incorporation_method': None,
+                    'motif_loss_coef': 0,
+                    'w_feat': True, 'w_message': False, 'w_readout': False,
+                },
+                'model_overrides': _CLEAN_MODEL,
+                'learn_edge_att': False,
+            },
+            {
+                'variant_id': 'w_message_only',
+                'gsat_overrides': {
+                    'tuning_id': 'w_message_only',
+                    'motif_incorporation_method': None,
+                    'motif_loss_coef': 0,
+                    'w_feat': False, 'w_message': True, 'w_readout': False,
+                },
+                'model_overrides': _CLEAN_MODEL,
+                'learn_edge_att': False,
+            },
+            {
+                'variant_id': 'w_readout_only',
+                'gsat_overrides': {
+                    'tuning_id': 'w_readout_only',
+                    'motif_incorporation_method': None,
+                    'motif_loss_coef': 0,
+                    'w_feat': False, 'w_message': False, 'w_readout': True,
+                },
+                'model_overrides': _CLEAN_MODEL,
+                'learn_edge_att': False,
+            },
+            {
+                'variant_id': 'w_feat_readout',
+                'gsat_overrides': {
+                    'tuning_id': 'w_feat_readout',
+                    'motif_incorporation_method': None,
+                    'motif_loss_coef': 0,
+                    'w_feat': True, 'w_message': False, 'w_readout': True,
+                },
+                'model_overrides': _CLEAN_MODEL,
+                'learn_edge_att': False,
+            },
+        ],
+    },
+
+    'readout_w_injection': {
+        'experiment_name': 'readout_w_injection',
+        'variants': [
+            {
+                'variant_id': 'readout_w_feat_only',
+                'gsat_overrides': {
+                    'tuning_id': 'readout_w_feat_only',
+                    'motif_incorporation_method': 'readout',
+                    'motif_loss_coef': 0,
+                    'w_feat': True, 'w_message': False, 'w_readout': False,
+                },
+                'model_overrides': _CLEAN_MODEL,
+                'learn_edge_att': False,
+            },
+            {
+                'variant_id': 'readout_w_message_only',
+                'gsat_overrides': {
+                    'tuning_id': 'readout_w_message_only',
+                    'motif_incorporation_method': 'readout',
+                    'motif_loss_coef': 0,
+                    'w_feat': False, 'w_message': True, 'w_readout': False,
+                },
+                'model_overrides': _CLEAN_MODEL,
+                'learn_edge_att': False,
+            },
+            {
+                'variant_id': 'readout_w_readout_only',
+                'gsat_overrides': {
+                    'tuning_id': 'readout_w_readout_only',
+                    'motif_incorporation_method': 'readout',
+                    'motif_loss_coef': 0,
+                    'w_feat': False, 'w_message': False, 'w_readout': True,
+                },
+                'model_overrides': _CLEAN_MODEL,
+                'learn_edge_att': False,
+            },
+            {
+                'variant_id': 'readout_w_feat_readout',
+                'gsat_overrides': {
+                    'tuning_id': 'readout_w_feat_readout',
+                    'motif_incorporation_method': 'readout',
+                    'motif_loss_coef': 0,
+                    'w_feat': True, 'w_message': False, 'w_readout': True,
+                },
+                'model_overrides': _CLEAN_MODEL,
                 'learn_edge_att': False,
             },
         ],

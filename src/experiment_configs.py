@@ -146,6 +146,13 @@ PAPER_HYPERPARAMS = {
         'SAGE': {'r': 0.7, 'epochs': 200, 'lr': 1e-3, 'batch_size': 128},
         'GCN': {'r': 0.7, 'epochs': 200, 'lr': 1e-3, 'batch_size': 128},
     },
+    'Benzene': {
+        'GIN': {'r': 0.7, 'epochs': 200, 'lr': 1e-3, 'batch_size': 128},
+        'PNA': {'r': 0.7, 'epochs': 200, 'lr': 1e-3, 'batch_size': 128},
+        'GAT': {'r': 0.7, 'epochs': 200, 'lr': 1e-3, 'batch_size': 128},
+        'SAGE': {'r': 0.7, 'epochs': 200, 'lr': 1e-3, 'batch_size': 128},
+        'GCN': {'r': 0.7, 'epochs': 200, 'lr': 1e-3, 'batch_size': 128},
+    },
 }
 
 
