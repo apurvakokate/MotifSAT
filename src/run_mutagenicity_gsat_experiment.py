@@ -7,16 +7,15 @@ Experiment groups (each has its own experiment_name):
   2. r_impact_edge:  Base GSAT, edge attention, varying final_r in {0.4, 0.5, 0.6}
   3. within_motif_consistency_impact:  Node attention, motif_loss_coef in {1.0, 2.0}
   4. between_motif_consistency_impact: Node attention, motif_loss_coef=1.0, between_motif_coef in {1.0, 2.0}
-  5. motif_readout_info_loss: Motif readout with motif-level info loss (r=0.5, learn_edge_att=False)
+  5. motif_readout_info_loss: Motif readout with node-level perturbation (r=0.5, learn_edge_att=False)
+     (motif_level_sampling=False: lift motif logits to nodes, sample per-node)
   6. motif_readout_adaptive_r: Motif readout with graph-adaptive r (target_k in {1, 2})
   7. motif_readout_score_r_by_dataset_model: Motif readout with fixed per-motif score r (no decay)
   8. motif_readout_score_r_interpolate: Score r with interpolation (init_r → score_r over decay)
   9. motif_readout_score_r_max: Score r with max schedule (global_r until it drops below score_r)
- 10. motif_loss_motif_sampling: Motif consistency loss with motif-level stochastic sampling
-     (pool node logits to motif, sample once per motif, broadcast back)
- 11. att_injection_point: Node attention injection ablation (W_FEAT / W_MESSAGE / W_READOUT)
+ 10. att_injection_point: Node attention injection ablation (W_FEAT / W_MESSAGE / W_READOUT)
      4 variants: feat_only, message_only, readout_only, feat_readout
- 12. arch_ablation_l2_vs_dropout: Isolate L2 norm vs no-dropout architecture changes
+ 11. arch_ablation_l2_vs_dropout: Isolate L2 norm vs no-dropout architecture changes
      2 variants: l2_norm_with_dropout (L2 only), no_dropout_no_l2 (no-dropout only)
 
 Usage:
@@ -294,45 +293,6 @@ EXPERIMENT_GROUPS = {
             },
         ],
     },
-    'motif_loss_motif_sampling': {
-        'experiment_name': 'motif_loss_motif_sampling',
-        'variants': [
-            {
-                'variant_id': 'motif_samp_w1_b1',
-                'gsat_overrides': {
-                    'tuning_id': 'motif_samp_w1_b1',
-                    'motif_incorporation_method': 'loss',
-                    'motif_level_sampling': True,
-                    'motif_loss_coef': 1.0,
-                    'between_motif_coef': 1.0,
-                },
-                'learn_edge_att': False,
-            },
-            {
-                'variant_id': 'motif_samp_w0_b1',
-                'gsat_overrides': {
-                    'tuning_id': 'motif_samp_w0_b1',
-                    'motif_incorporation_method': 'loss',
-                    'motif_level_sampling': True,
-                    'motif_loss_coef': 0.0,
-                    'between_motif_coef': 1.0,
-                },
-                'learn_edge_att': False,
-            },
-            {
-                'variant_id': 'motif_samp_w0_b2',
-                'gsat_overrides': {
-                    'tuning_id': 'motif_samp_w0_b2',
-                    'motif_incorporation_method': 'loss',
-                    'motif_level_sampling': True,
-                    'motif_loss_coef': 0.0,
-                    'between_motif_coef': 2.0,
-                },
-                'learn_edge_att': False,
-            },
-        ],
-    },
-
     'att_injection_point': {
         'experiment_name': 'att_injection_point',
         'variants': [

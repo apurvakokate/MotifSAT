@@ -1085,8 +1085,7 @@ class GSAT(nn.Module):
         return -np.sum(hist * np.log(hist))
 
     def __loss__(self, att, clf_logits, clf_labels, epoch, nodes_to_motifs, batch,
-                 aux_clf_logits=None, motif_batch=None, motif_ids=None,
-                 node_att_for_motif_loss=None):
+                 aux_clf_logits=None, motif_batch=None, motif_ids=None):
         """
         Compute the total loss for GSAT training.
         
@@ -1101,8 +1100,6 @@ class GSAT(nn.Module):
                            Only used when motif_method='graph' and train_motif_graph=True
             motif_batch: (Optional) [M] batch assignment for motifs, needed for graph-adaptive r
             motif_ids: (Optional) [M] original motif indices, needed for score-based r
-            node_att_for_motif_loss: (Optional) [N, 1] broadcast node-level att for motif
-                           consistency loss when att is motif-level (motif_level_sampling=True)
         
         Returns:
             loss: Total loss value
@@ -1146,7 +1143,7 @@ class GSAT(nn.Module):
                          and (self.motif_loss_coef > 0 or self.between_motif_coef > 0)
                          and nodes_to_motifs is not None)
         if has_motif_loss:
-            att_for_consistency = node_att_for_motif_loss if node_att_for_motif_loss is not None else att
+            att_for_consistency = att
             within_var, between_var = motif_consistency_loss(att_for_consistency, nodes_to_motifs, batch)
             within_term = within_var * self.motif_loss_coef
             between_term = between_var * self.between_motif_coef
@@ -1190,20 +1187,17 @@ class GSAT(nn.Module):
             'graph': Motif-level graph (construct motif graph, run GNN on it)
         """
         # Check for unmapped nodes if using motif incorporation methods
-        needs_motifs = self.motif_method in ['loss', 'readout', 'graph'] or self.motif_level_sampling
+        needs_motifs = self.motif_method in ['loss', 'readout', 'graph']
         if needs_motifs:
             nodes_to_motifs = getattr(data, 'nodes_to_motifs', None)
             if nodes_to_motifs is None:
-                raise ValueError(f"motif_method='{self.motif_method}' / motif_level_sampling={self.motif_level_sampling} "
-                                f"requires nodes_to_motifs attribute in data. "
+                raise ValueError(f"motif_method='{self.motif_method}' requires nodes_to_motifs attribute in data. "
                                 f"This dataset may not support motif incorporation methods.")
             check_no_unmapped_nodes(nodes_to_motifs)
         
         aux_clf_logits = None  # Auxiliary predictions from motif graph (if applicable)
         motif_batch = None    # Batch assignment for motifs (used for graph-adaptive r)
         motif_ids = None      # Original motif IDs per pooled motif (used for score-based r)
-        
-        node_att_for_motif_loss = None  # Only set when motif_level_sampling pools att to motif level
 
         if self.motif_method in [None, 'loss']:
             # =================================================================
@@ -1211,44 +1205,28 @@ class GSAT(nn.Module):
             # =================================================================
             emb = self.clf.get_emb(data.x, data.edge_index, batch=data.batch, edge_attr=data.edge_attr)
             att_log_logits = self.extractor(emb, data.edge_index, data.batch)
+            att = self.sampling(att_log_logits, epoch, training)
 
-            if self.motif_level_sampling and not self.learn_edge_att:
-                # Pool node logits to motif level, sample once per motif, broadcast back
-                nodes_to_motifs = data.nodes_to_motifs
-                motif_logits, motif_batch, inverse_indices, motif_ids = motif_mean_pooling(
-                    att_log_logits, nodes_to_motifs, data.batch)
-                motif_att = self.sampling(motif_logits, epoch, training)
-                node_att = lift_motif_att_to_node_att(motif_att, inverse_indices)
-                edge_att = self.lift_node_att_to_edge_att(node_att, data.edge_index)
-                att = motif_att
-                node_att_for_motif_loss = node_att
-            else:
-                att = self.sampling(att_log_logits, epoch, training)
-
-                if self.learn_edge_att:
-                    if is_undirected(data.edge_index):
-                        trans_idx, trans_val = transpose(data.edge_index, att, None, None, coalesced=False)
-                        trans_val_perm = reorder_like(trans_idx, data.edge_index, trans_val)
-                        edge_att = (att + trans_val_perm) / 2
-                    else:
-                        edge_att = att
+            if self.learn_edge_att:
+                if is_undirected(data.edge_index):
+                    trans_idx, trans_val = transpose(data.edge_index, att, None, None, coalesced=False)
+                    trans_val_perm = reorder_like(trans_idx, data.edge_index, trans_val)
+                    edge_att = (att + trans_val_perm) / 2
                 else:
-                    edge_att = self.lift_node_att_to_edge_att(att, data.edge_index)
+                    edge_att = att
+            else:
+                edge_att = self.lift_node_att_to_edge_att(att, data.edge_index)
 
             # Classification with W_FEAT / W_MESSAGE / W_READOUT injection points
             if not self.learn_edge_att and (self.w_feat or not self.w_message or self.w_readout):
-                # Decomposed path: need node_att for W_FEAT / W_READOUT
-                node_att_for_w = att if not self.motif_level_sampling else node_att
-
-                x_clf = data.x * node_att_for_w if self.w_feat else data.x
+                x_clf = data.x * att if self.w_feat else data.x
                 edge_atten_mp = edge_att if self.w_message else None
                 clf_emb = self.clf.get_emb(x_clf, data.edge_index, batch=data.batch,
                                            edge_attr=data.edge_attr, edge_atten=edge_atten_mp)
                 if self.w_readout:
-                    clf_emb = clf_emb * node_att_for_w
+                    clf_emb = clf_emb * att
                 clf_logits = self.clf.get_pred_from_emb(clf_emb, data.batch)
             else:
-                # Standard path: full forward with edge_atten (current GSAT behavior)
                 clf_logits = self.clf(data.x, data.edge_index, data.batch,
                                       edge_attr=data.edge_attr, edge_atten=edge_att)
             
@@ -1256,33 +1234,28 @@ class GSAT(nn.Module):
             # =================================================================
             # READOUT METHOD: Pool node embeddings to motif level, score motifs
             # =================================================================
-            # Step 1: Get node embeddings from backbone GNN
             emb = self.clf.get_emb(data.x, data.edge_index, batch=data.batch, edge_attr=data.edge_attr)
             
-            # Step 2: Pool node embeddings to motif level using mean
-            # Note: motif_mean_pooling keeps motifs separate per-graph in the batch
             nodes_to_motifs = getattr(data, 'nodes_to_motifs', None)
             if nodes_to_motifs is None:
                 raise ValueError("'readout' method requires nodes_to_motifs attribute in data")
             motif_emb, motif_batch, inverse_indices, motif_ids = motif_mean_pooling(emb, nodes_to_motifs, data.batch)
             
-            # Step 3: Get motif attention scores
-            # Note: edge_index is not used when learn_edge_att=False
             motif_att_log_logits = self.extractor(motif_emb, None, motif_batch)
-            motif_att = self.sampling(motif_att_log_logits, epoch, training)
-            
-            # Step 4: Map motif attention back to nodes
-            node_att = lift_motif_att_to_node_att(motif_att, inverse_indices)
-            
-            # Step 6: Lift node attention to edge attention
+
+            if self.motif_level_sampling:
+                # Sample at motif level, then broadcast to nodes
+                motif_att = self.sampling(motif_att_log_logits, epoch, training)
+                node_att = lift_motif_att_to_node_att(motif_att, inverse_indices)
+                att = motif_att if self.motif_level_info_loss else node_att
+            else:
+                # Lift motif logits to node level, then follow base GSAT node-level sampling
+                node_att_log_logits = lift_motif_att_to_node_att(motif_att_log_logits, inverse_indices)
+                node_att = self.sampling(node_att_log_logits, epoch, training)
+                att = node_att
+
             edge_att = self.lift_node_att_to_edge_att(node_att, data.edge_index)
-            
-            # Step 7: Run classifier on original graph with motif-derived attention
             clf_logits = self.clf(data.x, data.edge_index, data.batch, edge_attr=data.edge_attr, edge_atten=edge_att)
-            
-            # Use motif-level attention for info_loss to avoid size-weighting bias,
-            # or fall back to broadcast node attention for backward compatibility
-            att = motif_att if self.motif_level_info_loss else node_att
             
         elif self.motif_method == 'graph':
             # =================================================================
@@ -1332,12 +1305,11 @@ class GSAT(nn.Module):
         else:
             raise ValueError(f"Unknown motif_incorporation_method: {self.motif_method}")
 
-        # Get nodes_to_motifs if available (needed for motif_method='loss' and motif_level_sampling)
+        # Get nodes_to_motifs if available (needed for motif_method='loss')
         nodes_to_motifs = getattr(data, 'nodes_to_motifs', None)
         loss, loss_dict = self.__loss__(att, clf_logits, data.y, epoch, nodes_to_motifs, data.batch,
                                         aux_clf_logits=aux_clf_logits, motif_batch=motif_batch,
-                                        motif_ids=motif_ids,
-                                        node_att_for_motif_loss=node_att_for_motif_loss)
+                                        motif_ids=motif_ids)
         return edge_att, loss, loss_dict, clf_logits
 
     @torch.no_grad()
@@ -2621,8 +2593,8 @@ def main():
     parser.add_argument('--motif_level_info_loss', action='store_true', default=False,
                         help='Compute info_loss at motif level (1 term per motif) instead of node level (avoids size-weighting bias)')
     parser.add_argument('--motif_level_sampling', action='store_true', default=False,
-                        help='Pool node logits to motif level, sample once per motif (shared Gumbel noise), '
-                             'broadcast back. Requires motif_method=loss and learn_edge_att=False.')
+                        help='For motif_method=readout: sample at motif level then broadcast to nodes. '
+                             'Default (False): lift motif logits to nodes, sample per-node like base GSAT.')
     parser.add_argument('--w_feat', action='store_true', default=False,
                         help='Weight node features by attention before message passing (learn_edge_att=False only).')
     parser.add_argument('--w_message', action='store_true', default=True,
