@@ -16,6 +16,8 @@ Experiment groups (each has its own experiment_name):
      (pool node logits to motif, sample once per motif, broadcast back)
  11. att_injection_point: Node attention injection ablation (W_FEAT / W_MESSAGE / W_READOUT)
      4 variants: feat_only, message_only, readout_only, feat_readout
+ 12. arch_ablation_l2_vs_dropout: Isolate L2 norm vs no-dropout architecture changes
+     2 variants: l2_norm_with_dropout (L2 only), no_dropout_no_l2 (no-dropout only)
 
 Usage:
   python run_mutagenicity_gsat_experiment.py --experiments r_impact_node r_impact_edge
@@ -376,6 +378,42 @@ EXPERIMENT_GROUPS = {
             },
         ],
     },
+
+    'arch_ablation_l2_vs_dropout': {
+        'experiment_name': 'arch_ablation_l2_vs_dropout',
+        'variants': [
+            {
+                'variant_id': 'l2_norm_with_dropout',
+                'gsat_overrides': {
+                    'tuning_id': 'l2_norm_with_dropout',
+                    'final_r': 0.5,
+                    'motif_incorporation_method': None,
+                    'motif_loss_coef': 0,
+                    'between_motif_coef': 0,
+                },
+                'model_overrides': {
+                    'use_l2_norm': True,
+                    'use_inter_layer_dropout': True,
+                },
+                'learn_edge_att': False,
+            },
+            {
+                'variant_id': 'no_dropout_no_l2',
+                'gsat_overrides': {
+                    'tuning_id': 'no_dropout_no_l2',
+                    'final_r': 0.5,
+                    'motif_incorporation_method': None,
+                    'motif_loss_coef': 0,
+                    'between_motif_coef': 0,
+                },
+                'model_overrides': {
+                    'use_l2_norm': False,
+                    'use_inter_layer_dropout': False,
+                },
+                'learn_edge_att': False,
+            },
+        ],
+    },
 }
 
 ALL_EXPERIMENT_NAMES = list(EXPERIMENT_GROUPS.keys())
@@ -388,6 +426,9 @@ def run_one(model_name, fold, variant, experiment_name, seed, cuda_id, data_dir,
     config = get_base_config(model_name, dataset_name, gsat_overrides=variant['gsat_overrides'])
     config['shared_config']['learn_edge_att'] = variant['learn_edge_att']
     config['GSAT_config']['experiment_name'] = experiment_name
+
+    if 'model_overrides' in variant:
+        config['model_config'].update(variant['model_overrides'])
 
     # Resolve motif_scores_path template with dataset and model name
     scores_path = config['GSAT_config'].get('motif_scores_path')

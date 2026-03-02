@@ -20,6 +20,8 @@ class GIN(nn.Module):
         self.use_edge_attr = model_config.get('use_edge_attr', True)
         self.task_type = model_config.get('task_type', 'classification')
         self.skip_node_encoder = model_config.get('skip_node_encoder', False)
+        self.use_l2_norm = model_config.get('use_l2_norm', True)
+        self.use_inter_layer_dropout = model_config.get('use_inter_layer_dropout', False)
 
         self.use_atom_encoder = model_config.get('atom_encoder', False)
         if self.use_atom_encoder:
@@ -50,12 +52,15 @@ class GIN(nn.Module):
                 self.convs.append(GINConv(GIN.MLP(in_dim, hidden_size)))
 
         out_dim = 1 if (self.task_type == 'regression' or (num_class == 2 and not multi_label)) else num_class
-        self.fc_out = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size),
-            nn.ReLU(),
-            nn.Dropout(0.5),
-            nn.Linear(hidden_size, out_dim),
-        )
+        if model_config.get('use_mlp_head', False):
+            self.fc_out = nn.Sequential(
+                nn.Linear(hidden_size, hidden_size),
+                nn.ReLU(),
+                nn.Dropout(0.5),
+                nn.Linear(hidden_size, out_dim),
+            )
+        else:
+            self.fc_out = nn.Sequential(nn.Linear(hidden_size, out_dim))
 
     def forward(self, x, edge_index, batch, edge_attr=None, edge_atten=None):
         if self.use_atom_encoder:
@@ -71,8 +76,11 @@ class GIN(nn.Module):
 
         for i in range(self.n_layers):
             x = self.convs[i](x, edge_index, edge_attr=edge_attr, edge_atten=edge_atten)
-            x = F.normalize(x, p=2, dim=1)
+            if self.use_l2_norm:
+                x = F.normalize(x, p=2, dim=1)
             x = self.relu(x)
+            if self.use_inter_layer_dropout:
+                x = F.dropout(x, p=self.dropout_p, training=self.training)
         return self.fc_out(self.pool(x, batch))
 
     @staticmethod
@@ -98,8 +106,11 @@ class GIN(nn.Module):
 
         for i in range(self.n_layers):
             x = self.convs[i](x, edge_index, edge_attr=edge_attr, edge_atten=edge_atten)
-            x = F.normalize(x, p=2, dim=1)
+            if self.use_l2_norm:
+                x = F.normalize(x, p=2, dim=1)
             x = self.relu(x)
+            if self.use_inter_layer_dropout:
+                x = F.dropout(x, p=self.dropout_p, training=self.training)
         return x
 
     def get_pred_from_emb(self, emb, batch):

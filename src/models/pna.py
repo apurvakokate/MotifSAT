@@ -17,6 +17,8 @@ class PNA(torch.nn.Module):
         self.dropout_p = model_config['dropout_p']
         self.edge_attr_dim = edge_attr_dim
         self.skip_node_encoder = model_config.get('skip_node_encoder', False)
+        self.use_l2_norm = model_config.get('use_l2_norm', True)
+        self.use_inter_layer_dropout = model_config.get('use_inter_layer_dropout', False)
 
         self.use_atom_encoder = model_config.get('atom_encoder', False)
         self.use_edge_attr = model_config.get('use_edge_attr', True)
@@ -36,7 +38,6 @@ class PNA(torch.nn.Module):
                 self.edge_encoder = Linear(edge_attr_dim, hidden_size)
             first_dim = hidden_size
 
-        # Residual projection for first layer when input dim != hidden_size
         if first_dim != hidden_size:
             self.residual_proj = Linear(first_dim, hidden_size)
         else:
@@ -63,12 +64,28 @@ class PNA(torch.nn.Module):
 
         self.pool = global_mean_pool
         out_dim = 1 if num_class == 2 and not multi_label else num_class
-        self.fc_out = Sequential(
-            Linear(hidden_size, hidden_size),
-            ReLU(),
-            torch.nn.Dropout(0.5),
-            Linear(hidden_size, out_dim),
-        )
+        if model_config.get('use_mlp_head', False):
+            self.fc_out = Sequential(
+                Linear(hidden_size, hidden_size),
+                ReLU(),
+                torch.nn.Dropout(0.5),
+                Linear(hidden_size, out_dim),
+            )
+        else:
+            self.fc_out = Sequential(Linear(hidden_size, out_dim))
+
+    def _conv_loop(self, x, edge_index, edge_attr, edge_atten):
+        for i, (conv, batch_norm) in enumerate(zip(self.convs, self.batch_norms)):
+            h = F.relu(batch_norm(conv(x, edge_index, edge_attr, edge_atten=edge_atten)))
+            if i == 0 and self.residual_proj is not None:
+                x = h + self.residual_proj(x)
+            else:
+                x = h + x
+            if self.use_l2_norm:
+                x = F.normalize(x, p=2, dim=1)
+            if self.use_inter_layer_dropout:
+                x = F.dropout(x, p=self.dropout_p, training=self.training)
+        return x
 
     def forward(self, x, edge_index, batch, edge_attr, edge_atten=None):
         if self.use_atom_encoder:
@@ -82,14 +99,7 @@ class PNA(torch.nn.Module):
         if self.node_encoder is not None:
             x = self.node_encoder(x)
 
-        for i, (conv, batch_norm) in enumerate(zip(self.convs, self.batch_norms)):
-            h = F.relu(batch_norm(conv(x, edge_index, edge_attr, edge_atten=edge_atten)))
-            if i == 0 and self.residual_proj is not None:
-                x = h + self.residual_proj(x)
-            else:
-                x = h + x
-            x = F.normalize(x, p=2, dim=1)
-
+        x = self._conv_loop(x, edge_index, edge_attr, edge_atten)
         x = self.pool(x, batch)
         return self.fc_out(x)
 
@@ -105,15 +115,7 @@ class PNA(torch.nn.Module):
         if self.node_encoder is not None:
             x = self.node_encoder(x)
 
-        for i, (conv, batch_norm) in enumerate(zip(self.convs, self.batch_norms)):
-            h = F.relu(batch_norm(conv(x, edge_index, edge_attr, edge_atten=edge_atten)))
-            if i == 0 and self.residual_proj is not None:
-                x = h + self.residual_proj(x)
-            else:
-                x = h + x
-            x = F.normalize(x, p=2, dim=1)
-
-        return x
+        return self._conv_loop(x, edge_index, edge_attr, edge_atten)
 
     def get_pred_from_emb(self, emb, batch):
         return self.fc_out(self.pool(emb, batch))
