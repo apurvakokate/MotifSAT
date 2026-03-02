@@ -15,8 +15,8 @@ Experiment groups (each has its own experiment_name):
   9. motif_readout_score_r_max: Score r with max schedule (global_r until it drops below score_r)
  10. att_injection_point: Node attention injection ablation (W_FEAT / W_MESSAGE / W_READOUT)
      4 variants: feat_only, message_only, readout_only, feat_readout
- 11. arch_ablation_l2_vs_dropout: Isolate L2 norm vs no-dropout architecture changes
-     2 variants: l2_norm_with_dropout (L2 only), no_dropout_no_l2 (no-dropout only)
+ 11. arch_ablation_l2_vs_dropout: 2x2 ablation of L2 norm vs inter-layer dropout
+     4 variants: original_gsat, l2_only, no_dropout_only, both_l2_and_no_dropout
 
 Usage:
   python run_mutagenicity_gsat_experiment.py --experiments r_impact_node r_impact_edge
@@ -343,9 +343,24 @@ EXPERIMENT_GROUPS = {
         'experiment_name': 'arch_ablation_l2_vs_dropout',
         'variants': [
             {
-                'variant_id': 'l2_norm_with_dropout',
+                'variant_id': 'original_gsat',
                 'gsat_overrides': {
-                    'tuning_id': 'l2_norm_with_dropout',
+                    'tuning_id': 'original_gsat',
+                    'final_r': 0.5,
+                    'motif_incorporation_method': None,
+                    'motif_loss_coef': 0,
+                    'between_motif_coef': 0,
+                },
+                'model_overrides': {
+                    'use_l2_norm': False,
+                    'use_inter_layer_dropout': True,
+                },
+                'learn_edge_att': False,
+            },
+            {
+                'variant_id': 'l2_only',
+                'gsat_overrides': {
+                    'tuning_id': 'l2_only',
                     'final_r': 0.5,
                     'motif_incorporation_method': None,
                     'motif_loss_coef': 0,
@@ -358,9 +373,9 @@ EXPERIMENT_GROUPS = {
                 'learn_edge_att': False,
             },
             {
-                'variant_id': 'no_dropout_no_l2',
+                'variant_id': 'no_dropout_only',
                 'gsat_overrides': {
-                    'tuning_id': 'no_dropout_no_l2',
+                    'tuning_id': 'no_dropout_only',
                     'final_r': 0.5,
                     'motif_incorporation_method': None,
                     'motif_loss_coef': 0,
@@ -368,6 +383,21 @@ EXPERIMENT_GROUPS = {
                 },
                 'model_overrides': {
                     'use_l2_norm': False,
+                    'use_inter_layer_dropout': False,
+                },
+                'learn_edge_att': False,
+            },
+            {
+                'variant_id': 'both_l2_and_no_dropout',
+                'gsat_overrides': {
+                    'tuning_id': 'both_l2_and_no_dropout',
+                    'final_r': 0.5,
+                    'motif_incorporation_method': None,
+                    'motif_loss_coef': 0,
+                    'between_motif_coef': 0,
+                },
+                'model_overrides': {
+                    'use_l2_norm': True,
                     'use_inter_layer_dropout': False,
                 },
                 'learn_edge_att': False,
