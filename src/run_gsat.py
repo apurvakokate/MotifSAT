@@ -904,6 +904,7 @@ class GSAT(nn.Module):
         self.separate_motif_model = method_config.get('separate_motif_model', False)
         self.motif_level_info_loss = method_config.get('motif_level_info_loss', False)
         self.motif_level_sampling = method_config.get('motif_level_sampling', False)
+        self.use_raw_score_loss = method_config.get('use_raw_score_loss', False)
         
         # Node attention injection points (only for learn_edge_att=False)
         self.w_feat = method_config.get('w_feat', False)
@@ -940,6 +941,7 @@ class GSAT(nn.Module):
         print(f'[INFO] Separate motif model: {self.separate_motif_model}')
         print(f'[INFO] Motif-level info loss: {self.motif_level_info_loss}')
         print(f'[INFO] Motif-level sampling: {self.motif_level_sampling}')
+        print(f'[INFO] Use raw score loss: {self.use_raw_score_loss}')
         if not self.learn_edge_att:
             print(f'[INFO] Node att injection: W_FEAT={self.w_feat} W_MESSAGE={self.w_message} W_READOUT={self.w_readout}')
         if self.target_k is not None:
@@ -993,6 +995,7 @@ class GSAT(nn.Module):
                 'separate_motif_model': self.separate_motif_model,
                 'motif_level_info_loss': self.motif_level_info_loss,
                 'motif_level_sampling': self.motif_level_sampling,
+                'use_raw_score_loss': self.use_raw_score_loss,
                 'w_feat': self.w_feat,
                 'w_message': self.w_message,
                 'w_readout': self.w_readout,
@@ -1085,7 +1088,8 @@ class GSAT(nn.Module):
         return -np.sum(hist * np.log(hist))
 
     def __loss__(self, att, clf_logits, clf_labels, epoch, nodes_to_motifs, batch,
-                 aux_clf_logits=None, motif_batch=None, motif_ids=None):
+                 aux_clf_logits=None, motif_batch=None, motif_ids=None,
+                 raw_att_for_loss=None):
         """
         Compute the total loss for GSAT training.
         
@@ -1097,9 +1101,9 @@ class GSAT(nn.Module):
             nodes_to_motifs: Node to motif mapping
             batch: Batch assignment for nodes
             aux_clf_logits: (Optional) Auxiliary classifier predictions from motif graph
-                           Only used when motif_method='graph' and train_motif_graph=True
             motif_batch: (Optional) [M] batch assignment for motifs, needed for graph-adaptive r
             motif_ids: (Optional) [M] original motif indices, needed for score-based r
+            raw_att_for_loss: (Optional) sigmoid(logits) before sampling, used when use_raw_score_loss=True
         
         Returns:
             loss: Total loss value
@@ -1131,27 +1135,24 @@ class GSAT(nn.Module):
             r = r_per_motif.clamp(min=0.01, max=0.99).unsqueeze(-1)
         else:
             r = self.fix_r if self.fix_r else self.get_r(self.decay_interval, self.decay_r, epoch, final_r=self.final_r, init_r=self.init_r)
-        info_loss = (att * torch.log(att/r + 1e-6) + (1-att) * torch.log((1-att)/(1-r+1e-6) + 1e-6)).mean()
+        att_for_loss = raw_att_for_loss if raw_att_for_loss is not None else att
+        info_loss = (att_for_loss * torch.log(att_for_loss/r + 1e-6) +
+                     (1-att_for_loss) * torch.log((1-att_for_loss)/(1-r+1e-6) + 1e-6)).mean()
 
         pred_loss = pred_loss * self.pred_loss_coef
         info_loss = info_loss * self.info_loss_coef
         
-        # Compute motif loss only for 'loss' method
-        # within_var: penalizes intra-motif variance (nodes in same motif should agree)
-        # between_var: rewards inter-motif variance (different motifs should differ)
+        # Compute motif within-variance loss for 'loss' method
         has_motif_loss = (self.motif_method == 'loss'
-                         and (self.motif_loss_coef > 0 or self.between_motif_coef > 0)
+                         and self.motif_loss_coef > 0
                          and nodes_to_motifs is not None)
         if has_motif_loss:
-            att_for_consistency = att
-            within_var, between_var = motif_consistency_loss(att_for_consistency, nodes_to_motifs, batch)
+            within_var, _between_var = motif_consistency_loss(att_for_loss, nodes_to_motifs, batch)
             within_term = within_var * self.motif_loss_coef
-            between_term = between_var * self.between_motif_coef
-            motif_loss = within_term - between_term
+            motif_loss = within_term
         else:
             motif_loss = att.new_tensor(0.0)
             within_term = att.new_tensor(0.0)
-            between_term = att.new_tensor(0.0)
         
         loss = pred_loss + info_loss + motif_loss
         
@@ -1160,19 +1161,17 @@ class GSAT(nn.Module):
             'pred': pred_loss.item(), 
             'info': info_loss.item(), 
             'motif_within': within_term.item(),
-            'motif_between': between_term.item(),
             'motif_consistency': motif_loss.item(),
         }
-        
-        # Add auxiliary motif graph loss if applicable
-        # Only for 'graph' method with train_motif_graph=True
-        if self.motif_method == 'graph' and self.train_motif_graph and aux_clf_logits is not None:
-            if not self.multi_label:
-                aux_clf_logits = aux_clf_logits.squeeze(-1)
-            aux_pred_loss = self.criterion(aux_clf_logits, clf_labels) * self.motif_loss_coef
-            loss = loss + aux_pred_loss
-            loss_dict['loss'] = loss.item()
-            loss_dict['motif_graph_loss'] = aux_pred_loss.item()
+
+        # # Auxiliary motif graph loss (commented out for simplification)
+        # if self.motif_method == 'graph' and self.train_motif_graph and aux_clf_logits is not None:
+        #     if not self.multi_label:
+        #         aux_clf_logits = aux_clf_logits.squeeze(-1)
+        #     aux_pred_loss = self.criterion(aux_clf_logits, clf_labels) * self.motif_loss_coef
+        #     loss = loss + aux_pred_loss
+        #     loss_dict['loss'] = loss.item()
+        #     loss_dict['motif_graph_loss'] = aux_pred_loss.item()
         
         return loss, loss_dict
 
@@ -1184,10 +1183,10 @@ class GSAT(nn.Module):
             None: Baseline GSAT (node-level attention, no motif loss)
             'loss': GSAT with motif consistency loss (node-level attention)
             'readout': Motif-level readout (pool embeddings, score motifs, broadcast to nodes)
-            'graph': Motif-level graph (construct motif graph, run GNN on it)
+            'graph': (commented out) Motif-level graph
         """
         # Check for unmapped nodes if using motif incorporation methods
-        needs_motifs = self.motif_method in ['loss', 'readout', 'graph']
+        needs_motifs = self.motif_method in ['loss', 'readout']
         if needs_motifs:
             nodes_to_motifs = getattr(data, 'nodes_to_motifs', None)
             if nodes_to_motifs is None:
@@ -1198,6 +1197,7 @@ class GSAT(nn.Module):
         aux_clf_logits = None  # Auxiliary predictions from motif graph (if applicable)
         motif_batch = None    # Batch assignment for motifs (used for graph-adaptive r)
         motif_ids = None      # Original motif IDs per pooled motif (used for score-based r)
+        raw_att_for_loss = None  # sigmoid(logits) before sampling, used when use_raw_score_loss=True
 
         if self.motif_method in [None, 'loss']:
             # =================================================================
@@ -1206,6 +1206,8 @@ class GSAT(nn.Module):
             emb = self.clf.get_emb(data.x, data.edge_index, batch=data.batch, edge_attr=data.edge_attr)
             att_log_logits = self.extractor(emb, data.edge_index, data.batch)
             att = self.sampling(att_log_logits, epoch, training)
+            if self.use_raw_score_loss:
+                raw_att_for_loss = att_log_logits.sigmoid()
 
             if self.learn_edge_att:
                 if is_undirected(data.edge_index):
@@ -1248,59 +1250,46 @@ class GSAT(nn.Module):
                 motif_att = self.sampling(motif_att_log_logits, epoch, training)
                 node_att = lift_motif_att_to_node_att(motif_att, inverse_indices)
                 att = motif_att if self.motif_level_info_loss else node_att
+                if self.use_raw_score_loss:
+                    raw_motif = motif_att_log_logits.sigmoid()
+                    raw_att_for_loss = raw_motif if self.motif_level_info_loss else \
+                        lift_motif_att_to_node_att(raw_motif, inverse_indices)
             else:
                 # Lift motif logits to node level, then follow base GSAT node-level sampling
                 node_att_log_logits = lift_motif_att_to_node_att(motif_att_log_logits, inverse_indices)
                 node_att = self.sampling(node_att_log_logits, epoch, training)
                 att = node_att
+                if self.use_raw_score_loss:
+                    raw_att_for_loss = node_att_log_logits.sigmoid()
 
             edge_att = self.lift_node_att_to_edge_att(node_att, data.edge_index)
             clf_logits = self.clf(data.x, data.edge_index, data.batch, edge_attr=data.edge_attr, edge_atten=edge_att)
             
-        elif self.motif_method == 'graph':
-            # =================================================================
-            # GRAPH METHOD: Construct and process motif-level graph
-            # =================================================================
-            nodes_to_motifs = getattr(data, 'nodes_to_motifs', None)
-            if nodes_to_motifs is None:
-                raise ValueError("'graph' method requires nodes_to_motifs attribute in data")
-            # Step 1: Construct motif graph
-            motif_x, motif_edge_index, motif_edge_attr, motif_batch, motif_ids, inverse_indices = \
-                construct_motif_graph(data.x, data.edge_index, data.edge_attr, nodes_to_motifs, data.batch)
-            
-            # Step 2: Get motif embeddings from GNN on motif graph
-            # Use separate model if configured, otherwise use shared model
-            if self.separate_motif_model and self.motif_clf is not None:
-                motif_emb = self.motif_clf.get_emb(motif_x, motif_edge_index, batch=motif_batch, edge_attr=motif_edge_attr)
-            else:
-                motif_emb = self.clf.get_emb(motif_x, motif_edge_index, batch=motif_batch, edge_attr=motif_edge_attr)
-            
-            # Step 3: Get motif attention scores
-            motif_att_log_logits = self.extractor(motif_emb, motif_edge_index, motif_batch)
-            motif_att = self.sampling(motif_att_log_logits, epoch, training)
-            
-            # Step 4: Map motif attention to edge attention on ORIGINAL graph
-            edge_att = map_motif_att_to_edge_att(motif_att, data.edge_index, inverse_indices)
-            
-            # Step 5: Run classifier on ORIGINAL graph with motif-derived edge attention
-            clf_logits = self.clf(data.x, data.edge_index, data.batch, edge_attr=data.edge_attr, edge_atten=edge_att)
-            
-            # Step 6: Optionally also train classifier on motif graph (auxiliary loss)
-            if self.train_motif_graph:
-                # Create motif-level edge attention for motif graph
-                motif_src, motif_dst = motif_edge_index
-                motif_edge_att = motif_att[motif_src] * motif_att[motif_dst]
-                
-                # Run classifier on motif graph (use motif_clf if separate, else clf)
-                if self.separate_motif_model and self.motif_clf is not None:
-                    aux_clf_logits = self.motif_clf(motif_x, motif_edge_index, motif_batch, 
-                                                    edge_attr=motif_edge_attr, edge_atten=motif_edge_att)
-                else:
-                    aux_clf_logits = self.clf(motif_x, motif_edge_index, motif_batch, 
-                                             edge_attr=motif_edge_attr, edge_atten=motif_edge_att)
-            
-            # Use motif attention for loss computation
-            att = motif_att
+        # # GRAPH METHOD (commented out for simplification)
+        # elif self.motif_method == 'graph':
+        #     nodes_to_motifs = getattr(data, 'nodes_to_motifs', None)
+        #     if nodes_to_motifs is None:
+        #         raise ValueError("'graph' method requires nodes_to_motifs attribute in data")
+        #     motif_x, motif_edge_index, motif_edge_attr, motif_batch, motif_ids, inverse_indices = \
+        #         construct_motif_graph(data.x, data.edge_index, data.edge_attr, nodes_to_motifs, data.batch)
+        #     if self.separate_motif_model and self.motif_clf is not None:
+        #         motif_emb = self.motif_clf.get_emb(motif_x, motif_edge_index, batch=motif_batch, edge_attr=motif_edge_attr)
+        #     else:
+        #         motif_emb = self.clf.get_emb(motif_x, motif_edge_index, batch=motif_batch, edge_attr=motif_edge_attr)
+        #     motif_att_log_logits = self.extractor(motif_emb, motif_edge_index, motif_batch)
+        #     motif_att = self.sampling(motif_att_log_logits, epoch, training)
+        #     edge_att = map_motif_att_to_edge_att(motif_att, data.edge_index, inverse_indices)
+        #     clf_logits = self.clf(data.x, data.edge_index, data.batch, edge_attr=data.edge_attr, edge_atten=edge_att)
+        #     if self.train_motif_graph:
+        #         motif_src, motif_dst = motif_edge_index
+        #         motif_edge_att = motif_att[motif_src] * motif_att[motif_dst]
+        #         if self.separate_motif_model and self.motif_clf is not None:
+        #             aux_clf_logits = self.motif_clf(motif_x, motif_edge_index, motif_batch,
+        #                                             edge_attr=motif_edge_attr, edge_atten=motif_edge_att)
+        #         else:
+        #             aux_clf_logits = self.clf(motif_x, motif_edge_index, motif_batch,
+        #                                      edge_attr=motif_edge_attr, edge_atten=motif_edge_att)
+        #     att = motif_att
         
         else:
             raise ValueError(f"Unknown motif_incorporation_method: {self.motif_method}")
@@ -1309,7 +1298,7 @@ class GSAT(nn.Module):
         nodes_to_motifs = getattr(data, 'nodes_to_motifs', None)
         loss, loss_dict = self.__loss__(att, clf_logits, data.y, epoch, nodes_to_motifs, data.batch,
                                         aux_clf_logits=aux_clf_logits, motif_batch=motif_batch,
-                                        motif_ids=motif_ids)
+                                        motif_ids=motif_ids, raw_att_for_loss=raw_att_for_loss)
         return edge_att, loss, loss_dict, clf_logits
 
     @torch.no_grad()
@@ -2595,6 +2584,8 @@ def main():
     parser.add_argument('--motif_level_sampling', action='store_true', default=False,
                         help='For motif_method=readout: sample at motif level then broadcast to nodes. '
                              'Default (False): lift motif logits to nodes, sample per-node like base GSAT.')
+    parser.add_argument('--use_raw_score_loss', action='store_true', default=False,
+                        help='Use sigmoid(logits) before sampling for info_loss and motif_consistency_loss.')
     parser.add_argument('--w_feat', action='store_true', default=False,
                         help='Weight node features by attention before message passing (learn_edge_att=False only).')
     parser.add_argument('--w_message', action='store_true', default=True,
@@ -2673,6 +2664,9 @@ def main():
         local_config['GSAT_config']['motif_level_sampling'] = True
     elif 'motif_level_sampling' not in local_config['GSAT_config']:
         local_config['GSAT_config']['motif_level_sampling'] = False
+
+    if 'use_raw_score_loss' not in local_config['GSAT_config']:
+        local_config['GSAT_config']['use_raw_score_loss'] = args.use_raw_score_loss
 
     if 'w_feat' not in local_config['GSAT_config']:
         local_config['GSAT_config']['w_feat'] = args.w_feat
