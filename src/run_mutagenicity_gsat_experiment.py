@@ -67,7 +67,7 @@ EXPERIMENT_GROUPS = {
                     'motif_incorporation_method': None,
                     'motif_loss_coef': 0,
                 },
-                'learn_edge_att': True,
+                'learn_edge_att': False,
             },
         ],
     },
@@ -83,7 +83,7 @@ EXPERIMENT_GROUPS = {
                     'motif_incorporation_method': None,
                     'motif_loss_coef': 0,
                 },
-                'learn_edge_att': True,
+                'learn_edge_att': False,
             }
             for r in [1.0, 0.9, 0.8, 0.7, 0.6, 0.5]
         ],
@@ -102,7 +102,7 @@ EXPERIMENT_GROUPS = {
                     'motif_incorporation_method': None,
                     'motif_loss_coef': 0,
                 },
-                'learn_edge_att': True,
+                'learn_edge_att': False,
             }
             for fr in [1.0, 0.9, 0.8, 0.7, 0.6, 0.5]
         ],

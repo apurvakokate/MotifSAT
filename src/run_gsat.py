@@ -2484,6 +2484,7 @@ def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_nam
                 'tuning_id': tuning_id,
                 'experiment_name': experiment_name,
                 **local_config.get('GSAT_config', {}),
+                **local_config.get('shared_config', {}),
                 **local_config.get('model_config', {})
             },
             reinit=True
