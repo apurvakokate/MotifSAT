@@ -33,51 +33,51 @@ import pandas as pd
 # MOTIF INCORPORATION HELPER FUNCTIONS
 # =============================================================================
 
-def load_motif_scores_as_r(csv_path, fold, motif_list):
-    """
-    Load pre-computed motif importance scores from CSV and build an r-value
-    tensor indexed by motif ID.
+# def load_motif_scores_as_r(csv_path, fold, motif_list):
+#     """
+#     Load pre-computed motif importance scores from CSV and build an r-value
+#     tensor indexed by motif ID.
 
-    Args:
-        csv_path: Path to the motif scores CSV (columns: dataset, motif string,
-                  fold_0, fold_1, ..., fold_4).
-        fold: Current fold number (0-4). Used to pick the fold-specific column;
-              if a value is missing, the mean across available folds is used.
-        motif_list: List of motif strings where motif_list[i] is the SMILES for
-                    motif index i (loaded from *_motif_list.pickle).
+#     Args:
+#         csv_path: Path to the motif scores CSV (columns: dataset, motif string,
+#                   fold_0, fold_1, ..., fold_4).
+#         fold: Current fold number (0-4). Used to pick the fold-specific column;
+#               if a value is missing, the mean across available folds is used.
+#         motif_list: List of motif strings where motif_list[i] is the SMILES for
+#                     motif index i (loaded from *_motif_list.pickle).
 
-    Returns:
-        motif_r: FloatTensor of shape [len(motif_list)] mapping motif_id -> r value.
-    """
-    df = pd.read_csv(csv_path)
+#     Returns:
+#         motif_r: FloatTensor of shape [len(motif_list)] mapping motif_id -> r value.
+#     """
+#     df = pd.read_csv(csv_path)
 
-    fold_cols = [c for c in df.columns if c.startswith('fold_')]
-    fold_col = f'fold_{fold}'
+#     fold_cols = [c for c in df.columns if c.startswith('fold_')]
+#     fold_col = f'fold_{fold}'
 
-    # Build motif_string -> r mapping
-    score_map = {}
-    unk_r = 0.5  # fallback if UNK row is also missing
-    for _, row in df.iterrows():
-        motif_str = str(row['motif string']).strip()
-        if fold_col in df.columns and pd.notna(row.get(fold_col)):
-            r_val = float(row[fold_col])
-        else:
-            vals = [float(row[c]) for c in fold_cols if pd.notna(row.get(c))]
-            r_val = float(np.mean(vals)) if vals else 0.5
-        score_map[motif_str] = r_val
-        if motif_str == 'UNK':
-            unk_r = r_val
+#     # Build motif_string -> r mapping
+#     score_map = {}
+#     unk_r = 0.5  # fallback if UNK row is also missing
+#     for _, row in df.iterrows():
+#         motif_str = str(row['motif string']).strip()
+#         if fold_col in df.columns and pd.notna(row.get(fold_col)):
+#             r_val = float(row[fold_col])
+#         else:
+#             vals = [float(row[c]) for c in fold_cols if pd.notna(row.get(c))]
+#             r_val = float(np.mean(vals)) if vals else 0.5
+#         score_map[motif_str] = r_val
+#         if motif_str == 'UNK':
+#             unk_r = r_val
 
-    motif_r = torch.full((len(motif_list),), unk_r, dtype=torch.float)
-    for idx, motif_str in enumerate(motif_list):
-        if motif_str in score_map:
-            motif_r[idx] = score_map[motif_str]
+#     motif_r = torch.full((len(motif_list),), unk_r, dtype=torch.float)
+#     for idx, motif_str in enumerate(motif_list):
+#         if motif_str in score_map:
+#             motif_r[idx] = score_map[motif_str]
 
-    motif_r = motif_r.clamp(min=0.01, max=0.99)
-    print(f'[INFO] Loaded motif scores from {csv_path} (fold={fold})')
-    print(f'[INFO]   {len(score_map)} motifs in CSV, {len(motif_list)} in vocabulary, UNK r={unk_r:.4f}')
-    print(f'[INFO]   r range: [{motif_r.min().item():.4f}, {motif_r.max().item():.4f}]')
-    return motif_r
+#     motif_r = motif_r.clamp(min=0.01, max=0.99) #Todo: Is this needed?
+#     print(f'[INFO] Loaded motif scores from {csv_path} (fold={fold})')
+#     print(f'[INFO]   {len(score_map)} motifs in CSV, {len(motif_list)} in vocabulary, UNK r={unk_r:.4f}')
+#     print(f'[INFO]   r range: [{motif_r.min().item():.4f}, {motif_r.max().item():.4f}]')
+#     return motif_r
 
 
 def check_no_unmapped_nodes(nodes_to_motifs):
@@ -906,6 +906,12 @@ class GSAT(nn.Module):
         self.motif_level_sampling = method_config.get('motif_level_sampling', False)
         self.use_raw_score_loss = method_config.get('use_raw_score_loss', False)
         
+        # Vanilla GNN mode: bypass attention entirely
+        self.no_attention = method_config.get('no_attention', False)
+        if self.no_attention:
+            self.info_loss_coef = 0
+            self.motif_loss_coef = 0
+
         # Node attention injection points (only for learn_edge_att=False)
         self.w_feat = method_config.get('w_feat', False)
         self.w_message = method_config.get('w_message', True)
@@ -917,14 +923,14 @@ class GSAT(nn.Module):
         # None: fixed score-based r from epoch 0
         self.score_r_schedule = method_config.get('score_r_schedule', None)
         
-        # Score-based per-motif r: load pre-computed motif importance scores
-        motif_scores_path = method_config.get('motif_scores_path', None)
-        if motif_scores_path is not None and motif_list is not None:
-            self.motif_r_values = load_motif_scores_as_r(motif_scores_path, fold, motif_list).to(device)
-        else:
-            self.motif_r_values = None
-            if motif_scores_path is not None and motif_list is None:
-                print(f'[WARNING] motif_scores_path set but motif_list not provided — score-based r disabled')
+        # # Score-based per-motif r: load pre-computed motif importance scores
+        # motif_scores_path = method_config.get('motif_scores_path', None)
+        # if motif_scores_path is not None and motif_list is not None:
+        #     self.motif_r_values = load_motif_scores_as_r(motif_scores_path, fold, motif_list).to(device)
+        # else:
+        #     self.motif_r_values = None
+        #     if motif_scores_path is not None and motif_list is None:
+        #         print(f'[WARNING] motif_scores_path set but motif_list not provided — score-based r disabled')
         
         # If method is None (baseline), disable motif loss automatically
         if self.motif_method is None:
@@ -936,6 +942,7 @@ class GSAT(nn.Module):
             # when train_motif_graph=True (only applicable for 'graph' method)
             pass
         
+        print(f'[INFO] No attention (vanilla GNN): {self.no_attention}')
         print(f'[INFO] Motif incorporation method: {self.motif_method}')
         print(f'[INFO] Train motif graph: {self.train_motif_graph}')
         print(f'[INFO] Separate motif model: {self.separate_motif_model}')
@@ -946,8 +953,8 @@ class GSAT(nn.Module):
             print(f'[INFO] Node att injection: W_FEAT={self.w_feat} W_MESSAGE={self.w_message} W_READOUT={self.w_readout}')
         if self.target_k is not None:
             print(f'[INFO] Graph-adaptive r: target_k={self.target_k} (r_g = {self.target_k} / M_g)')
-        if self.motif_r_values is not None:
-            print(f'[INFO] Score-based per-motif r: loaded {len(self.motif_r_values)} values')
+        # if self.motif_r_values is not None:
+        #     print(f'[INFO] Score-based per-motif r: loaded {len(self.motif_r_values)} values')
         
         # Create deterministic directory for saving scores (NO TIMESTAMP!)
         tuning_id = method_config.get('tuning_id', 'default')
@@ -990,6 +997,7 @@ class GSAT(nn.Module):
             'experiment_name': experiment_name,
             'tuning_id': tuning_id,
             'motif_incorporation': {
+                'no_attention': self.no_attention,
                 'method': self.motif_method,
                 'train_motif_graph': self.train_motif_graph,
                 'separate_motif_model': self.separate_motif_model,
@@ -1114,27 +1122,27 @@ class GSAT(nn.Module):
         
         pred_loss = self.criterion(clf_logits, clf_labels)
 
-        if self.motif_r_values is not None and motif_ids is not None:
-            score_r = self.motif_r_values[motif_ids].unsqueeze(-1)
-            if self.score_r_schedule == 'interpolate':
-                # Blend from init_r → score_r using the same decay timing as standard GSAT
-                global_r = self.fix_r if self.fix_r else self.get_r(self.decay_interval, self.decay_r, epoch, final_r=self.final_r, init_r=self.init_r)
-                alpha = (global_r - self.final_r) / max(self.init_r - self.final_r, 1e-8)
-                r = alpha * self.init_r + (1 - alpha) * score_r
-            elif self.score_r_schedule == 'max':
-                # Use standard decaying r until it drops below the motif's score
-                global_r = self.fix_r if self.fix_r else self.get_r(self.decay_interval, self.decay_r, epoch, final_r=self.final_r, init_r=self.init_r)
-                r = torch.clamp(score_r, min=global_r)
-            else:
-                r = score_r
-        elif self.target_k is not None and motif_batch is not None:
-            # Graph-adaptive r: r_g = target_k / M_g for each graph g
-            motifs_per_graph = scatter(torch.ones_like(motif_batch, dtype=att.dtype),
-                                       motif_batch, dim=0, reduce='sum')
-            r_per_motif = self.target_k / motifs_per_graph[motif_batch]
-            r = r_per_motif.clamp(min=0.01, max=0.99).unsqueeze(-1)
-        else:
-            r = self.fix_r if self.fix_r else self.get_r(self.decay_interval, self.decay_r, epoch, final_r=self.final_r, init_r=self.init_r)
+        # if self.motif_r_values is not None and motif_ids is not None:
+        #     score_r = self.motif_r_values[motif_ids].unsqueeze(-1)
+        #     if self.score_r_schedule == 'interpolate':
+        #         # Blend from init_r → score_r using the same decay timing as standard GSAT
+        #         global_r = self.fix_r if self.fix_r else self.get_r(self.decay_interval, self.decay_r, epoch, final_r=self.final_r, init_r=self.init_r)
+        #         alpha = (global_r - self.final_r) / max(self.init_r - self.final_r, 1e-8)
+        #         r = alpha * self.init_r + (1 - alpha) * score_r
+        #     elif self.score_r_schedule == 'max':
+        #         # Use standard decaying r until it drops below the motif's score
+        #         global_r = self.fix_r if self.fix_r else self.get_r(self.decay_interval, self.decay_r, epoch, final_r=self.final_r, init_r=self.init_r)
+        #         r = torch.clamp(score_r, min=global_r)
+        #     else:
+        #         r = score_r
+        # elif self.target_k is not None and motif_batch is not None:
+        #     # Graph-adaptive r: r_g = target_k / M_g for each graph g
+        #     motifs_per_graph = scatter(torch.ones_like(motif_batch, dtype=att.dtype),
+        #                                motif_batch, dim=0, reduce='sum')
+        #     r_per_motif = self.target_k / motifs_per_graph[motif_batch]
+        #     r = r_per_motif.clamp(min=0.01, max=0.99).unsqueeze(-1)
+        # else:
+        r = self.fix_r if self.fix_r else self.get_r(self.decay_interval, self.decay_r, epoch, final_r=self.final_r, init_r=self.init_r)
         att_for_loss = raw_att_for_loss if raw_att_for_loss is not None else att
         info_loss = (att_for_loss * torch.log(att_for_loss/r + 1e-6) +
                      (1-att_for_loss) * torch.log((1-att_for_loss)/(1-r+1e-6) + 1e-6)).mean()
@@ -1185,6 +1193,20 @@ class GSAT(nn.Module):
             'readout': Motif-level readout (pool embeddings, score motifs, broadcast to nodes)
             'graph': (commented out) Motif-level graph
         """
+        # Vanilla GNN: bypass attention entirely
+        if self.no_attention:
+            clf_logits = self.clf(data.x, data.edge_index, data.batch,
+                                 edge_attr=data.edge_attr, edge_atten=None)
+            if self.learn_edge_att:
+                edge_att = torch.ones(data.edge_index.size(1), 1, device=data.x.device)
+            else:
+                edge_att = torch.ones(data.x.size(0), 1, device=data.x.device)
+            pred_loss = self.criterion(clf_logits, data.y)
+            loss = self.pred_loss_coef * pred_loss
+            loss_dict = {'loss': loss.item(), 'pred': pred_loss.item(), 'info': 0.0,
+                        'motif_within': 0.0, 'motif_consistency': 0.0}
+            return edge_att, loss, loss_dict, clf_logits
+
         # Check for unmapped nodes if using motif incorporation methods
         needs_motifs = self.motif_method in ['loss', 'readout']
         if needs_motifs:
@@ -2606,6 +2628,8 @@ def main():
                         help='Disable message weighting by attention.')
     parser.add_argument('--w_readout', action='store_true', default=False,
                         help='Weight node embeddings by attention at readout before pooling (learn_edge_att=False only).')
+    parser.add_argument('--no_attention', action='store_true', default=False,
+                        help='Vanilla GNN mode: bypass attention entirely, run classifier with edge_atten=None.')
     parser.add_argument('--target_k', type=float, default=None,
                         help='Graph-adaptive r: r_g = target_k / M_g (expected number of important motifs per graph). '
                              'Overrides fix_r/final_r for motif-level methods.')
@@ -2679,6 +2703,9 @@ def main():
 
     if 'use_raw_score_loss' not in local_config['GSAT_config']:
         local_config['GSAT_config']['use_raw_score_loss'] = args.use_raw_score_loss
+
+    if 'no_attention' not in local_config['GSAT_config']:
+        local_config['GSAT_config']['no_attention'] = args.no_attention
 
     if 'w_feat' not in local_config['GSAT_config']:
         local_config['GSAT_config']['w_feat'] = args.w_feat

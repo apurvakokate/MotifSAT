@@ -1,31 +1,27 @@
 #!/usr/bin/env python
 """
-Run GSAT on Mutagenicity with structured experiment groups.
+Run GSAT on molecular datasets with structured experiment groups.
 
-Experiment groups (each has its own experiment_name):
-  1. r_impact_node:  Base GSAT, node attention, varying final_r in {0.4, 0.5, 0.6}
-  2. r_impact_edge:  Base GSAT, edge attention, varying final_r in {0.4, 0.5, 0.6}
-  3. within_motif_consistency_impact:  Node attention, motif_loss_coef in {1.0, 2.0}
-  4. between_motif_consistency_impact: Node attention, motif_loss_coef=1.0, between_motif_coef in {1.0, 2.0}
-  5. motif_readout_info_loss: Motif readout with node-level perturbation (r=0.5, learn_edge_att=False)
-     (motif_level_sampling=False: lift motif logits to nodes, sample per-node)
-  6. motif_readout_adaptive_r: Motif readout with graph-adaptive r (target_k in {1, 2})
-  7. motif_readout_score_r_by_dataset_model: Motif readout with fixed per-motif score r (no decay)
-  8. motif_readout_score_r_interpolate: Score r with interpolation (init_r → score_r over decay)
-  9. motif_readout_score_r_max: Score r with max schedule (global_r until it drops below score_r)
- 10. att_injection_point: Node attention injection ablation (W_FEAT / W_MESSAGE / W_READOUT)
-     4 variants: feat_only, message_only, readout_only, feat_readout
- 11. arch_ablation_l2_vs_dropout: 2x2 ablation of L2 norm vs inter-layer dropout
-     4 variants: original_gsat, l2_only, no_dropout_only, both_l2_and_no_dropout
- 12. base_gsat_clean: Base GSAT with clean model config (no dropout, no L2, no MLP head,
-     skip node encoder, no edge attr). Run across Mutagenicity/BBBP/Benzene/hERG.
- 13. base_gsat_w_injection: Same as base_gsat_clean but with W flag ablation (4 variants)
- 14. readout_w_injection: Motif readout + W flag ablation (4 variants)
+Experiment groups:
+  1. vanilla_gnn: No attention weighting (true vanilla GNN baseline)
+  2. base_gsat_fix_r: GSAT with fixed r values {1.0, 0.9, 0.8, 0.7, 0.6, 0.5}
+  3. base_gsat_decay_r: GSAT with decay schedule, final_r in {1.0, 0.9, 0.8, 0.7, 0.6, 0.5}
+  4. motif_readout_fix_r: Motif-level readout with fixed r {1.0, 0.9, 0.8, 0.7}
+     (only for datasets with motif info: Mutagenicity, Benzene, etc.)
+
+  Legacy groups (kept for reference):
+  5. r_impact_node: Base GSAT node attention, varying final_r
+  6. r_impact_edge: Base GSAT edge attention, varying final_r
+  7. within_motif_consistency_impact: Motif consistency loss ablation
+  8. between_motif_consistency_impact: Between-motif consistency loss ablation
+  9. motif_readout_info_loss: Motif readout with node-level perturbation
+  10. motif_readout_adaptive_r: Motif readout with graph-adaptive r
+  11. att_injection_point: W_FEAT / W_MESSAGE / W_READOUT ablation
 
 Usage:
-  python run_mutagenicity_gsat_experiment.py --experiments r_impact_node r_impact_edge
-  python run_mutagenicity_gsat_experiment.py --experiments within_motif_consistency_impact between_motif_consistency_impact
-  python run_mutagenicity_gsat_experiment.py  # runs all 4
+  python run_mutagenicity_gsat_experiment.py --experiments vanilla_gnn base_gsat_fix_r
+  python run_mutagenicity_gsat_experiment.py --dataset ogbg_molhiv --experiments vanilla_gnn base_gsat_fix_r
+  python run_mutagenicity_gsat_experiment.py  # runs all groups
 """
 
 import os
@@ -40,122 +36,135 @@ import torch
 from experiment_configs import get_base_config, ARCHITECTURES
 from utils import set_seed
 
-SUPPORTED_DATASETS = ['Mutagenicity', 'BBBP', 'hERG', 'Benzene', 'Alkane_Carbonyl', 'Fluoride_Carbonyl']
-DATASET = 'Mutagenicity'  # default, overridden by --dataset CLI arg
+SUPPORTED_DATASETS = [
+    'Mutagenicity', 'BBBP', 'hERG', 'Benzene',
+    'Alkane_Carbonyl', 'Fluoride_Carbonyl',
+    'ogbg_molhiv',
+]
+DATASETS_WITH_MOTIFS = ['Mutagenicity', 'BBBP', 'hERG', 'Benzene', 'Alkane_Carbonyl', 'Fluoride_Carbonyl']
+DATASET = 'Mutagenicity'
 MOTIF_SCORES_TEMPLATE = '/nfs/stak/users/kokatea/hpc-share/ChemIntuit/MOSE-GNN/All0.5_learn_unk+motif_scores/{dataset}_{model}_motif_scores.csv'
 
 # ---------------------------------------------------------------------------
 # Experiment group definitions
-# Each group is a dict with:
-#   experiment_name: str  (used in results path)
-#   variants: list of dicts, each with:
-#       variant_id: str (tuning_id)
-#       gsat_overrides: dict
-#       learn_edge_att: bool
-#       model_overrides: dict (optional, merged into model_config)
 # ---------------------------------------------------------------------------
 
-# Shared model overrides: no dropout, no L2, basic clf head, skip node encoder
-_CLEAN_MODEL = {
-    'use_l2_norm': False,
-    'use_inter_layer_dropout': False,
-    'use_mlp_head': False,
-}
-
 EXPERIMENT_GROUPS = {
-    'r_impact_node_no_encoder_2_linear_clf': {
-        'experiment_name': 'r_impact_node_no_encoder_2_linear_clf',
+
+    # =========================================================================
+    # NEW: Incremental R-value sweep experiments
+    # =========================================================================
+
+    'vanilla_gnn': {
+        'experiment_name': 'vanilla_gnn',
         'variants': [
             {
-                'variant_id': 'node_r0.5',
+                'variant_id': 'no_attention',
                 'gsat_overrides': {
-                    'tuning_id': 'node_r0.5',
-                    'final_r': 0.5,
+                    'tuning_id': 'no_attention',
+                    'no_attention': True,
+                    'info_loss_coef': 0,
                     'motif_incorporation_method': None,
                     'motif_loss_coef': 0,
-                    'between_motif_coef': 0,
                 },
-                'learn_edge_att': False,
+                'learn_edge_att': True,
             },
         ],
-
     },
+
+    'base_gsat_fix_r': {
+        'experiment_name': 'base_gsat_fix_r',
+        'variants': [
+            {
+                'variant_id': f'fix_r{r}',
+                'gsat_overrides': {
+                    'tuning_id': f'fix_r{r}',
+                    'fix_r': r,
+                    'motif_incorporation_method': None,
+                    'motif_loss_coef': 0,
+                },
+                'learn_edge_att': True,
+            }
+            for r in [1.0, 0.9, 0.8, 0.7, 0.6, 0.5]
+        ],
+    },
+
+    'base_gsat_decay_r': {
+        'experiment_name': 'base_gsat_decay_r',
+        'variants': [
+            {
+                'variant_id': f'decay_final{fr}',
+                'gsat_overrides': {
+                    'tuning_id': f'decay_final{fr}',
+                    'fix_r': False,
+                    'init_r': 0.9,
+                    'final_r': fr,
+                    'motif_incorporation_method': None,
+                    'motif_loss_coef': 0,
+                },
+                'learn_edge_att': True,
+            }
+            for fr in [1.0, 0.9, 0.8, 0.7, 0.6, 0.5]
+        ],
+    },
+
+    'motif_readout_fix_r': {
+        'experiment_name': 'motif_readout_fix_r',
+        'variants': [
+            {
+                'variant_id': f'readout_fix_r{r}',
+                'gsat_overrides': {
+                    'tuning_id': f'readout_fix_r{r}',
+                    'fix_r': r,
+                    'motif_incorporation_method': 'readout',
+                    'motif_loss_coef': 0,
+                },
+                'learn_edge_att': False,
+            }
+            for r in [1.0, 0.9, 0.8, 0.7]
+        ],
+    },
+
+    # =========================================================================
+    # Legacy experiments (kept for reference, still functional)
+    # =========================================================================
+
     'r_impact_node': {
         'experiment_name': 'r_impact_node',
         'variants': [
             {
-                'variant_id': 'node_r0.4',
+                'variant_id': f'node_r{r}',
                 'gsat_overrides': {
-                    'tuning_id': 'node_r0.4',
-                    'final_r': 0.4,
+                    'tuning_id': f'node_r{r}',
+                    'final_r': r,
                     'motif_incorporation_method': None,
                     'motif_loss_coef': 0,
                     'between_motif_coef': 0,
                 },
                 'learn_edge_att': False,
-            },
-            {
-                'variant_id': 'node_r0.5',
-                'gsat_overrides': {
-                    'tuning_id': 'node_r0.5',
-                    'final_r': 0.5,
-                    'motif_incorporation_method': None,
-                    'motif_loss_coef': 0,
-                    'between_motif_coef': 0,
-                },
-                'learn_edge_att': False,
-            },
-            {
-                'variant_id': 'node_r0.6',
-                'gsat_overrides': {
-                    'tuning_id': 'node_r0.6',
-                    'final_r': 0.6,
-                    'motif_incorporation_method': None,
-                    'motif_loss_coef': 0,
-                    'between_motif_coef': 0,
-                },
-                'learn_edge_att': False,
-            },
+            }
+            for r in [0.4, 0.5, 0.6]
         ],
     },
+
     'r_impact_edge': {
         'experiment_name': 'r_impact_edge',
         'variants': [
             {
-                'variant_id': 'edge_r0.4',
+                'variant_id': f'edge_r{r}',
                 'gsat_overrides': {
-                    'tuning_id': 'edge_r0.4',
-                    'final_r': 0.4,
+                    'tuning_id': f'edge_r{r}',
+                    'final_r': r,
                     'motif_incorporation_method': None,
                     'motif_loss_coef': 0,
                     'between_motif_coef': 0,
                 },
                 'learn_edge_att': True,
-            },
-            {
-                'variant_id': 'edge_r0.5',
-                'gsat_overrides': {
-                    'tuning_id': 'edge_r0.5',
-                    'final_r': 0.5,
-                    'motif_incorporation_method': None,
-                    'motif_loss_coef': 0,
-                    'between_motif_coef': 0,
-                },
-                'learn_edge_att': True,
-            },
-            {
-                'variant_id': 'edge_r0.6',
-                'gsat_overrides': {
-                    'tuning_id': 'edge_r0.6',
-                    'final_r': 0.6,
-                    'motif_incorporation_method': None,
-                    'motif_loss_coef': 0,
-                    'between_motif_coef': 0,
-                },
-                'learn_edge_att': True,
-            },
+            }
+            for r in [0.4, 0.5, 0.6]
         ],
     },
+
     'within_motif_consistency_impact': {
         'experiment_name': 'within_motif_consistency_impact',
         'variants': [
@@ -181,6 +190,7 @@ EXPERIMENT_GROUPS = {
             },
         ],
     },
+
     'between_motif_consistency_impact': {
         'experiment_name': 'between_motif_consistency_impact',
         'variants': [
@@ -206,6 +216,7 @@ EXPERIMENT_GROUPS = {
             },
         ],
     },
+
     'motif_readout_info_loss': {
         'experiment_name': 'motif_readout_info_loss',
         'variants': [
@@ -223,6 +234,7 @@ EXPERIMENT_GROUPS = {
             },
         ],
     },
+
     'motif_readout_adaptive_r': {
         'experiment_name': 'motif_readout_adaptive_r',
         'variants': [
@@ -252,59 +264,7 @@ EXPERIMENT_GROUPS = {
             },
         ],
     },
-    'motif_readout_score_r_by_dataset_model': {
-        'experiment_name': 'motif_readout_score_r_by_dataset_model',
-        'variants': [
-            {
-                'variant_id': 'readout_score_r',
-                'gsat_overrides': {
-                    'tuning_id': 'readout_score_r',
-                    'motif_incorporation_method': 'readout',
-                    'motif_level_info_loss': True,
-                    'motif_scores_path': MOTIF_SCORES_TEMPLATE,
-                    'motif_loss_coef': 0,
-                    'between_motif_coef': 0,
-                },
-                'learn_edge_att': False,
-            },
-        ],
-    },
-    'motif_readout_score_r_interpolate': {
-        'experiment_name': 'motif_readout_score_r_interpolate',
-        'variants': [
-            {
-                'variant_id': 'readout_score_r_interp',
-                'gsat_overrides': {
-                    'tuning_id': 'readout_score_r_interp',
-                    'motif_incorporation_method': 'readout',
-                    'motif_level_info_loss': True,
-                    'motif_scores_path': MOTIF_SCORES_TEMPLATE,
-                    'score_r_schedule': 'interpolate',
-                    'motif_loss_coef': 0,
-                    'between_motif_coef': 0,
-                },
-                'learn_edge_att': False,
-            },
-        ],
-    },
-    'motif_readout_score_r_max': {
-        'experiment_name': 'motif_readout_score_r_max',
-        'variants': [
-            {
-                'variant_id': 'readout_score_r_max',
-                'gsat_overrides': {
-                    'tuning_id': 'readout_score_r_max',
-                    'motif_incorporation_method': 'readout',
-                    'motif_level_info_loss': True,
-                    'motif_scores_path': MOTIF_SCORES_TEMPLATE,
-                    'score_r_schedule': 'max',
-                    'motif_loss_coef': 0,
-                    'between_motif_coef': 0,
-                },
-                'learn_edge_att': False,
-            },
-        ],
-    },
+
     'att_injection_point': {
         'experiment_name': 'att_injection_point',
         'variants': [
@@ -350,193 +310,6 @@ EXPERIMENT_GROUPS = {
             },
         ],
     },
-
-    'arch_ablation_l2_vs_dropout': {
-        'experiment_name': 'arch_ablation_l2_vs_dropout',
-        'variants': [
-            {
-                'variant_id': 'original_gsat',
-                'gsat_overrides': {
-                    'tuning_id': 'original_gsat',
-                    'final_r': 0.5,
-                    'motif_incorporation_method': None,
-                    'motif_loss_coef': 0,
-                    'between_motif_coef': 0,
-                },
-                'model_overrides': {
-                    'use_l2_norm': False,
-                    'use_inter_layer_dropout': True,
-                },
-                'learn_edge_att': False,
-            },
-            {
-                'variant_id': 'l2_only',
-                'gsat_overrides': {
-                    'tuning_id': 'l2_only',
-                    'final_r': 0.5,
-                    'motif_incorporation_method': None,
-                    'motif_loss_coef': 0,
-                    'between_motif_coef': 0,
-                },
-                'model_overrides': {
-                    'use_l2_norm': True,
-                    'use_inter_layer_dropout': True,
-                },
-                'learn_edge_att': False,
-            },
-            {
-                'variant_id': 'no_dropout_only',
-                'gsat_overrides': {
-                    'tuning_id': 'no_dropout_only',
-                    'final_r': 0.5,
-                    'motif_incorporation_method': None,
-                    'motif_loss_coef': 0,
-                    'between_motif_coef': 0,
-                },
-                'model_overrides': {
-                    'use_l2_norm': False,
-                    'use_inter_layer_dropout': False,
-                },
-                'learn_edge_att': False,
-            },
-            {
-                'variant_id': 'both_l2_and_no_dropout',
-                'gsat_overrides': {
-                    'tuning_id': 'both_l2_and_no_dropout',
-                    'final_r': 0.5,
-                    'motif_incorporation_method': None,
-                    'motif_loss_coef': 0,
-                    'between_motif_coef': 0,
-                },
-                'model_overrides': {
-                    'use_l2_norm': True,
-                    'use_inter_layer_dropout': False,
-                },
-                'learn_edge_att': False,
-            },
-        ],
-    },
-
-    # =========================================================================
-    # Cross-dataset experiments (Mutagenicity, BBBP, Benzene, hERG)
-    # All use: no dropout, no L2 norm, basic clf head, skip node encoder, no edge attr
-    # =========================================================================
-
-    'base_gsat_clean': {
-        'experiment_name': 'base_gsat_clean',
-        'variants': [
-            {
-                'variant_id': 'base_node',
-                'gsat_overrides': {
-                    'tuning_id': 'base_node',
-                    'motif_incorporation_method': None,
-                    'motif_loss_coef': 0,
-                },
-                'model_overrides': _CLEAN_MODEL,
-                'learn_edge_att': False,
-            },
-        ],
-    },
-
-    'base_gsat_w_injection': {
-        'experiment_name': 'base_gsat_w_injection',
-        'variants': [
-            {
-                'variant_id': 'w_feat_only',
-                'gsat_overrides': {
-                    'tuning_id': 'w_feat_only',
-                    'motif_incorporation_method': None,
-                    'motif_loss_coef': 0,
-                    'w_feat': True, 'w_message': False, 'w_readout': False,
-                },
-                'model_overrides': _CLEAN_MODEL,
-                'learn_edge_att': False,
-            },
-            {
-                'variant_id': 'w_message_only',
-                'gsat_overrides': {
-                    'tuning_id': 'w_message_only',
-                    'motif_incorporation_method': None,
-                    'motif_loss_coef': 0,
-                    'w_feat': False, 'w_message': True, 'w_readout': False,
-                },
-                'model_overrides': _CLEAN_MODEL,
-                'learn_edge_att': False,
-            },
-            {
-                'variant_id': 'w_readout_only',
-                'gsat_overrides': {
-                    'tuning_id': 'w_readout_only',
-                    'motif_incorporation_method': None,
-                    'motif_loss_coef': 0,
-                    'w_feat': False, 'w_message': False, 'w_readout': True,
-                },
-                'model_overrides': _CLEAN_MODEL,
-                'learn_edge_att': False,
-            },
-            {
-                'variant_id': 'w_feat_readout',
-                'gsat_overrides': {
-                    'tuning_id': 'w_feat_readout',
-                    'motif_incorporation_method': None,
-                    'motif_loss_coef': 0,
-                    'w_feat': True, 'w_message': False, 'w_readout': True,
-                },
-                'model_overrides': _CLEAN_MODEL,
-                'learn_edge_att': False,
-            },
-        ],
-    },
-
-    'readout_w_injection': {
-        'experiment_name': 'readout_w_injection',
-        'variants': [
-            {
-                'variant_id': 'readout_w_feat_only',
-                'gsat_overrides': {
-                    'tuning_id': 'readout_w_feat_only',
-                    'motif_incorporation_method': 'readout',
-                    'motif_loss_coef': 0,
-                    'w_feat': True, 'w_message': False, 'w_readout': False,
-                },
-                'model_overrides': _CLEAN_MODEL,
-                'learn_edge_att': False,
-            },
-            {
-                'variant_id': 'readout_w_message_only',
-                'gsat_overrides': {
-                    'tuning_id': 'readout_w_message_only',
-                    'motif_incorporation_method': 'readout',
-                    'motif_loss_coef': 0,
-                    'w_feat': False, 'w_message': True, 'w_readout': False,
-                },
-                'model_overrides': _CLEAN_MODEL,
-                'learn_edge_att': False,
-            },
-            {
-                'variant_id': 'readout_w_readout_only',
-                'gsat_overrides': {
-                    'tuning_id': 'readout_w_readout_only',
-                    'motif_incorporation_method': 'readout',
-                    'motif_loss_coef': 0,
-                    'w_feat': False, 'w_message': False, 'w_readout': True,
-                },
-                'model_overrides': _CLEAN_MODEL,
-                'learn_edge_att': False,
-            },
-            {
-                'variant_id': 'readout_w_feat_readout',
-                'gsat_overrides': {
-                    'tuning_id': 'readout_w_feat_readout',
-                    'motif_incorporation_method': 'readout',
-                    'motif_loss_coef': 0,
-                    'w_feat': True, 'w_message': False, 'w_readout': True,
-                },
-                'model_overrides': _CLEAN_MODEL,
-                'learn_edge_att': False,
-            },
-        ],
-    },
 }
 
 ALL_EXPERIMENT_NAMES = list(EXPERIMENT_GROUPS.keys())
@@ -578,7 +351,7 @@ def main():
                         choices=SUPPORTED_DATASETS, help='Dataset to run experiments on')
     parser.add_argument('--experiments', type=str, nargs='+', default=ALL_EXPERIMENT_NAMES,
                         choices=ALL_EXPERIMENT_NAMES, help='Which experiment groups to run')
-    parser.add_argument('--folds', type=int, nargs='+', default=[0, 1], help='Folds to run')
+    parser.add_argument('--folds', type=int, nargs='+', default=None, help='Folds to run (default: [0,1] for MolDatasets, [0] for OGB)')
     parser.add_argument('--models', type=str, nargs='+', default=ARCHITECTURES, help='Models (backbones)')
     parser.add_argument('--seeds', type=int, nargs='+', default=[0], help='Random seeds')
     parser.add_argument('--cuda', type=int, default=0, help='CUDA device id (-1 for CPU)')
@@ -586,16 +359,34 @@ def main():
     
     dataset_name = args.dataset
 
+    # Default folds: [0,1] for MolDatasets with folds, [0] for OGB (no fold splitting)
+    if args.folds is not None:
+        folds = args.folds
+    elif dataset_name in DATASETS_WITH_MOTIFS:
+        folds = [0, 1]
+    else:
+        folds = [0]
+
+    # Warn if motif-requiring experiments are selected for OGB datasets
+    motif_experiments = {'motif_readout_fix_r', 'motif_readout_info_loss', 'motif_readout_adaptive_r',
+                         'within_motif_consistency_impact', 'between_motif_consistency_impact'}
+    if dataset_name not in DATASETS_WITH_MOTIFS:
+        skipped = [e for e in args.experiments if e in motif_experiments]
+        if skipped:
+            print(f'[WARNING] Skipping motif experiments for {dataset_name} (no motif info): {skipped}')
+            args.experiments = [e for e in args.experiments if e not in motif_experiments]
+
     config_dir = Path(__file__).resolve().parent / 'configs'
     with open(config_dir / 'global_config.yml') as f:
         global_config = yaml.safe_load(f)
     data_dir = Path(global_config['data_dir'])
 
     total_variants = sum(len(EXPERIMENT_GROUPS[e]['variants']) for e in args.experiments)
-    total = len(args.folds) * len(args.models) * total_variants * len(args.seeds)
+    total = len(folds) * len(args.models) * total_variants * len(args.seeds)
     n = 0
 
     print(f'\n[INFO] Dataset: {dataset_name}')
+    print(f'[INFO] Folds: {folds}')
 
     for exp_key in args.experiments:
         group = EXPERIMENT_GROUPS[exp_key]
@@ -604,7 +395,7 @@ def main():
         print(f'# Experiment group: {exp_key} (experiment_name={experiment_name})')
         print(f'{"#" * 80}')
 
-        for fold in args.folds:
+        for fold in folds:
             for model_name in args.models:
                 for variant in group['variants']:
                     for seed in args.seeds:

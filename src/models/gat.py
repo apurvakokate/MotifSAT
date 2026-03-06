@@ -17,70 +17,49 @@ class GAT(nn.Module):
         hidden_size = model_config['hidden_size']
         self.dropout_p = model_config['dropout_p']
         self.task_type = model_config.get('task_type', 'classification')
-        self.skip_node_encoder = model_config.get('skip_node_encoder', False)
-        self.use_l2_norm = model_config.get('use_l2_norm', True)
-        self.use_inter_layer_dropout = model_config.get('use_inter_layer_dropout', False)
 
-        self.use_atom_encoder = model_config.get('atom_encoder', False)
-        if self.use_atom_encoder:
+        if model_config.get('atom_encoder', False):
             self.node_encoder = AtomEncoder(emb_dim=hidden_size)
-            first_dim = hidden_size
-        elif self.skip_node_encoder:
-            self.node_encoder = None
-            first_dim = x_dim
         else:
             self.node_encoder = Linear(x_dim, hidden_size)
-            first_dim = hidden_size
 
         self.convs = nn.ModuleList()
         self.relu = nn.ReLU()
         self.pool = global_add_pool
 
-        for i in range(self.n_layers):
-            in_dim = first_dim if i == 0 else hidden_size
-            self.convs.append(GATConvWithAtten(in_dim, hidden_size, heads=1, concat=False, add_self_loops=False))
+        for _ in range(self.n_layers):
+            self.convs.append(GATConvWithAtten(hidden_size, hidden_size, heads=4, concat=False))
 
-        out_dim = 1 if (self.task_type == 'regression' or (num_class == 2 and not multi_label)) else num_class
-        if model_config.get('use_mlp_head', False):
-            self.fc_out = nn.Sequential(
-                nn.Linear(hidden_size, hidden_size),
-                nn.ReLU(),
-                nn.Dropout(0.5),
-                nn.Linear(hidden_size, out_dim),
-            )
+        if self.task_type == 'regression':
+            self.fc_out = nn.Sequential(nn.Linear(hidden_size, 1))
         else:
-            self.fc_out = nn.Sequential(nn.Linear(hidden_size, out_dim))
+            self.fc_out = nn.Sequential(nn.Linear(hidden_size, 1 if num_class == 2 and not multi_label else num_class))
 
     def forward(self, x, edge_index, batch, edge_attr=None, edge_atten=None):
-        if self.use_atom_encoder:
-            x = x.long()
-            x = self.node_encoder(x)
-        elif self.node_encoder is not None:
-            x = self.node_encoder(x)
+        x = self.node_encoder(x)
 
         for i in range(self.n_layers):
             x = self.convs[i](x, edge_index, edge_atten=edge_atten)
-            if self.use_l2_norm:
-                x = F.normalize(x, p=2, dim=1)
             x = self.relu(x)
-            if self.use_inter_layer_dropout:
-                x = F.dropout(x, p=self.dropout_p, training=self.training)
+            x = F.dropout(x, p=self.dropout_p, training=self.training)
         return self.fc_out(self.pool(x, batch))
 
+    @staticmethod
+    def MLP(in_channels: int, out_channels: int):
+        return nn.Sequential(
+            Linear(in_channels, out_channels),
+            nn.BatchNorm1d(out_channels),
+            nn.ReLU(inplace=True),
+            Linear(out_channels, out_channels),
+        )
+
     def get_emb(self, x, edge_index, batch, edge_attr=None, edge_atten=None):
-        if self.use_atom_encoder:
-            x = x.long()
-            x = self.node_encoder(x)
-        elif self.node_encoder is not None:
-            x = self.node_encoder(x)
+        x = self.node_encoder(x)
 
         for i in range(self.n_layers):
             x = self.convs[i](x, edge_index, edge_atten=edge_atten)
-            if self.use_l2_norm:
-                x = F.normalize(x, p=2, dim=1)
             x = self.relu(x)
-            if self.use_inter_layer_dropout:
-                x = F.dropout(x, p=self.dropout_p, training=self.training)
+            x = F.dropout(x, p=self.dropout_p, training=self.training)
         return x
 
     def get_pred_from_emb(self, emb, batch):
