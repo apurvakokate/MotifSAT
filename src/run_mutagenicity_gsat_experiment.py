@@ -63,11 +63,27 @@ EXPERIMENT_GROUPS = {
                 'gsat_overrides': {
                     'tuning_id': 'no_attention',
                     'no_attention': True,
+                    'fix_r': 1.0,
                     'info_loss_coef': 0,
                     'motif_incorporation_method': None,
                     'motif_loss_coef': 0,
                 },
                 'learn_edge_att': False,
+            },
+        ],
+    },
+
+    'vanilla_gnn_clean': {
+        'experiment_name': 'vanilla_gnn_clean',
+        'variants': [
+            {
+                'variant_id': 'clean',
+                'gsat_overrides': {
+                    'tuning_id': 'clean',
+                    'fix_r': 1.0,
+                },
+                'learn_edge_att': False,
+                'vanilla_clean': True,
             },
         ],
     },
@@ -122,6 +138,84 @@ EXPERIMENT_GROUPS = {
                 'learn_edge_att': False,
             }
             for r in [1.0, 0.9, 0.8, 0.7]
+        ],
+    },
+
+    'motif_readout_fix_r_mean': {
+        'experiment_name': 'motif_readout_fix_r_mean',
+        'variants': [
+            {
+                'variant_id': f'readout_mean_fix_r{r}',
+                'gsat_overrides': {
+                    'tuning_id': f'readout_mean_fix_r{r}',
+                    'fix_r': r,
+                    'motif_incorporation_method': 'readout',
+                    'motif_pooling_method': 'mean',
+                    'motif_loss_coef': 0,
+                },
+                'learn_edge_att': False,
+            }
+            for r in [0.9, 0.8, 0.7]
+        ],
+    },
+
+    'motif_readout_fix_r_sum': {
+        'experiment_name': 'motif_readout_fix_r_sum',
+        'variants': [
+            {
+                'variant_id': f'readout_sum_fix_r{r}',
+                'gsat_overrides': {
+                    'tuning_id': f'readout_sum_fix_r{r}',
+                    'fix_r': r,
+                    'motif_incorporation_method': 'readout',
+                    'motif_pooling_method': 'sum',
+                    'motif_loss_coef': 0,
+                },
+                'learn_edge_att': False,
+            }
+            for r in [0.9, 0.8, 0.7]
+        ],
+    },
+
+    'motif_readout_decay_r_mean': {
+        'experiment_name': 'motif_readout_decay_r_mean',
+        'variants': [
+            {
+                'variant_id': f'readout_mean_decay_final{fr}',
+                'gsat_overrides': {
+                    'tuning_id': f'readout_mean_decay_final{fr}',
+                    'fix_r': False,
+                    'init_r': 0.9,
+                    'final_r': fr,
+                    'decay_r': 0.1,
+                    'motif_incorporation_method': 'readout',
+                    'motif_pooling_method': 'mean',
+                    'motif_loss_coef': 0,
+                },
+                'learn_edge_att': False,
+            }
+            for fr in [0.9, 0.8, 0.7]
+        ],
+    },
+
+    'motif_readout_decay_r_sum': {
+        'experiment_name': 'motif_readout_decay_r_sum',
+        'variants': [
+            {
+                'variant_id': f'readout_sum_decay_final{fr}',
+                'gsat_overrides': {
+                    'tuning_id': f'readout_sum_decay_final{fr}',
+                    'fix_r': False,
+                    'init_r': 0.9,
+                    'final_r': fr,
+                    'decay_r': 0.1,
+                    'motif_incorporation_method': 'readout',
+                    'motif_pooling_method': 'sum',
+                    'motif_loss_coef': 0,
+                },
+                'learn_edge_att': False,
+            }
+            for fr in [0.9, 0.8, 0.7]
         ],
     },
 
@@ -317,8 +411,6 @@ ALL_EXPERIMENT_NAMES = list(EXPERIMENT_GROUPS.keys())
 
 def run_one(model_name, fold, variant, experiment_name, seed, cuda_id, data_dir, dataset_name):
     """Run a single experiment: one model, one fold, one variant, one seed."""
-    from run_gsat import train_gsat_one_seed
-
     config = get_base_config(model_name, dataset_name, gsat_overrides=variant['gsat_overrides'])
     config['shared_config']['learn_edge_att'] = variant['learn_edge_att']
     config['GSAT_config']['experiment_name'] = experiment_name
@@ -326,7 +418,6 @@ def run_one(model_name, fold, variant, experiment_name, seed, cuda_id, data_dir,
     if 'model_overrides' in variant:
         config['model_config'].update(variant['model_overrides'])
 
-    # Resolve motif_scores_path template with dataset and model name
     scores_path = config['GSAT_config'].get('motif_scores_path')
     if scores_path and '{' in scores_path:
         config['GSAT_config']['motif_scores_path'] = scores_path.format(
@@ -338,10 +429,19 @@ def run_one(model_name, fold, variant, experiment_name, seed, cuda_id, data_dir,
     log_dir = data_dir / f'{dataset_name}-fold{fold}' / 'logs' / f'{model_name}-seed{seed}-GSAT-{variant_id}'
 
     set_seed(seed)
-    hparam_dict, metric_dict = train_gsat_one_seed(
-        config, data_dir, log_dir, model_name, dataset_name,
-        'GSAT', device, seed, fold=fold, task_type='classification'
-    )
+
+    if variant.get('vanilla_clean', False):
+        from run_gsat import train_vanilla_gnn_one_seed
+        hparam_dict, metric_dict = train_vanilla_gnn_one_seed(
+            config, data_dir, log_dir, model_name, dataset_name,
+            device, seed, fold=fold, task_type='classification'
+        )
+    else:
+        from run_gsat import train_gsat_one_seed
+        hparam_dict, metric_dict = train_gsat_one_seed(
+            config, data_dir, log_dir, model_name, dataset_name,
+            'GSAT', device, seed, fold=fold, task_type='classification'
+        )
     return metric_dict
 
 
@@ -368,7 +468,10 @@ def main():
         folds = [0]
 
     # Warn if motif-requiring experiments are selected for OGB datasets
-    motif_experiments = {'motif_readout_fix_r', 'motif_readout_info_loss', 'motif_readout_adaptive_r',
+    motif_experiments = {'motif_readout_fix_r', 'motif_readout_fix_r_repaired',
+                         'motif_readout_fix_r_mean', 'motif_readout_fix_r_sum',
+                         'motif_readout_decay_r_mean', 'motif_readout_decay_r_sum',
+                         'motif_readout_info_loss', 'motif_readout_adaptive_r',
                          'within_motif_consistency_impact', 'between_motif_consistency_impact'}
     if dataset_name not in DATASETS_WITH_MOTIFS:
         skipped = [e for e in args.experiments if e in motif_experiments]

@@ -166,9 +166,9 @@ def motif_consistency_loss(att, nodes_to_motifs, batch):
     return within_var, between_var
 
 
-def motif_mean_pooling(emb, nodes_to_motifs, batch):
+def motif_pooling(emb, nodes_to_motifs, batch, reduce='mean'):
     """
-    Pool node embeddings to motif level using mean aggregation.
+    Pool node embeddings to motif level.
     
     Handles non-consecutive global motif indices by remapping to local
     consecutive indices within the batch. Motifs are kept separate per-graph
@@ -178,6 +178,7 @@ def motif_mean_pooling(emb, nodes_to_motifs, batch):
         emb: [N, hidden] node embeddings
         nodes_to_motifs: [N] global motif indices (can be non-consecutive)
         batch: [N] batch assignment for nodes
+        reduce: Aggregation method ('mean' or 'sum')
     
     Returns:
         motif_emb: [M, hidden] motif embeddings (M = number of unique graph-motif pairs)
@@ -185,18 +186,21 @@ def motif_mean_pooling(emb, nodes_to_motifs, batch):
         inverse_indices: [N] mapping from each node to its motif index (0..M-1)
         motif_ids: [M] original global motif index for each pooled motif
     """
-    # Create unique (graph_id, motif_id) pairs to keep motifs separate per-graph
     max_motif_id = nodes_to_motifs.max().item() + 1
     graph_motif_id = batch * max_motif_id + nodes_to_motifs
     
     unique_graph_motifs, inverse_indices = graph_motif_id.unique(return_inverse=True)
     
-    # Decode to get batch assignment and original motif IDs
     motif_batch = unique_graph_motifs // max_motif_id
     motif_ids = unique_graph_motifs % max_motif_id
     
-    motif_emb = scatter(emb, inverse_indices, dim=0, reduce='mean')
+    motif_emb = scatter(emb, inverse_indices, dim=0, reduce=reduce)
     return motif_emb, motif_batch, inverse_indices, motif_ids
+
+
+def motif_mean_pooling(emb, nodes_to_motifs, batch):
+    """Backward-compatible wrapper."""
+    return motif_pooling(emb, nodes_to_motifs, batch, reduce='mean')
 
 
 def lift_motif_att_to_node_att(motif_att, inverse_indices):
@@ -904,6 +908,7 @@ class GSAT(nn.Module):
         self.motif_level_info_loss = method_config.get('motif_level_info_loss', False)
         self.motif_level_sampling = method_config.get('motif_level_sampling', False)
         self.use_raw_score_loss = method_config.get('use_raw_score_loss', False)
+        self.motif_pooling_method = method_config.get('motif_pooling_method', 'mean')
         
         # Vanilla GNN mode: bypass attention entirely
         self.no_attention = method_config.get('no_attention', False)
@@ -1263,7 +1268,7 @@ class GSAT(nn.Module):
             nodes_to_motifs = getattr(data, 'nodes_to_motifs', None)
             if nodes_to_motifs is None:
                 raise ValueError("'readout' method requires nodes_to_motifs attribute in data")
-            motif_emb, motif_batch, inverse_indices, motif_ids = motif_mean_pooling(emb, nodes_to_motifs, data.batch)
+            motif_emb, motif_batch, inverse_indices, motif_ids = motif_pooling(emb, nodes_to_motifs, data.batch, reduce=self.motif_pooling_method)
             
             motif_att_log_logits = self.extractor(motif_emb, None, motif_batch)
 
@@ -2409,6 +2414,183 @@ def calculate_explainer_performance(model, extractor, data_loader, device, epoch
             pass
     
     return metrics
+
+
+def train_vanilla_gnn_one_seed(local_config, data_dir, log_dir, model_name, dataset_name, device, random_state, fold, task_type='classification'):
+    """
+    Train a clean vanilla GNN with only prediction loss. Bypasses the GSAT class
+    entirely -- no extractor, no attention, no info loss. Only the GNN classifier
+    parameters are optimized.
+    """
+    path = "/nfs/stak/users/kokatea/hpc-share/ChemIntuit/MotifBreakdown/DICTIONARY_CREATE"
+
+    gsat_config = local_config.get('GSAT_config', {})
+    tuning_id = gsat_config.get('tuning_id', 'default')
+    experiment_name = gsat_config.get('experiment_name', 'default_experiment')
+
+    results_base = os.environ.get('RESULTS_DIR', '../tuning_results')
+    seed_dir = os.path.join(
+        results_base, str(dataset_name), f'model_{model_name}',
+        f'experiment_{experiment_name}', f'tuning_{tuning_id}',
+        'method_vanilla', 'vanilla',
+        f'fold{fold}_seed{random_state}'
+    )
+
+    if check_artifacts_exist(seed_dir):
+        try:
+            with open(Path(seed_dir) / 'experiment_summary.json', 'r') as f:
+                summary = json.load(f)
+            with open(Path(seed_dir) / 'final_metrics.json', 'r') as f:
+                metric_dict = json.load(f)
+            print(f"[INFO] Loaded existing results from {seed_dir}")
+            return summary.get('hparams', {}), metric_dict
+        except Exception as e:
+            print(f"[WARNING] Failed to load existing results: {e}")
+
+    print(f'[INFO] Training clean vanilla GNN: {model_name} on {dataset_name} fold={fold} seed={random_state}')
+    set_seed(random_state)
+
+    model_config = local_config['model_config']
+    data_config = local_config['data_config']
+    method_config = local_config['GSAT_config']
+
+    wandb_project = f"GSAT-{dataset_name}"
+    wandb_name = f"{model_name}-fold{fold}-seed{random_state}-vanilla_clean"
+    try:
+        wandb_dir = os.environ.get('WANDB_DIR', '../wandb')
+        wandb.init(project=wandb_project, name=wandb_name, dir=wandb_dir,
+                   config={'dataset': dataset_name, 'model': model_name, 'fold': fold,
+                           'seed': random_state, 'experiment': experiment_name, 'method': 'vanilla_clean'},
+                   reinit=True)
+    except Exception as e:
+        print(f"[WARNING] wandb init failed: {e}")
+
+    batch_size, splits = data_config['batch_size'], data_config.get('splits', None)
+    loader_result = get_data_loaders(data_dir, dataset_name, batch_size, splits, random_state,
+                                     data_config.get('mutag_x', False), fold, path=path)
+
+    if len(loader_result) == 9:
+        loaders, test_set, x_dim, edge_attr_dim, num_class, aux_info, datasets, masked_data_features, motif_list = loader_result
+    elif len(loader_result) == 8:
+        loaders, test_set, x_dim, edge_attr_dim, num_class, aux_info, datasets, masked_data_features = loader_result
+    else:
+        loaders, test_set, x_dim, edge_attr_dim, num_class, aux_info = loader_result
+
+    model_config['deg'] = aux_info['deg']
+    model = get_model(x_dim, edge_attr_dim, num_class, aux_info['multi_label'], model_config, device)
+
+    use_edge_attr = model_config.get('use_edge_attr', True)
+    multi_label = aux_info['multi_label']
+    epochs = method_config.get('epochs', 200)
+    lr = method_config.get('lr', 1e-3)
+    wd = method_config.get('weight_decay', 0)
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=wd)
+    scheduler = ReduceLROnPlateau(optimizer, mode='max', patience=10, factor=0.5)
+    criterion = Criterion(num_class, multi_label, task_type)
+
+    os.makedirs(seed_dir, exist_ok=True)
+    summary = {
+        'experiment_name': experiment_name,
+        'model_name': model_name,
+        'dataset': dataset_name,
+        'fold': fold,
+        'seed': random_state,
+        'method': 'vanilla_clean',
+        'hparams': {k: str(v) if isinstance(v, (dict, list)) else v for k, v in model_config.items()},
+        'loss_coefficients': {'pred_loss_coef': 1.0, 'info_loss_coef': 0.0},
+        'weight_distribution_params': {'fix_r': 1.0},
+    }
+    with open(os.path.join(seed_dir, 'experiment_summary.json'), 'w') as f:
+        json.dump(summary, f, indent=2)
+
+    best_metric = {'metric/best_clf_epoch': 0, 'metric/best_clf_valid_loss': float('inf'),
+                   'metric/best_clf_train': 0, 'metric/best_clf_valid': 0, 'metric/best_clf_test': 0,
+                   'metric/best_clf_acc_train': 0, 'metric/best_clf_acc_valid': 0, 'metric/best_clf_acc_test': 0,
+                   'metric/best_clf_roc_train': 0, 'metric/best_clf_roc_valid': 0, 'metric/best_clf_roc_test': 0}
+
+    def run_epoch(loader, phase):
+        is_train = (phase == 'train')
+        model.train() if is_train else model.eval()
+        all_logits, all_labels, total_loss = [], [], 0.0
+        for data in loader:
+            data = process_data(data, use_edge_attr)
+            data = data.to(device)
+            if is_train:
+                optimizer.zero_grad()
+            with torch.set_grad_enabled(is_train):
+                logits = model(data.x, data.edge_index, data.batch,
+                               edge_attr=data.edge_attr, edge_atten=None)
+                if not multi_label:
+                    logits = logits.squeeze(-1)
+                loss = criterion(logits, data.y)
+                if is_train:
+                    loss.backward()
+                    optimizer.step()
+            total_loss += loss.item()
+            all_logits.append(logits.detach().cpu())
+            all_labels.append(data.y.detach().cpu())
+        all_logits = torch.cat(all_logits)
+        all_labels = torch.cat(all_labels)
+        avg_loss = total_loss / len(loader)
+        preds = get_preds(all_logits, multi_label)
+        labels_sq = all_labels.squeeze()
+        acc = (preds == labels_sq).float().mean().item() if not multi_label else 0.0
+        try:
+            if num_class == 2 and not multi_label:
+                probs = torch.sigmoid(all_logits).numpy()
+                roc = roc_auc_score(all_labels.numpy(), probs)
+            else:
+                roc = 0.0
+        except Exception:
+            roc = 0.0
+        return avg_loss, acc, roc
+
+    for epoch in range(epochs):
+        train_loss, train_acc, train_roc = run_epoch(loaders['train'], 'train')
+        val_loss, val_acc, val_roc = run_epoch(loaders['valid'], 'valid')
+        test_loss, test_acc, test_roc = run_epoch(loaders['test'], 'test')
+
+        scheduler.step(val_roc)
+
+        try:
+            wandb.log({'train/loss': train_loss, 'train/roc': train_roc, 'train/acc': train_acc,
+                       'valid/loss': val_loss, 'valid/roc': val_roc, 'valid/acc': val_acc,
+                       'test/loss': test_loss, 'test/roc': test_roc, 'test/acc': test_acc}, step=epoch)
+        except Exception:
+            pass
+
+        if epoch > 5 and val_roc > best_metric['metric/best_clf_roc_valid']:
+            best_metric = {
+                'metric/best_clf_epoch': epoch,
+                'metric/best_clf_valid_loss': val_loss,
+                'metric/best_clf_train': train_acc, 'metric/best_clf_valid': val_acc, 'metric/best_clf_test': test_acc,
+                'metric/best_clf_acc_train': train_acc, 'metric/best_clf_acc_valid': val_acc, 'metric/best_clf_acc_test': test_acc,
+                'metric/best_clf_roc_train': train_roc, 'metric/best_clf_roc_valid': val_roc, 'metric/best_clf_roc_test': test_roc,
+            }
+            save_checkpoint(model, seed_dir, model_name=f'best_model')
+
+        if epoch % 20 == 0 or epoch == epochs - 1:
+            print(f'  [Epoch {epoch:3d}] train_roc={train_roc:.4f} val_roc={val_roc:.4f} test_roc={test_roc:.4f} '
+                  f'best_val_roc={best_metric["metric/best_clf_roc_valid"]:.4f} (ep{best_metric["metric/best_clf_epoch"]})')
+
+    with open(os.path.join(seed_dir, 'final_metrics.json'), 'w') as f:
+        json.dump(best_metric, f, indent=2)
+    with open(os.path.join(seed_dir, 'node_scores.jsonl'), 'w') as f:
+        pass
+    with open(os.path.join(seed_dir, 'edge_scores.jsonl'), 'w') as f:
+        pass
+
+    print(f'[INFO] Vanilla GNN training complete. Best val ROC={best_metric["metric/best_clf_roc_valid"]:.4f} at epoch {best_metric["metric/best_clf_epoch"]}')
+    print(f'[INFO] Artifacts saved to {seed_dir}')
+
+    try:
+        wandb.finish()
+    except Exception:
+        pass
+
+    hparam_dict = {k: str(v) if isinstance(v, (dict, list)) else v for k, v in model_config.items()}
+    return hparam_dict, best_metric
 
 
 def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_name, method_name, device, random_state,  fold, task_type='classification'):

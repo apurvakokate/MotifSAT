@@ -76,6 +76,41 @@ EXPERIMENT_ROW_CONFIG = {
         'row_label_prefix': 'variant',
         'path_extract': 'vanilla',
     },
+    'vanilla_gnn_node_repaired': {
+        'summary_path': None,
+        'row_label_prefix': 'variant',
+        'path_extract': 'vanilla',
+    },
+    'vanilla_gnn_clean': {
+        'summary_path': None,
+        'row_label_prefix': 'variant',
+        'path_extract': 'vanilla',
+    },
+    'motif_readout_fix_r_repaired': {
+        'summary_path': ('weight_distribution_params', 'fix_r'),
+        'row_label_prefix': 'fix_r',
+        'path_extract': 'fix_r',
+    },
+    'motif_readout_fix_r_mean': {
+        'summary_path': ('weight_distribution_params', 'fix_r'),
+        'row_label_prefix': 'fix_r',
+        'path_extract': 'fix_r',
+    },
+    'motif_readout_fix_r_sum': {
+        'summary_path': ('weight_distribution_params', 'fix_r'),
+        'row_label_prefix': 'fix_r',
+        'path_extract': 'fix_r',
+    },
+    'motif_readout_decay_r_mean': {
+        'summary_path': ('weight_distribution_params', 'final_r'),
+        'row_label_prefix': 'final_r',
+        'path_extract': 'final_r',
+    },
+    'motif_readout_decay_r_sum': {
+        'summary_path': ('weight_distribution_params', 'final_r'),
+        'row_label_prefix': 'final_r',
+        'path_extract': 'final_r',
+    },
 }
 
 
@@ -419,7 +454,7 @@ def build_posthoc_table(records, split='test'):
         })
 
     if not rows:
-        return None, None
+        return None, None, None
 
     df = pd.DataFrame(rows)
     agg = df.groupby(['row', 'row_val', 'model'])['pearson_r'].agg(['mean', 'std', 'count']).reset_index()
@@ -427,16 +462,18 @@ def build_posthoc_table(records, split='test'):
 
     pivot_mean = agg.pivot(index='row', columns='model', values='mean')
     pivot_std = agg.pivot(index='row', columns='model', values='std')
+    pivot_count = agg.pivot(index='row', columns='model', values='count')
 
     row_order = agg.drop_duplicates('row').sort_values('row_val')['row'].tolist()
     pivot_mean = pivot_mean.reindex(row_order).dropna(how='all')
     pivot_std = pivot_std.reindex(row_order).dropna(how='all')
-    return pivot_mean, pivot_std
+    pivot_count = pivot_count.reindex(row_order).dropna(how='all')
+    return pivot_mean, pivot_std, pivot_count
 
 
 def build_table(records, metric_key):
     if not records:
-        return None, None
+        return None, None, None
 
     df = pd.DataFrame(records)
     df['value'] = df['metrics'].apply(lambda m: m.get(metric_key, np.nan))
@@ -446,11 +483,47 @@ def build_table(records, metric_key):
 
     pivot_mean = agg.pivot(index='row', columns='model', values='mean')
     pivot_std = agg.pivot(index='row', columns='model', values='std')
+    pivot_count = agg.pivot(index='row', columns='model', values='count')
 
     row_order = agg.drop_duplicates('row').sort_values('row_val')['row'].tolist()
     pivot_mean = pivot_mean.reindex(row_order).dropna(how='all')
     pivot_std = pivot_std.reindex(row_order).dropna(how='all')
-    return pivot_mean, pivot_std
+    pivot_count = pivot_count.reindex(row_order).dropna(how='all')
+    return pivot_mean, pivot_std, pivot_count
+
+
+def format_mean_std_count(mean_df, std_df, count_df):
+    """Combine mean, std, and count into 'mean +/- std (n=N)' formatted DataFrame."""
+    if mean_df is None:
+        return None
+    combined = mean_df.copy().astype(object)
+    for col in mean_df.columns:
+        for idx in mean_df.index:
+            m = mean_df.at[idx, col]
+            s = std_df.at[idx, col] if idx in std_df.index and col in std_df.columns else np.nan
+            n = count_df.at[idx, col] if idx in count_df.index and col in count_df.columns else np.nan
+            if pd.isna(m):
+                combined.at[idx, col] = ''
+            elif pd.isna(s) or pd.isna(n):
+                combined.at[idx, col] = f'{m:.4f}'
+            else:
+                combined.at[idx, col] = f'{m:.4f} +/- {s:.4f} (n={int(n)})'
+    return combined
+
+
+def _print_and_save_table(label, mean_df, std_df, count_df, prefix, suffix, output_dir):
+    """Helper to print formatted table and save CSVs."""
+    if mean_df is None or mean_df.isna().all().all():
+        print(f'\nNo data for: {label}')
+        return
+    formatted = format_mean_std_count(mean_df, std_df, count_df)
+    print(f'\n--- {label} ---')
+    print(formatted.to_string())
+    path = output_dir / f'{prefix}_{suffix}.csv'
+    mean_df.to_csv(path)
+    std_df.to_csv(output_dir / f'{prefix}_{suffix}_std.csv')
+    count_df.to_csv(output_dir / f'{prefix}_{suffix}_count.csv')
+    print(f'Saved: {path}')
 
 
 def main():
@@ -476,55 +549,30 @@ def main():
 
     prefix = args.experiment_name
 
-    pred_mean, pred_std = build_table(records, metric_key='metric/best_clf_roc_valid')
-    if pred_mean is not None and not pred_mean.isna().all().all():
-        path = output_dir / f'{prefix}_prediction_valid_roc.csv'
-        pred_mean.to_csv(path)
-        print(f'\n--- Prediction performance (valid ROC, mean over folds/seeds) ---')
-        print(pred_mean.to_string())
-        print(f'\nSaved: {path}')
-        pred_std.to_csv(output_dir / f'{prefix}_prediction_valid_roc_std.csv')
-    else:
-        print('\nNo metric/best_clf_roc_valid data found.')
+    pred_mean, pred_std, pred_count = build_table(records, metric_key='metric/best_clf_roc_valid')
+    _print_and_save_table('Prediction performance (valid ROC, mean +/- std)',
+                          pred_mean, pred_std, pred_count, prefix, 'prediction_valid_roc', output_dir)
 
-    exp_mean, exp_std = build_table(records, metric_key='motif/att_impact_correlation')
-    if exp_mean is not None and not exp_mean.isna().all().all():
-        path = output_dir / f'{prefix}_explainer_correlation.csv'
-        exp_mean.to_csv(path)
-        print(f'\n--- Explainer (motif att–impact correlation, mean over folds/seeds) ---')
-        print(exp_mean.to_string())
-        print(f'\nSaved: {path}')
-        exp_std.to_csv(output_dir / f'{prefix}_explainer_correlation_std.csv')
-    else:
-        print('\nNo motif/att_impact_correlation data found.')
+    test_mean, test_std, test_count = build_table(records, metric_key='metric/best_clf_roc_test')
+    _print_and_save_table('Prediction performance (test ROC, mean +/- std)',
+                          test_mean, test_std, test_count, prefix, 'prediction_test_roc', output_dir)
 
-    range_mean, range_std = build_table(records, metric_key='motif_edge_att/max_mean')
-    if range_mean is not None and not range_mean.isna().all().all():
-        path = output_dir / f'{prefix}_motif_edge_att_max.csv'
-        range_mean.to_csv(path)
-        print(f'\n--- Motif edge att max (mean over folds/seeds) ---')
-        print(range_mean.to_string())
-        print(f'\nSaved: {path}')
-        range_std.to_csv(output_dir / f'{prefix}_motif_edge_att_max_std.csv')
+    exp_mean, exp_std, exp_count = build_table(records, metric_key='motif/att_impact_correlation')
+    _print_and_save_table('Explainer (motif att-impact correlation, mean +/- std)',
+                          exp_mean, exp_std, exp_count, prefix, 'explainer_correlation', output_dir)
 
-    min_mean, min_std = build_table(records, metric_key='motif_edge_att/min_mean')
-    if min_mean is not None and not min_mean.isna().all().all():
-        path = output_dir / f'{prefix}_motif_edge_att_min.csv'
-        min_mean.to_csv(path)
-        print(f'\n--- Motif edge att min (mean over folds/seeds) ---')
-        print(min_mean.to_string())
-        print(f'\nSaved: {path}')
-        min_std.to_csv(output_dir / f'{prefix}_motif_edge_att_min_std.csv')
+    range_mean, range_std, range_count = build_table(records, metric_key='motif_edge_att/max_mean')
+    _print_and_save_table('Motif edge att max (mean +/- std)',
+                          range_mean, range_std, range_count, prefix, 'motif_edge_att_max', output_dir)
+
+    min_mean, min_std, min_count = build_table(records, metric_key='motif_edge_att/min_mean')
+    _print_and_save_table('Motif edge att min (mean +/- std)',
+                          min_mean, min_std, min_count, prefix, 'motif_edge_att_min', output_dir)
 
     for split in ['train', 'valid', 'test']:
-        ph_mean, ph_std = build_posthoc_table(records, split=split)
-        if ph_mean is not None and not ph_mean.isna().all().all():
-            path = output_dir / f'{prefix}_posthoc_correlation_{split}.csv'
-            ph_mean.to_csv(path)
-            print(f'\n--- Post-hoc score–impact correlation ({split}, mean over folds/seeds) ---')
-            print(ph_mean.to_string())
-            print(f'\nSaved: {path}')
-            ph_std.to_csv(output_dir / f'{prefix}_posthoc_correlation_{split}_std.csv')
+        ph_mean, ph_std, ph_count = build_posthoc_table(records, split=split)
+        _print_and_save_table(f'Post-hoc score-impact correlation ({split}, mean +/- std)',
+                              ph_mean, ph_std, ph_count, prefix, f'posthoc_correlation_{split}', output_dir)
 
 
 if __name__ == '__main__':
