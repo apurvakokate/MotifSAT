@@ -16,14 +16,15 @@ class PNA(torch.nn.Module):
         self.n_layers = model_config['n_layers']
         self.dropout_p = model_config['dropout_p']
         self.edge_attr_dim = edge_attr_dim
+        self.use_edge_attr = model_config.get('use_edge_attr', True)
 
         if model_config.get('atom_encoder', False):
             self.node_encoder = AtomEncoder(emb_dim=hidden_size)
-            if edge_attr_dim != 0 and model_config.get('use_edge_attr', True):
+            if edge_attr_dim != 0 and self.use_edge_attr:
                 self.edge_encoder = BondEncoder(emb_dim=hidden_size)
         else:
             self.node_encoder = Linear(x_dim, hidden_size)
-            if edge_attr_dim != 0 and model_config.get('use_edge_attr', True):
+            if edge_attr_dim != 0 and self.use_edge_attr:
                 self.edge_encoder = Linear(edge_attr_dim, hidden_size)
 
         aggregators = model_config['aggregators']
@@ -51,8 +52,10 @@ class PNA(torch.nn.Module):
 
     def forward(self, x, edge_index, batch, edge_attr, edge_atten=None):
         x = self.node_encoder(x)
-        if edge_attr is not None:
+        if edge_attr is not None and self.use_edge_attr:
             edge_attr = self.edge_encoder(edge_attr)
+        else:
+            edge_attr = None
 
         for i, (conv, batch_norm) in enumerate(zip(self.convs, self.batch_norms)):
             h = F.relu(batch_norm(conv(x, edge_index, edge_attr, edge_atten=edge_atten)))
@@ -64,8 +67,10 @@ class PNA(torch.nn.Module):
 
     def get_emb(self, x, edge_index, batch, edge_attr, edge_atten=None):
         x = self.node_encoder(x)
-        if edge_attr is not None:
+        if edge_attr is not None and self.use_edge_attr:
             edge_attr = self.edge_encoder(edge_attr)
+        else:
+            edge_attr = None
 
         for i, (conv, batch_norm) in enumerate(zip(self.convs, self.batch_norms)):
             h = F.relu(batch_norm(conv(x, edge_index, edge_attr, edge_atten=edge_atten)))

@@ -68,6 +68,8 @@ class GIN(nn.Module):
         x = self.node_encoder(x)
         if edge_attr is not None and self.use_edge_attr:
             edge_attr = self.edge_encoder(edge_attr.float())
+        else:
+            edge_attr = None
 
         for i in range(self.n_layers):
             x = self.convs[i](x, edge_index, edge_attr=edge_attr, edge_atten=edge_atten)

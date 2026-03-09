@@ -12,7 +12,6 @@ from torch_geometric.nn.inits import reset
 from torch_geometric.utils import degree, softmax
 from torch_scatter import scatter
 
-
 class GINConv(BaseGINConv):
     def forward(self, x: Union[Tensor, OptPairTensor], edge_index: Adj, edge_attr: OptTensor = None, edge_atten: OptTensor = None, size: Size = None) -> Tensor:
         """"""
@@ -143,6 +142,7 @@ class GCNConvWithAtten(MessagePassing):
                 edge_weight = norm * edge_atten.squeeze(-1)
             else:
                 edge_weight = norm
+            
         else:
             # No normalization - preserves degree information even with constant features!
             if edge_atten is not None:
@@ -159,7 +159,6 @@ class GCNConvWithAtten(MessagePassing):
         return out
     
     def message(self, x_j: Tensor, edge_weight: OptTensor) -> Tensor:
-        print(f'Edge weight shape: {edge_weight.shape} Edge weight min max: {edge_weight.min()}, {edge_weight.max()}')
         return x_j * edge_weight.view(-1, 1)
 
 
@@ -226,7 +225,6 @@ class GATConvWithAtten(MessagePassing):
     def message(self, x_j: Tensor, alpha_j: Tensor, alpha_i: Tensor,
                 edge_atten: OptTensor, index: Tensor, ptr: OptTensor,
                 size_i: Optional[int]) -> Tensor:
-        print(f'Edge weight shape: {edge_atten.shape} Edge weight min max: {edge_atten.min()}, {edge_atten.max()}')
         # Compute attention coefficient
         alpha = alpha_j + alpha_i  # [E, H]
         alpha = F.leaky_relu(alpha, negative_slope=0.2)
@@ -292,7 +290,6 @@ class SAGEConvWithAtten(MessagePassing):
         return out
     
     def message(self, x_j: Tensor, edge_atten: OptTensor = None) -> Tensor:
-        print(f'Edge weight shape: {edge_atten.shape}, Edge weight min max: {edge_atten.min()}, {edge_atten.max()}')
         if edge_atten is not None:
             return x_j * edge_atten
         return x_j

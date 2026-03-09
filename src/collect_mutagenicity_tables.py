@@ -2,18 +2,11 @@
 """
 Collect Mutagenicity GSAT results and generate summary tables.
 
+Supports both legacy experiments and newer path layouts like:
+  Mutagenicity/model_GCN/experiment_base_gsat_fix_r_node/tuning_fix_r0.5/...
+  .../init0.9_final0.5_decay0.1/fold0_seed0/
+
 Tables: columns = architectures, rows = the varying hyperparameter for that experiment.
-
-Experiment-specific rows:
-  r_impact_node / r_impact_edge       → rows = final_r  (0.4, 0.5, 0.6)
-  within_motif_consistency_impact      → rows = motif_loss_coef  (1.0, 2.0)
-  between_motif_consistency_impact     → rows = between_motif_coef (1.0, 2.0)
-
-Reads from saved final_metrics.json and experiment_summary.json (no retraining).
-
-Usage:
-  python collect_mutagenicity_tables.py --experiment_name r_impact_node
-  python collect_mutagenicity_tables.py --experiment_name within_motif_consistency_impact --verbose
 """
 
 import argparse
@@ -23,38 +16,150 @@ import os
 import re
 from collections import defaultdict
 from pathlib import Path
-import pandas as pd
+
 import numpy as np
+import pandas as pd
 from scipy.stats import pearsonr
 
-# Map experiment_name → (key in experiment_summary to read, display name)
+
 EXPERIMENT_ROW_CONFIG = {
+    # legacy
     'r_impact_node': {
         'summary_path': ('weight_distribution_params', 'final_r'),
         'row_label_prefix': 'r',
+        'path_extract': 'final_r',
     },
     'r_impact_edge': {
         'summary_path': ('weight_distribution_params', 'final_r'),
         'row_label_prefix': 'r',
+        'path_extract': 'final_r',
     },
     'within_motif_consistency_impact': {
         'summary_path': ('loss_coefficients', 'motif_loss_coef'),
         'row_label_prefix': 'motif_loss_coef',
+        'path_extract': 'motif_loss_coef',
     },
     'between_motif_consistency_impact': {
         'summary_path': ('loss_coefficients', 'between_motif_coef'),
         'row_label_prefix': 'between_motif_coef',
+        'path_extract': 'between_motif_coef',
+    },
+
+    # new experiments
+    'base_gsat_fix_r_node': {
+        'summary_path': ('weight_distribution_params', 'fix_r'),
+        'row_label_prefix': 'fix_r',
+        'path_extract': 'fix_r',
+    },
+    'base_gsat_fix_r_node_repaired': {
+        'summary_path': ('weight_distribution_params', 'fix_r'),
+        'row_label_prefix': 'fix_r',
+        'path_extract': 'fix_r',
+    },
+    'base_gsat_decay_r_node_repaired': {
+        'summary_path': ('weight_distribution_params', 'final_r'),
+        'row_label_prefix': 'final_r',
+        'path_extract': 'final_r',
+    },
+    'base_gsat_decay_r_node': {
+        'summary_path': ('weight_distribution_params', 'final_r'),
+        'row_label_prefix': 'final_r',
+        'path_extract': 'final_r',
+    },
+    'motif_readout_fix_r': {
+        'summary_path': ('weight_distribution_params', 'fix_r'),
+        'row_label_prefix': 'fix_r',
+        'path_extract': 'fix_r',
+    },
+    'vanilla_gnn_node': {
+        'summary_path': None,
+        'row_label_prefix': 'variant',
+        'path_extract': 'vanilla',
     },
 }
 
 
-def _get_row_value(summary: dict, experiment_name: str):
-    """Extract the varying hyperparameter value from experiment_summary.json."""
+def _coerce_number(x):
+    if x is None:
+        return None
+    try:
+        return int(x) if float(x).is_integer() else float(x)
+    except Exception:
+        return x
+
+
+def _get_nested(summary: dict, path_tuple):
+    if not path_tuple:
+        return None
+    cur = summary
+    for key in path_tuple:
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(key)
+    return cur
+
+
+def _extract_value_from_parts(parts, mode):
+    """
+    Recover the row variable directly from path parts.
+
+    Examples:
+      tuning_fix_r0.5                       -> fix_r = 0.5
+      init0.9_final0.5_decay0.1            -> final_r = 0.5
+      pred1_info1_motif2.0_between0        -> motif_loss_coef = 2.0
+      pred1_info1_motif1.0_between2.0      -> between_motif_coef = 2.0
+    """
+    joined = "/".join(parts)
+
+    if mode == 'fix_r':
+        for p in parts:
+            m = re.match(r'tuning_fix_r([0-9.]+)', p)
+            if m:
+                return _coerce_number(m.group(1))
+
+    elif mode == 'final_r':
+        for p in parts:
+            m = re.search(r'init([0-9.]+)_final([0-9.]+)_decay([0-9.]+)', p)
+            if m:
+                return _coerce_number(m.group(2))
+        # fallback for legacy paths
+        for p in parts:
+            m = re.search(r'(?:node_r|edge_r)([0-9.]+)', p)
+            if m:
+                return _coerce_number(m.group(1))
+
+    elif mode == 'motif_loss_coef':
+        for p in parts:
+            m = re.search(r'motif([0-9.]+)_between([0-9.]+)', p)
+            if m:
+                return _coerce_number(m.group(1))
+
+    elif mode == 'between_motif_coef':
+        for p in parts:
+            m = re.search(r'motif([0-9.]+)_between([0-9.]+)', p)
+            if m:
+                return _coerce_number(m.group(2))
+
+    elif mode == 'vanilla':
+        return 'no_attention'
+
+    return None
+
+
+def _get_row_value(summary: dict, experiment_name: str, parts=None):
     cfg = EXPERIMENT_ROW_CONFIG.get(experiment_name)
     if cfg is None:
         return 'unknown'
-    section, key = cfg['summary_path']
-    val = summary.get(section, {}).get(key, '?')
+
+    val = None
+    if cfg.get('summary_path') is not None:
+        val = _get_nested(summary, cfg['summary_path'])
+
+    if val is None and parts is not None:
+        val = _extract_value_from_parts(parts, cfg.get('path_extract'))
+
+    if val is None:
+        return 'unknown'
     return val
 
 
@@ -65,7 +170,6 @@ def _make_row_label(val, experiment_name: str):
 
 
 def _recover_truncated_json(raw: str):
-    """Try to recover a truncated JSON object by finding the last valid closing brace."""
     raw = raw.strip()
     if not raw.startswith('{'):
         return None
@@ -82,67 +186,156 @@ def _recover_truncated_json(raw: str):
     return None
 
 
+def _read_json(path: Path):
+    with open(path) as f:
+        raw = f.read()
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return _recover_truncated_json(raw)
+
+
+def _read_jsonl(path: Path):
+    with path.open('r') as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                yield json.loads(line)
+
+
+def _infer_model_from_parts(parts):
+    for p in parts:
+        if p.startswith('model_'):
+            return p.replace('model_', '')
+    return None
+
+
+def _infer_tuning_from_parts(parts):
+    for p in parts:
+        if p.startswith('tuning_'):
+            return p.replace('tuning_', '')
+    return None
+
+
+def _infer_fold_seed_from_parts(parts):
+    for p in parts:
+        m = re.match(r'fold(\d+)_seed(\d+)', p)
+        if m:
+            return int(m.group(1)), int(m.group(2))
+    return None, None
+
+
+def _compute_attention_min_max_from_jsonl(seed_dir: Path):
+    """
+    Fallback for motif_edge_att/max_mean and motif_edge_att/min_mean if not present
+    in final_metrics.json.
+
+    Assumes attention_distributions.jsonl has one attention value per record and
+    some motif identifier. You may need to tweak the key names if your JSONL differs.
+    """
+    path = seed_dir / 'attention_distributions.jsonl'
+    if not path.exists():
+        return np.nan, np.nan
+
+    groups = defaultdict(list)
+
+    for rec in _read_jsonl(path):
+        motif_idx = rec.get('motif_idx', rec.get('motif_index'))
+        if motif_idx is None:
+            continue
+
+        att = None
+        for k in ['attention', 'att', 'edge_attention', 'score', 'value']:
+            if k in rec:
+                att = rec[k]
+                break
+
+        if att is None:
+            continue
+
+        try:
+            att = float(att)
+        except Exception:
+            continue
+
+        groups[motif_idx].append(att)
+
+    if not groups:
+        return np.nan, np.nan
+
+    per_motif_max = [max(v) for v in groups.values() if len(v) > 0]
+    per_motif_min = [min(v) for v in groups.values() if len(v) > 0]
+
+    if not per_motif_max or not per_motif_min:
+        return np.nan, np.nan
+
+    return float(np.mean(per_motif_max)), float(np.mean(per_motif_min))
+
+
 def find_results(results_dir: Path, experiment_name: str, verbose: bool = False):
-    """Find all final_metrics.json under results_dir/Mutagenicity for the given experiment_name."""
+    """
+    Find run directories for the given experiment_name.
+    Prefers final_metrics.json, but can still register a run if only attention_distributions.jsonl exists.
+    """
     base = results_dir / 'Mutagenicity'
     if not base.exists():
         print(f'[WARN] Directory does not exist: {base}')
         return []
+
     experiment_dir = f'experiment_{experiment_name}'
     records = []
-    all_final_metrics = list(base.rglob('final_metrics.json'))
+
+    candidate_seed_dirs = set()
+
+    for p in base.rglob('final_metrics.json'):
+        if experiment_dir in p.parts:
+            candidate_seed_dirs.add(p.parent)
+
+    for p in base.rglob('attention_distributions.jsonl'):
+        if experiment_dir in p.parts:
+            candidate_seed_dirs.add(p.parent)
+
     if verbose:
-        print(f'[DEBUG] Found {len(all_final_metrics)} total final_metrics.json under {base}')
-    skipped_experiment = 0
+        print(f'[DEBUG] Found {len(candidate_seed_dirs)} candidate seed dirs for {experiment_name}')
+
     skipped_parse = 0
     skipped_error = 0
-    for fm_path in all_final_metrics:
+
+    for seed_dir in sorted(candidate_seed_dirs):
         try:
-            parts = fm_path.parent.relative_to(base).parts
-            if experiment_dir not in parts:
-                skipped_experiment += 1
-                continue
-            model_name = None
-            tuning_id = None
-            fold = None
-            seed = None
-            for p in parts:
-                if p.startswith('model_'):
-                    model_name = p.replace('model_', '')
-                elif p.startswith('tuning_'):
-                    tuning_id = p.replace('tuning_', '')
-                elif p.startswith('fold') and '_seed' in p:
-                    m = re.match(r'fold(\d+)_seed(\d+)', p)
-                    if m:
-                        fold = int(m.group(1))
-                        seed = int(m.group(2))
-            if model_name is None or tuning_id is None or fold is None or seed is None:
+            parts = seed_dir.relative_to(base).parts
+
+            model_name = _infer_model_from_parts(parts)
+            tuning_id = _infer_tuning_from_parts(parts)
+            fold, seed = _infer_fold_seed_from_parts(parts)
+
+            if model_name is None or fold is None or seed is None:
                 skipped_parse += 1
                 if verbose:
-                    print(f'  [SKIP parse] model={model_name} tuning={tuning_id} fold={fold} seed={seed} path={fm_path.parent.relative_to(base)}')
+                    print(f'  [SKIP parse] path={seed_dir}')
                 continue
-            with open(fm_path) as f:
-                raw = f.read()
-            try:
-                metrics = json.loads(raw)
-            except json.JSONDecodeError:
-                metrics = _recover_truncated_json(raw)
-                if metrics is None:
-                    skipped_error += 1
-                    if verbose:
-                        print(f'  [ERROR] Unrecoverable JSON: {fm_path}')
-                    continue
-                if verbose:
-                    print(f'  [RECOVERED] Partial JSON ({len(metrics)} keys): {fm_path}')
-            # Read experiment_summary.json for the row value
-            seed_dir = fm_path.parent
+
+            fm_path = seed_dir / 'final_metrics.json'
+            metrics = {}
+            if fm_path.exists():
+                metrics = _read_json(fm_path) or {}
+
+            # fallback-compute motif edge stats if absent
+            if 'motif_edge_att/max_mean' not in metrics or 'motif_edge_att/min_mean' not in metrics:
+                max_mean, min_mean = _compute_attention_min_max_from_jsonl(seed_dir)
+                if not np.isnan(max_mean):
+                    metrics.setdefault('motif_edge_att/max_mean', max_mean)
+                if not np.isnan(min_mean):
+                    metrics.setdefault('motif_edge_att/min_mean', min_mean)
+
             summary_path = seed_dir / 'experiment_summary.json'
             summary = {}
             if summary_path.exists():
-                with open(summary_path) as f:
-                    summary = json.load(f)
-            row_val = _get_row_value(summary, experiment_name)
+                summary = _read_json(summary_path) or {}
+
+            row_val = _get_row_value(summary, experiment_name, parts=parts)
             row_label = _make_row_label(row_val, experiment_name)
+
             records.append({
                 'model': model_name,
                 'variant': tuning_id,
@@ -156,12 +349,11 @@ def find_results(results_dir: Path, experiment_name: str, verbose: bool = False)
         except Exception as e:
             skipped_error += 1
             if verbose:
-                print(f'  [ERROR] {fm_path}: {e}')
-            continue
-    if verbose or skipped_error > 0:
-        print(f'[DEBUG] Total: {len(all_final_metrics)}, '
-              f'skipped {skipped_experiment} (wrong experiment), {skipped_parse} (parse), '
-              f'{skipped_error} (error), collected {len(records)}')
+                print(f'  [ERROR] {seed_dir}: {e}')
+
+    if verbose:
+        print(f'[DEBUG] skipped_parse={skipped_parse}, skipped_error={skipped_error}, collected={len(records)}')
+
     return records
 
 
@@ -169,37 +361,17 @@ def _sigmoid(x: float) -> float:
     if x >= 0:
         z = math.exp(-x)
         return 1.0 / (1.0 + z)
-    else:
-        z = math.exp(x)
-        return z / (1.0 + z)
-
-
-def _read_jsonl(path: Path):
-    with path.open('r') as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                yield json.loads(line)
+    z = math.exp(x)
+    return z / (1.0 + z)
 
 
 def compute_posthoc_correlation(seed_dir: Path, split: str = 'test'):
-    """
-    Compute Pearson correlation between mean motif attention score and mean motif impact
-    using saved JSONL files, aggregated per motif type (motif_idx).
-
-    Mirrors the logic in Results_for_mose.ipynb:
-      score  = mean node attention per (split, motif_idx)
-      impact = mean |sigmoid(old) - sigmoid(new)| per (split, motif_idx)  [masked-edge-impact]
-
-    Returns (pearson_r, p_value, n_motifs) or (nan, nan, 0) if insufficient data.
-    """
     node_scores_path = seed_dir / 'node_scores.jsonl'
     impact_path = seed_dir / 'masked-edge-impact.jsonl'
 
     if not node_scores_path.exists() or not impact_path.exists():
         return np.nan, np.nan, 0
 
-    # Collect node scores grouped by (split, motif_idx)
     scores = defaultdict(list)
     for rec in _read_jsonl(node_scores_path):
         if rec.get('split') != split:
@@ -209,7 +381,6 @@ def compute_posthoc_correlation(seed_dir: Path, split: str = 'test'):
             continue
         scores[motif_idx].append(rec['score'])
 
-    # Collect impacts grouped by (split, motif_idx)
     impacts = defaultdict(list)
     for rec in _read_jsonl(impact_path):
         if rec.get('split') != split:
@@ -220,7 +391,6 @@ def compute_posthoc_correlation(seed_dir: Path, split: str = 'test'):
         imp = abs(_sigmoid(rec['new_prediction']) - _sigmoid(rec['old_prediction']))
         impacts[motif_idx].append(imp)
 
-    # Average per motif type, keep only motifs present in both
     common = set(scores.keys()) & set(impacts.keys())
     if len(common) < 3:
         return np.nan, np.nan, len(common)
@@ -236,14 +406,9 @@ def compute_posthoc_correlation(seed_dir: Path, split: str = 'test'):
 
 
 def build_posthoc_table(records, split='test'):
-    """
-    Build a pivot table of post-hoc motif score-to-impact Pearson correlation.
-    Reads node_scores.jsonl + masked-edge-impact.jsonl from each run's seed_dir.
-    """
     rows = []
     for rec in records:
-        seed_dir = rec['seed_dir']
-        r, p, n = compute_posthoc_correlation(seed_dir, split=split)
+        r, p, n = compute_posthoc_correlation(rec['seed_dir'], split=split)
         rows.append({
             'model': rec['model'],
             'row': rec['row'],
@@ -252,13 +417,17 @@ def build_posthoc_table(records, split='test'):
             'p_value': p,
             'n_motifs': n,
         })
+
     if not rows:
         return None, None
+
     df = pd.DataFrame(rows)
     agg = df.groupby(['row', 'row_val', 'model'])['pearson_r'].agg(['mean', 'std', 'count']).reset_index()
     agg = agg.sort_values('row_val')
+
     pivot_mean = agg.pivot(index='row', columns='model', values='mean')
     pivot_std = agg.pivot(index='row', columns='model', values='std')
+
     row_order = agg.drop_duplicates('row').sort_values('row_val')['row'].tolist()
     pivot_mean = pivot_mean.reindex(row_order).dropna(how='all')
     pivot_std = pivot_std.reindex(row_order).dropna(how='all')
@@ -266,16 +435,18 @@ def build_posthoc_table(records, split='test'):
 
 
 def build_table(records, metric_key):
-    """Build a pivot table: rows = hyperparameter values, columns = architectures."""
     if not records:
         return None, None
+
     df = pd.DataFrame(records)
     df['value'] = df['metrics'].apply(lambda m: m.get(metric_key, np.nan))
+
     agg = df.groupby(['row', 'row_val', 'model'])['value'].agg(['mean', 'std', 'count']).reset_index()
     agg = agg.sort_values('row_val')
+
     pivot_mean = agg.pivot(index='row', columns='model', values='mean')
     pivot_std = agg.pivot(index='row', columns='model', values='std')
-    # Sort rows by the numeric value
+
     row_order = agg.drop_duplicates('row').sort_values('row_val')['row'].tolist()
     pivot_mean = pivot_mean.reindex(row_order).dropna(how='all')
     pivot_std = pivot_std.reindex(row_order).dropna(how='all')
@@ -284,12 +455,10 @@ def build_table(records, metric_key):
 
 def main():
     parser = argparse.ArgumentParser(description='Collect Mutagenicity experiment results into tables')
-    parser.add_argument('--experiment_name', type=str, required=True,
-                        help='Experiment name (r_impact_node, r_impact_edge, within_motif_consistency_impact, between_motif_consistency_impact)')
+    parser.add_argument('--experiment_name', type=str, required=True)
     parser.add_argument('--results_dir', type=str, default=None,
                         help='Base results dir (default: RESULTS_DIR env or ../tuning_results)')
-    parser.add_argument('--output_dir', type=str, default=None,
-                        help='Where to write CSV (default: results_dir)')
+    parser.add_argument('--output_dir', type=str, default=None)
     parser.add_argument('--verbose', '-v', action='store_true')
     args = parser.parse_args()
 
@@ -307,18 +476,17 @@ def main():
 
     prefix = args.experiment_name
 
-    # Table 1: Prediction performance (valid ROC)
     pred_mean, pred_std = build_table(records, metric_key='metric/best_clf_roc_valid')
-    if pred_mean is not None:
+    if pred_mean is not None and not pred_mean.isna().all().all():
         path = output_dir / f'{prefix}_prediction_valid_roc.csv'
         pred_mean.to_csv(path)
         print(f'\n--- Prediction performance (valid ROC, mean over folds/seeds) ---')
         print(pred_mean.to_string())
         print(f'\nSaved: {path}')
-        path_std = output_dir / f'{prefix}_prediction_valid_roc_std.csv'
-        pred_std.to_csv(path_std)
+        pred_std.to_csv(output_dir / f'{prefix}_prediction_valid_roc_std.csv')
+    else:
+        print('\nNo metric/best_clf_roc_valid data found.')
 
-    # Table 2: Explainer performance (motif att–impact correlation)
     exp_mean, exp_std = build_table(records, metric_key='motif/att_impact_correlation')
     if exp_mean is not None and not exp_mean.isna().all().all():
         path = output_dir / f'{prefix}_explainer_correlation.csv'
@@ -326,12 +494,10 @@ def main():
         print(f'\n--- Explainer (motif att–impact correlation, mean over folds/seeds) ---')
         print(exp_mean.to_string())
         print(f'\nSaved: {path}')
-        path_std = output_dir / f'{prefix}_explainer_correlation_std.csv'
-        exp_std.to_csv(path_std)
+        exp_std.to_csv(output_dir / f'{prefix}_explainer_correlation_std.csv')
     else:
         print('\nNo motif/att_impact_correlation data found.')
 
-    # Table 3: Motif edge attention range (max - min per motif)
     range_mean, range_std = build_table(records, metric_key='motif_edge_att/max_mean')
     if range_mean is not None and not range_mean.isna().all().all():
         path = output_dir / f'{prefix}_motif_edge_att_max.csv'
@@ -339,16 +505,17 @@ def main():
         print(f'\n--- Motif edge att max (mean over folds/seeds) ---')
         print(range_mean.to_string())
         print(f'\nSaved: {path}')
+        range_std.to_csv(output_dir / f'{prefix}_motif_edge_att_max_std.csv')
 
-    min_mean, _ = build_table(records, metric_key='motif_edge_att/min_mean')
+    min_mean, min_std = build_table(records, metric_key='motif_edge_att/min_mean')
     if min_mean is not None and not min_mean.isna().all().all():
         path = output_dir / f'{prefix}_motif_edge_att_min.csv'
         min_mean.to_csv(path)
         print(f'\n--- Motif edge att min (mean over folds/seeds) ---')
         print(min_mean.to_string())
         print(f'\nSaved: {path}')
+        min_std.to_csv(output_dir / f'{prefix}_motif_edge_att_min_std.csv')
 
-    # Table: Post-hoc motif score vs impact correlation (per split)
     for split in ['train', 'valid', 'test']:
         ph_mean, ph_std = build_posthoc_table(records, split=split)
         if ph_mean is not None and not ph_mean.isna().all().all():
@@ -357,8 +524,7 @@ def main():
             print(f'\n--- Post-hoc score–impact correlation ({split}, mean over folds/seeds) ---')
             print(ph_mean.to_string())
             print(f'\nSaved: {path}')
-            path_std = output_dir / f'{prefix}_posthoc_correlation_{split}_std.csv'
-            ph_std.to_csv(path_std)
+            ph_std.to_csv(output_dir / f'{prefix}_posthoc_correlation_{split}_std.csv')
 
 
 if __name__ == '__main__':

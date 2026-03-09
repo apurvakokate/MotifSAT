@@ -55,8 +55,8 @@ EXPERIMENT_GROUPS = {
     # NEW: Incremental R-value sweep experiments
     # =========================================================================
 
-    'vanilla_gnn': {
-        'experiment_name': 'vanilla_gnn',
+    'vanilla_gnn_node_repaired': {
+        'experiment_name': 'vanilla_gnn_node_repaired',
         'variants': [
             {
                 'variant_id': 'no_attention',
@@ -72,8 +72,8 @@ EXPERIMENT_GROUPS = {
         ],
     },
 
-    'base_gsat_fix_r': {
-        'experiment_name': 'base_gsat_fix_r',
+    'base_gsat_fix_r_node_repaired': {
+        'experiment_name': 'base_gsat_fix_r_node_repaired',
         'variants': [
             {
                 'variant_id': f'fix_r{r}',
@@ -89,8 +89,8 @@ EXPERIMENT_GROUPS = {
         ],
     },
 
-    'base_gsat_decay_r': {
-        'experiment_name': 'base_gsat_decay_r',
+    'base_gsat_decay_r_node_repaired': {
+        'experiment_name': 'base_gsat_decay_r_node_repaired',
         'variants': [
             {
                 'variant_id': f'decay_final{fr}',
@@ -108,8 +108,8 @@ EXPERIMENT_GROUPS = {
         ],
     },
 
-    'motif_readout_fix_r': {
-        'experiment_name': 'motif_readout_fix_r',
+    'motif_readout_fix_r_repaired': {
+        'experiment_name': 'motif_readout_fix_r_repaired',
         'variants': [
             {
                 'variant_id': f'readout_fix_r{r}',

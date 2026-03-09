@@ -6,7 +6,6 @@ from pathlib import Path
 from copy import deepcopy
 from datetime import datetime
 import os
-import pdb
 import json
 import torch
 import torch.nn as nn
@@ -1200,7 +1199,8 @@ class GSAT(nn.Module):
             if self.learn_edge_att:
                 edge_att = torch.ones(data.edge_index.size(1), 1, device=data.x.device)
             else:
-                edge_att = torch.ones(data.x.size(0), 1, device=data.x.device)
+                node_att = torch.ones(data.x.size(0), 1, device=data.x.device)
+                edge_att = self.lift_node_att_to_edge_att(node_att, data.edge_index)
             pred_loss = self.criterion(clf_logits, data.y)
             loss = self.pred_loss_coef * pred_loss
             loss_dict = {'loss': loss.item(), 'pred': pred_loss.item(), 'info': 0.0,
@@ -1493,6 +1493,7 @@ class GSAT(nn.Module):
             '''
             # Skip detailed score export if datasets are not provided (e.g., for paper dataset replication)
             if epoch == self.epochs - 1 and self.datasets is not None:
+                
                 print(f"[INFO] Computing attention scores using small batch processing")
                 
                 # Export node and edge scores to jsonl files using small batch processing
@@ -1544,7 +1545,6 @@ class GSAT(nn.Module):
                                         else:
                                             continue
                                     
-                                    # Check if graph index exists in this motif
                                     if di not in self.masked_data_features[split_name][local_motif_key]:
                                         continue
                                     
@@ -1592,6 +1592,10 @@ class GSAT(nn.Module):
                                     src, dst = data.edge_index
                                     keep_edge_mask = ~(masked_nodes[src] & masked_nodes[dst])
                                     filtered_edge_index = data.edge_index[:, keep_edge_mask]
+                                    
+                                    if filtered_edge_index.size(1) == 0:
+                                        print(f"[DEBUG] Empty filtered_edge_index at split={split_name}, graph_idx={di}, motif_idx={int(local_motif_key)}")
+                                        
                                     
                                     # Filter edge_attr accordingly
                                     if data.edge_attr is not None:
@@ -1783,7 +1787,10 @@ class GSAT(nn.Module):
         metrics = {}
         
         # Entropy (normalized to [0, 1])
-        entropy = -np.mean(att_np * np.log(att_np) + (1 - att_np) * np.log(1 - att_np))
+        eps = 1e-12
+        att = att.clamp(eps, 1 - eps)
+
+        entropy = -(att * att.log() + (1 - att) * (1 - att).log()).mean()
         max_entropy = np.log(2)  # Maximum entropy for binary
         metrics['att_entropy'] = entropy / max_entropy
         
@@ -2413,9 +2420,11 @@ def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_nam
     gsat_config = local_config.get('GSAT_config', {})
     tuning_id = gsat_config.get('tuning_id', 'default')
     experiment_name = gsat_config.get('experiment_name', 'default_experiment')
+    
     pred_coef = gsat_config.get('pred_loss_coef', 1.0)
     info_coef = gsat_config.get('info_loss_coef', 1.0)
     motif_coef = gsat_config.get('motif_loss_coef', 0.0)
+    between_coef = gsat_config.get('between_motif_coef', 0.0)
     init_r = gsat_config.get('init_r', 0.9)
     final_r = gsat_config.get('final_r', 0.7)
     decay_r = gsat_config.get('decay_r', 0.1)
@@ -2438,7 +2447,7 @@ def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_nam
         f'experiment_{experiment_name}',
         f'tuning_{tuning_id}',
         f'method_{motif_method_str}_{train_motif_str}_{separate_model_str}',
-        f'pred{pred_coef}_info{info_coef}_motif{motif_coef}',
+        f'pred{pred_coef}_info{info_coef}_motif{motif_coef}_between{between_coef}',
         f'init{init_r}_final{final_r}_decay{decay_r}',
         f'fold{fold}_seed{random_state}'
     )
