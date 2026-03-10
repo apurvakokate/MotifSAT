@@ -307,12 +307,12 @@ def _compute_attention_min_max_from_jsonl(seed_dir: Path):
     return float(np.mean(per_motif_max)), float(np.mean(per_motif_min))
 
 
-def find_results(results_dir: Path, experiment_name: str, verbose: bool = False):
+def find_results(results_dir: Path, experiment_name: str, verbose: bool = False, dataset: str = 'Mutagenicity'):
     """
     Find run directories for the given experiment_name.
     Prefers final_metrics.json, but can still register a run if only attention_distributions.jsonl exists.
     """
-    base = results_dir / 'Mutagenicity'
+    base = results_dir / dataset
     if not base.exists():
         print(f'[WARN] Directory does not exist: {base}')
         return []
@@ -526,9 +526,128 @@ def _print_and_save_table(label, mean_df, std_df, count_df, prefix, suffix, outp
     print(f'Saved: {path}')
 
 
+MOTIF_READOUT_EXPERIMENTS = {
+    ('fix', 'mean'): 'motif_readout_fix_r_mean',
+    ('fix', 'sum'):  'motif_readout_fix_r_sum',
+    ('decay', 'mean'): 'motif_readout_decay_r_mean',
+    ('decay', 'sum'):  'motif_readout_decay_r_sum',
+}
+
+
+def build_combined_motif_readout_table(results_dir, metric_key, dataset='Mutagenicity', verbose=False):
+    """
+    Build a combined table across all 4 motif readout experiments.
+
+    Returns a DataFrame with:
+      Row MultiIndex: (r_value, pooling)  e.g. (0.9, 'mean'), (0.9, 'sum')
+      Column MultiIndex: (model, schedule) e.g. ('GCN', 'fix'), ('GCN', 'decay')
+    """
+    all_rows = []
+
+    for (schedule, pooling), exp_name in MOTIF_READOUT_EXPERIMENTS.items():
+        records = find_results(results_dir, exp_name, verbose=verbose, dataset=dataset)
+        if not records:
+            continue
+
+        for rec in records:
+            val = rec['metrics'].get(metric_key, np.nan)
+            r_value = rec['row_val']
+            all_rows.append({
+                'r': r_value,
+                'pooling': pooling,
+                'schedule': schedule,
+                'model': rec['model'],
+                'fold': rec['fold'],
+                'seed': rec['seed'],
+                'value': val,
+            })
+
+    if not all_rows:
+        return None, None, None
+
+    df = pd.DataFrame(all_rows)
+
+    agg = df.groupby(['r', 'pooling', 'model', 'schedule'])['value'].agg(
+        ['mean', 'std', 'count']).reset_index()
+
+    mean_records, std_records, count_records = [], [], []
+    for _, row in agg.iterrows():
+        key = {'r': row['r'], 'pooling': row['pooling']}
+        col = (row['model'], row['schedule'])
+        mean_records.append({**key, 'col': col, 'val': row['mean']})
+        std_records.append({**key, 'col': col, 'val': row['std']})
+        count_records.append({**key, 'col': col, 'val': row['count']})
+
+    def _pivot(records_list):
+        if not records_list:
+            return None
+        rows_idx = sorted({(r['r'], r['pooling']) for r in records_list},
+                          key=lambda x: (-x[0], x[1]))
+        cols = sorted({r['col'] for r in records_list}, key=lambda x: (x[0], x[1]))
+        multi_idx = pd.MultiIndex.from_tuples(rows_idx, names=['r', 'pooling'])
+        multi_col = pd.MultiIndex.from_tuples(cols, names=['model', 'schedule'])
+        result = pd.DataFrame(np.nan, index=multi_idx, columns=multi_col)
+        for r in records_list:
+            result.at[(r['r'], r['pooling']), r['col']] = r['val']
+        return result
+
+    return _pivot(mean_records), _pivot(std_records), _pivot(count_records)
+
+
+def format_combined_mean_std(mean_df, std_df, count_df):
+    """Format combined table as 'mean +/- std (n=N)'."""
+    if mean_df is None:
+        return None
+    combined = mean_df.copy().astype(object)
+    for col in mean_df.columns:
+        for idx in mean_df.index:
+            m = mean_df.at[idx, col]
+            s = std_df.at[idx, col] if std_df is not None else np.nan
+            n = count_df.at[idx, col] if count_df is not None else np.nan
+            if pd.isna(m):
+                combined.at[idx, col] = ''
+            elif pd.isna(s) or pd.isna(n):
+                combined.at[idx, col] = f'{m:.4f}'
+            else:
+                combined.at[idx, col] = f'{m:.4f} +/- {s:.4f} (n={int(n)})'
+    return combined
+
+
+def run_combined_motif_readout(results_dir, output_dir, dataset='Mutagenicity', verbose=False):
+    """Generate combined motif readout tables for all key metrics."""
+    metrics = [
+        ('metric/best_clf_roc_valid', 'Valid ROC', 'valid_roc'),
+        ('metric/best_clf_roc_test', 'Test ROC', 'test_roc'),
+        ('motif/att_impact_correlation', 'Explainer Correlation', 'explainer_corr'),
+    ]
+
+    for metric_key, label, suffix in metrics:
+        mean_df, std_df, count_df = build_combined_motif_readout_table(
+            results_dir, metric_key, dataset=dataset, verbose=verbose)
+
+        if mean_df is None:
+            print(f'\nNo data for combined motif readout: {label}')
+            continue
+
+        formatted = format_combined_mean_std(mean_df, std_df, count_df)
+        print(f'\n=== Combined Motif Readout: {label} ({dataset}) ===')
+        print(formatted.to_string())
+
+        path = output_dir / f'combined_motif_readout_{dataset}_{suffix}.csv'
+        mean_df.to_csv(path)
+        std_df.to_csv(output_dir / f'combined_motif_readout_{dataset}_{suffix}_std.csv')
+        count_df.to_csv(output_dir / f'combined_motif_readout_{dataset}_{suffix}_count.csv')
+        print(f'Saved: {path}')
+
+
 def main():
-    parser = argparse.ArgumentParser(description='Collect Mutagenicity experiment results into tables')
-    parser.add_argument('--experiment_name', type=str, required=True)
+    parser = argparse.ArgumentParser(description='Collect GSAT experiment results into tables')
+    parser.add_argument('--experiment_name', type=str, default=None,
+                        help='Single experiment name to collect')
+    parser.add_argument('--combine_motif_readout', action='store_true',
+                        help='Build combined motif readout table across fix/decay x mean/sum')
+    parser.add_argument('--dataset', type=str, default='Mutagenicity',
+                        help='Dataset name (default: Mutagenicity)')
     parser.add_argument('--results_dir', type=str, default=None,
                         help='Base results dir (default: RESULTS_DIR env or ../tuning_results)')
     parser.add_argument('--output_dir', type=str, default=None)
@@ -539,12 +658,19 @@ def main():
     output_dir = Path(args.output_dir or results_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    records = find_results(results_dir, args.experiment_name, verbose=args.verbose)
-    if not records:
-        print(f'No results found for experiment "{args.experiment_name}" under {results_dir / "Mutagenicity"}.')
+    if args.combine_motif_readout:
+        run_combined_motif_readout(results_dir, output_dir, dataset=args.dataset, verbose=args.verbose)
         return
 
-    print(f'Experiment: {args.experiment_name}')
+    if args.experiment_name is None:
+        parser.error('--experiment_name is required unless --combine_motif_readout is used')
+
+    records = find_results(results_dir, args.experiment_name, verbose=args.verbose, dataset=args.dataset)
+    if not records:
+        print(f'No results found for experiment "{args.experiment_name}" under {results_dir / args.dataset}.')
+        return
+
+    print(f'Experiment: {args.experiment_name} (dataset: {args.dataset})')
     print(f'Found {len(records)} runs.')
 
     prefix = args.experiment_name
