@@ -2497,7 +2497,7 @@ def train_vanilla_gnn_one_seed(local_config, data_dir, log_dir, model_name, data
         'fold': fold,
         'seed': random_state,
         'method': 'vanilla_clean',
-        'hparams': {k: str(v) if isinstance(v, (dict, list)) else v for k, v in model_config.items()},
+        'hparams': {k: str(v) if not isinstance(v, (int, float, str, bool, type(None))) else v for k, v in model_config.items()},
         'loss_coefficients': {'pred_loss_coef': 1.0, 'info_loss_coef': 0.0},
         'weight_distribution_params': {'fix_r': 1.0},
     }
