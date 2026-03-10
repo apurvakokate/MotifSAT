@@ -471,12 +471,23 @@ def build_posthoc_table(records, split='test'):
     return pivot_mean, pivot_std, pivot_count
 
 
-def build_table(records, metric_key):
+def build_table(records, metric_key, verbose=False):
     if not records:
         return None, None, None
 
     df = pd.DataFrame(records)
+    df['has_key'] = df['metrics'].apply(lambda m: metric_key in m)
     df['value'] = df['metrics'].apply(lambda m: m.get(metric_key, np.nan))
+
+    if verbose:
+        total = df.groupby(['row', 'model']).size().rename('total_runs')
+        present = df.groupby(['row', 'model'])['has_key'].sum().rename('has_metric')
+        diag = pd.concat([total, present], axis=1)
+        missing = diag[diag['has_metric'] < diag['total_runs']]
+        if not missing.empty:
+            print(f'  [DIAG] Metric "{metric_key}" missing in some runs:')
+            for (row, model), r in missing.iterrows():
+                print(f'    {row} / {model}: {int(r["has_metric"])}/{int(r["total_runs"])} runs have the key')
 
     agg = df.groupby(['row', 'row_val', 'model'])['value'].agg(['mean', 'std', 'count']).reset_index()
     agg = agg.sort_values('row_val')
@@ -493,7 +504,14 @@ def build_table(records, metric_key):
 
 
 def format_mean_std_count(mean_df, std_df, count_df):
-    """Combine mean, std, and count into 'mean +/- std (n=N)' formatted DataFrame."""
+    """Combine mean, std, and count into 'mean +/- std' formatted DataFrame.
+
+    Blank / missing-std cells get a diagnostic suffix explaining WHY:
+      [no_runs]           – no seed directories matched this (row, model) combo
+      [metric_NaN,n=K]    – K runs found but the metric was NaN in all of them
+      [n=1,no_std]        – only 1 valid value so std is undefined (ddof=1)
+      [std=NaN,n=K]       – K>1 values but std still NaN (all identical?)
+    """
     if mean_df is None:
         return None
     combined = mean_df.copy().astype(object)
@@ -503,11 +521,19 @@ def format_mean_std_count(mean_df, std_df, count_df):
             s = std_df.at[idx, col] if idx in std_df.index and col in std_df.columns else np.nan
             n = count_df.at[idx, col] if idx in count_df.index and col in count_df.columns else np.nan
             if pd.isna(m):
-                combined.at[idx, col] = ''
-            elif pd.isna(s) or pd.isna(n):
-                combined.at[idx, col] = f'{m:.4f}'
+                if pd.isna(n):
+                    combined.at[idx, col] = '[no_runs]'
+                elif int(n) == 0:
+                    combined.at[idx, col] = '[metric_NaN,n=0]'
+                else:
+                    combined.at[idx, col] = f'[metric_NaN,n={int(n)}]'
+            elif pd.isna(s):
+                if pd.isna(n) or int(n) == 1:
+                    combined.at[idx, col] = f'{m:.4f} [n=1,no_std]'
+                else:
+                    combined.at[idx, col] = f'{m:.4f} [std=NaN,n={int(n)}]'
             else:
-                combined.at[idx, col] = f'{m:.4f} +/- {s:.4f} (n={int(n)})'
+                combined.at[idx, col] = f'{m:.4f} +/- {s:.4f}'
     return combined
 
 
@@ -595,7 +621,7 @@ def build_combined_motif_readout_table(results_dir, metric_key, dataset='Mutagen
 
 
 def format_combined_mean_std(mean_df, std_df, count_df):
-    """Format combined table as 'mean +/- std (n=N)'."""
+    """Format combined table as 'mean +/- std' with diagnostic reasons for gaps."""
     if mean_df is None:
         return None
     combined = mean_df.copy().astype(object)
@@ -605,11 +631,19 @@ def format_combined_mean_std(mean_df, std_df, count_df):
             s = std_df.at[idx, col] if std_df is not None else np.nan
             n = count_df.at[idx, col] if count_df is not None else np.nan
             if pd.isna(m):
-                combined.at[idx, col] = ''
-            elif pd.isna(s) or pd.isna(n):
-                combined.at[idx, col] = f'{m:.4f}'
+                if pd.isna(n):
+                    combined.at[idx, col] = '[no_runs]'
+                elif int(n) == 0:
+                    combined.at[idx, col] = '[metric_NaN,n=0]'
+                else:
+                    combined.at[idx, col] = f'[metric_NaN,n={int(n)}]'
+            elif pd.isna(s):
+                if pd.isna(n) or int(n) == 1:
+                    combined.at[idx, col] = f'{m:.4f} [n=1,no_std]'
+                else:
+                    combined.at[idx, col] = f'{m:.4f} [std=NaN,n={int(n)}]'
             else:
-                combined.at[idx, col] = f'{m:.4f} +/- {s:.4f} (n={int(n)})'
+                combined.at[idx, col] = f'{m:.4f} +/- {s:.4f}'
     return combined
 
 
@@ -675,23 +709,25 @@ def main():
 
     prefix = args.experiment_name
 
-    pred_mean, pred_std, pred_count = build_table(records, metric_key='metric/best_clf_roc_valid')
+    verbose = args.verbose
+
+    pred_mean, pred_std, pred_count = build_table(records, metric_key='metric/best_clf_roc_valid', verbose=verbose)
     _print_and_save_table('Prediction performance (valid ROC, mean +/- std)',
                           pred_mean, pred_std, pred_count, prefix, 'prediction_valid_roc', output_dir)
 
-    test_mean, test_std, test_count = build_table(records, metric_key='metric/best_clf_roc_test')
+    test_mean, test_std, test_count = build_table(records, metric_key='metric/best_clf_roc_test', verbose=verbose)
     _print_and_save_table('Prediction performance (test ROC, mean +/- std)',
                           test_mean, test_std, test_count, prefix, 'prediction_test_roc', output_dir)
 
-    exp_mean, exp_std, exp_count = build_table(records, metric_key='motif/att_impact_correlation')
+    exp_mean, exp_std, exp_count = build_table(records, metric_key='motif/att_impact_correlation', verbose=verbose)
     _print_and_save_table('Explainer (motif att-impact correlation, mean +/- std)',
                           exp_mean, exp_std, exp_count, prefix, 'explainer_correlation', output_dir)
 
-    range_mean, range_std, range_count = build_table(records, metric_key='motif_edge_att/max_mean')
+    range_mean, range_std, range_count = build_table(records, metric_key='motif_edge_att/max_mean', verbose=verbose)
     _print_and_save_table('Motif edge att max (mean +/- std)',
                           range_mean, range_std, range_count, prefix, 'motif_edge_att_max', output_dir)
 
-    min_mean, min_std, min_count = build_table(records, metric_key='motif_edge_att/min_mean')
+    min_mean, min_std, min_count = build_table(records, metric_key='motif_edge_att/min_mean', verbose=verbose)
     _print_and_save_table('Motif edge att min (mean +/- std)',
                           min_mean, min_std, min_count, prefix, 'motif_edge_att_min', output_dir)
 

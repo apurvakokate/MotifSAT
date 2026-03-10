@@ -2256,8 +2256,10 @@ def calculate_explainer_performance(model, extractor, data_loader, device, epoch
                                 impact = abs(orig_probs[graph_id].item() - masked_prob)
                                 motif_att_scores.append(motif_mean_att)
                                 motif_impact_scores.append(impact)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    import traceback
+                    print(f"[WARN] Motif analysis failed on batch {batch_idx}: {exc}")
+                    traceback.print_exc()
             
             edge_att = edge_att.squeeze()
             all_att_values.append(edge_att.cpu().numpy())
