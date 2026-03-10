@@ -182,7 +182,7 @@ def generate_script(incomplete, experiment_name: str, dataset: str,
     seeds_arg = ' '.join(str(s) for s in seeds)
     cmd = (
         f'python run_mutagenicity_gsat_experiment.py \\\n'
-        f'    --experiment {experiment_name} \\\n'
+        f'    --experiments {experiment_name} \\\n'
         f'    --dataset {dataset} \\\n'
         f'    --models {models_arg} \\\n'
         f'    --folds {folds_arg} \\\n'
