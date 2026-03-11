@@ -2620,6 +2620,16 @@ def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_nam
     motif_method_str = str(motif_method) if motif_method else 'none'
     train_motif_str = 'trainmotif' if train_motif_graph else 'notrain'
     separate_model_str = 'separate' if separate_motif_model else 'shared'
+
+    # Mirror the type coercions from GSAT.__init__ so the pre-check path
+    # matches what the class actually creates on disk.
+    # Order must match GSAT.__init__: no_attention (line 915) then motif_method (line 941).
+    no_attention = gsat_config.get('no_attention', False)
+    if no_attention:
+        info_coef = 0
+        motif_coef = 0
+    if motif_method is None:
+        motif_coef = 0.0
     
     # Use environment variable if set (for HPC), otherwise use relative path
     results_base = os.environ.get('RESULTS_DIR', '../tuning_results')
