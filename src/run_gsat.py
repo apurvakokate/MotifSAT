@@ -2431,12 +2431,12 @@ def train_vanilla_gnn_one_seed(local_config, data_dir, log_dir, model_name, data
     experiment_name = gsat_config.get('experiment_name', 'default_experiment')
 
     results_base = os.environ.get('RESULTS_DIR', '../tuning_results')
-    seed_dir = os.path.join(
+    seed_dir = Path(os.path.join(
         results_base, str(dataset_name), f'model_{model_name}',
         f'experiment_{experiment_name}', f'tuning_{tuning_id}',
         'method_vanilla', 'vanilla',
         f'fold{fold}_seed{random_state}'
-    )
+    ))
 
     if check_artifacts_exist(seed_dir):
         try:
