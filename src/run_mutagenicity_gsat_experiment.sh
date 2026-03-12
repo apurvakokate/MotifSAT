@@ -20,14 +20,11 @@ export RESULTS_DIR=~/hpc-share/ChemIntuit/MotifSAT/tuning_results
 export WANDB_DIR=~/hpc-share/ChemIntuit/MotifSAT/wandb
 
 EXPERIMENTS=(
-  vanilla_gnn_node_repaired
-  vanilla_gnn_clean
-  motif_readout_fix_r_mean
-  motif_readout_fix_r_sum
-  motif_readout_decay_r_mean
-  motif_readout_decay_r_sum
+  base_gsat_decay_r_explainer
+  motif_readout_decay_r_mean_explainer
+  motif_readout_decay_r_mean_sampling_explainer
 )
-DATASETS=(Mutagenicity Benzene)
+DATASETS=(Mutagenicity)
 MODELS=(GCN SAGE)
 
 for DATASET in "${DATASETS[@]}"; do
