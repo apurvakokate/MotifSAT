@@ -119,6 +119,7 @@ def load_trained_model(checkpoint_dir, model_name, dataset_name, device,
         random_state=0,
         mutag_x=data_config.get('mutag_x', False),
         fold=fold if is_mol else None,
+        path = "/nfs/stak/users/kokatea/hpc-share/ChemIntuit/MotifBreakdown/DICTIONARY_CREATE" if is_mol else None
     )
 
     if len(loader_result) >= 8:
