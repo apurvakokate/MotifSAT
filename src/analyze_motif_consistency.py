@@ -96,19 +96,46 @@ def find_best_checkpoint_epoch(checkpoint_dir):
 
 def load_trained_model(checkpoint_dir, model_name, dataset_name, device,
                        epoch=None, fold=0):
-    """Load trained classifier and extractor from checkpoint."""
+    """
+    Load trained classifier and extractor from checkpoint.
+
+    Reads shared_config.yaml and model_config.yaml saved during training so
+    that learn_edge_att, hidden_size, etc. exactly match the checkpoint.
+    Falls back to get_base_config() defaults for any file that doesn't exist.
+    """
     import yaml
 
     checkpoint_dir = Path(checkpoint_dir)
+
+    # Start from defaults, then override with configs saved during training
     config = get_base_config(model_name, dataset_name)
+    data_config = config['data_config']
+    model_config = config['model_config']
+    shared_config = config['shared_config']
+
+    # Override shared_config (learn_edge_att, extractor_dropout_p, …)
+    saved_shared = checkpoint_dir / 'shared_config.yaml'
+    if saved_shared.exists():
+        with open(saved_shared, 'r') as f:
+            saved = yaml.safe_load(f) or {}
+        shared_config.update(saved)
+        print(f"[INFO] Loaded shared_config from {saved_shared}")
+    else:
+        print(f"[WARNING] No shared_config.yaml in {checkpoint_dir}, using defaults")
+
+    # Override model_config (hidden_size, n_layers, gcn_normalize, …)
+    saved_model_cfg = checkpoint_dir / 'model_config.yaml'
+    if saved_model_cfg.exists():
+        with open(saved_model_cfg, 'r') as f:
+            saved = yaml.safe_load(f) or {}
+        model_config.update(saved)
+        print(f"[INFO] Loaded model_config from {saved_model_cfg}")
+    else:
+        print(f"[WARNING] No model_config.yaml in {checkpoint_dir}, using defaults")
 
     config_dir = Path('./configs')
     global_config = yaml.safe_load((config_dir / 'global_config.yml').open('r'))
     data_dir = Path(global_config['data_dir'])
-
-    data_config = config['data_config']
-    model_config = config['model_config']
-    shared_config = config['shared_config']
 
     batch_size = data_config['batch_size']
     splits = data_config.get('splits', None)
@@ -119,13 +146,9 @@ def load_trained_model(checkpoint_dir, model_name, dataset_name, device,
         random_state=0,
         mutag_x=data_config.get('mutag_x', False),
         fold=fold if is_mol else None,
-        path = "/nfs/stak/users/kokatea/hpc-share/ChemIntuit/MotifBreakdown/DICTIONARY_CREATE" if is_mol else None
     )
 
-    if len(loader_result) >= 8:
-        loaders, test_set, x_dim, edge_attr_dim, num_class, aux_info = loader_result[:6]
-    else:
-        loaders, test_set, x_dim, edge_attr_dim, num_class, aux_info = loader_result[:6]
+    loaders, test_set, x_dim, edge_attr_dim, num_class, aux_info = loader_result[:6]
 
     model_config['deg'] = aux_info['deg']
     clf = get_model(x_dim, edge_attr_dim, num_class, aux_info['multi_label'], model_config, device)
@@ -134,6 +157,8 @@ def load_trained_model(checkpoint_dir, model_name, dataset_name, device,
     if epoch is None:
         epoch = find_best_checkpoint_epoch(checkpoint_dir)
     print(f"[INFO] Loading checkpoint epoch {epoch} from {checkpoint_dir}")
+    print(f"[INFO] ExtractorMLP: learn_edge_att={shared_config['learn_edge_att']}, "
+          f"hidden_size={model_config['hidden_size']}")
 
     load_checkpoint(clf, checkpoint_dir, f'gsat_clf_epoch_{epoch}')
     load_checkpoint(extractor, checkpoint_dir, f'gsat_att_epoch_{epoch}')

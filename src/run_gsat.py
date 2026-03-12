@@ -1429,8 +1429,8 @@ class GSAT(nn.Module):
                                'metric/best_clf_roc_train': train_res[3], 'metric/best_clf_roc_valid': valid_res[3], 'metric/best_clf_roc_test': test_res[3],
                                'metric/best_x_roc_train': train_res[0], 'metric/best_x_roc_valid': valid_res[0], 'metric/best_x_roc_test': test_res[0],
                                'metric/best_x_precision_train': train_res[1], 'metric/best_x_precision_valid': valid_res[1], 'metric/best_x_precision_test': test_res[1]}
-                save_checkpoint(self.clf, self.model_dir, model_name='gsat_clf_epoch_' + str(epoch))
-                save_checkpoint(self.extractor, self.model_dir, model_name='gsat_att_epoch_' + str(epoch))
+                save_checkpoint(self.clf, Path(self.seed_dir), model_name='gsat_clf_epoch_' + str(epoch))
+                save_checkpoint(self.extractor, Path(self.seed_dir), model_name='gsat_att_epoch_' + str(epoch))
                 epochs_without_improvement = 0
             elif (r == self.final_r or self.fix_r) and epoch > 10:
                 epochs_without_improvement += 1
@@ -1489,8 +1489,8 @@ class GSAT(nn.Module):
             #         self.visualize_results(test_set, idx, epoch, tag, use_edge_attr)
 
             if epoch == self.epochs - 1:
-                save_checkpoint(self.clf, self.model_dir, model_name='gsat_clf_epoch_' + str(epoch))
-                save_checkpoint(self.extractor, self.model_dir, model_name='gsat_att_epoch_' + str(epoch))
+                save_checkpoint(self.clf, Path(self.seed_dir), model_name='gsat_clf_epoch_' + str(epoch))
+                save_checkpoint(self.extractor, Path(self.seed_dir), model_name='gsat_att_epoch_' + str(epoch))
                 
             # ===== Save edge and node scores for the last epoch using small batches =====
             '''
@@ -2774,6 +2774,13 @@ def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_nam
     print('====================================')
     print('[INFO] Training GSAT...')
     gsat = GSAT(model, extractor, optimizer, scheduler, writer, device, log_dir, dataset_name, num_class, aux_info['multi_label'], random_state, method_config, shared_config, fold, task_type, datasets, masked_data_features, motif_clf=motif_clf, motif_list=motif_list)
+
+    # Save model_config to seed_dir for post-hoc analysis (hidden_size, n_layers, etc.)
+    model_config_save = {k: v for k, v in model_config.items()
+                         if not isinstance(v, torch.Tensor)}
+    with open(os.path.join(gsat.seed_dir, "model_config.yaml"), "w") as f:
+        yaml.safe_dump(model_config_save, f, sort_keys=False)
+
     metric_dict = gsat.train(loaders, test_set, metric_dict, model_config.get('use_edge_attr', True))
     scalar_metric_dict = {k: v for k, v in metric_dict.items() if isinstance(v, (int, float))}
     writer.add_hparams(hparam_dict=hparam_dict, metric_dict=scalar_metric_dict)
