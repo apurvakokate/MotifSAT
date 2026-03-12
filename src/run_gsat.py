@@ -1517,8 +1517,26 @@ class GSAT(nn.Module):
                             data = data.to(self.device)
                             batch = torch.zeros(data.x.size(0), dtype=torch.long, device=data.x.device)
                             emb = self.clf.get_emb(data.x, data.edge_index, batch, edge_attr=data.edge_attr)
-                            att_log_logits = self.extractor(emb,data.edge_index, batch)
-                            att = self.sampling(att_log_logits, epoch, training=False)
+
+                            # Use the correct attention extraction path based on method
+                            if self.motif_method == 'readout':
+                                n2m = getattr(data, 'nodes_to_motifs', None)
+                                if n2m is not None:
+                                    motif_emb, motif_batch, inv_idx, _ = motif_pooling(
+                                        emb, n2m, batch, reduce=self.motif_pooling_method)
+                                    motif_logits = self.extractor(motif_emb, None, motif_batch)
+                                    if self.motif_level_sampling:
+                                        motif_att = self.sampling(motif_logits, epoch, training=False)
+                                        att = lift_motif_att_to_node_att(motif_att, inv_idx)
+                                    else:
+                                        node_logits = lift_motif_att_to_node_att(motif_logits, inv_idx)
+                                        att = self.sampling(node_logits, epoch, training=False)
+                                else:
+                                    att_log_logits = self.extractor(emb, data.edge_index, batch)
+                                    att = self.sampling(att_log_logits, epoch, training=False)
+                            else:
+                                att_log_logits = self.extractor(emb, data.edge_index, batch)
+                                att = self.sampling(att_log_logits, epoch, training=False)
 
                             sample_results = {}
                             # Handle edge attention conversion for batch processing
@@ -1532,104 +1550,113 @@ class GSAT(nn.Module):
                                         ).detach().cpu().numpy()
                                 sample_results['sample'] = data 
 
-                                # For each motif in the current graph mask it out 
-                                # Skip if nodes_to_motifs or masked_data_features are not available
+                                # ── Individual node/edge masking impact ──
+                                old_prediction = self.clf.forward(data.x, data.edge_index, batch, edge_attr=data.edge_attr)
+                                old_pred_val = float(old_prediction.squeeze().detach().cpu().item())
                                 nodes_to_motifs = getattr(data, 'nodes_to_motifs', None)
-                                if nodes_to_motifs is None or self.masked_data_features is None:
-                                    continue
-                                    
-                                for local_motif in nodes_to_motifs.unique():
-                                    # Convert tensor to int/Python scalar for key comparison
-                                    local_motif_key = int(local_motif.item()) if hasattr(local_motif, 'item') else int(local_motif)
-                                    
-                                    # Check if motif exists before accessing to avoid defaultdict auto-creation
-                                    if local_motif_key not in self.masked_data_features[split_name]:
-                                        # Also try with original tensor key
-                                        if local_motif in self.masked_data_features[split_name]:
-                                            local_motif_key = local_motif
-                                        else:
-                                            continue
-                                    
-                                    if di not in self.masked_data_features[split_name][local_motif_key]:
-                                        continue
-                                    
-                                    masked_feature_graph = self.masked_data_features[split_name][local_motif_key][di]
-                                    
-                                    # Ensure data is on correct device immediately after retrieval
-                                    masked_feature_graph = masked_feature_graph.to(self.device)
-                                    
-                                    # Check if masked data is empty and skip if so
-                                    if masked_feature_graph.numel() == 0:
-                                        continue
-                                    
-                                    # Calculate predictions with masked and original data
-                                    new_prediction = self.clf.forward(masked_feature_graph, data.edge_index, batch, edge_attr=data.edge_attr)
-                                    
-                                    # Calculate old_prediction (original data)
-                                    old_prediction = self.clf.forward(data.x, data.edge_index, batch, edge_attr=data.edge_attr)
-                                    
-                                    # Save masked prediction results
-                                    old_pred_value = float(old_prediction.squeeze().detach().cpu().item())
-                                    new_pred_value = float(new_prediction.squeeze().detach().cpu().item())
-                                    
-                                    masked_result = {
-                                        'split': split_name,
-                                        'graph_idx': di,
-                                        'smiles': data.smiles,
-                                        'motif_idx': int(local_motif_key),
-                                        'old_prediction': old_pred_value,
-                                        'new_prediction': new_pred_value
-                                    }
-                                    
-                                    # Write to masked-impact.jsonl file
-                                    if not hasattr(self, 'masked_impact_file'):
-                                        masked_impact_path = os.path.join(self.seed_dir, 'masked-impact.jsonl')
-                                        self.masked_impact_file = open(masked_impact_path, 'w')
-                                    
-                                    self.masked_impact_file.write(json.dumps(masked_result) + '\n')
-                                    
-                                    # ===== Masked Edge Impact Calculation =====
-                                    # Calculate prediction with masked features + filtered edges
-                                    # Identify masked nodes by comparing with original features
-                                    masked_nodes = (masked_feature_graph.abs().sum(dim=1) == 0) & (data.x.abs().sum(dim=1) > 0)
-                                    
-                                    # Filter edges: remove edges where both source and destination are masked nodes
+                                smiles_val = getattr(data, 'smiles', None)
+
+                                # 1) Individual_node: zero node features + remove edges touching that node
+                                for node_idx in range(data.x.size(0)):
+                                    masked_x = data.x.clone()
+                                    masked_x[node_idx] = 0.0
+                                    node_mask = torch.zeros(data.x.size(0), dtype=torch.bool, device=data.x.device)
+                                    node_mask[node_idx] = True
                                     src, dst = data.edge_index
-                                    keep_edge_mask = ~(masked_nodes[src] & masked_nodes[dst])
-                                    filtered_edge_index = data.edge_index[:, keep_edge_mask]
-                                    
-                                    if filtered_edge_index.size(1) == 0:
-                                        print(f"[DEBUG] Empty filtered_edge_index at split={split_name}, graph_idx={di}, motif_idx={int(local_motif_key)}")
-                                        
-                                    
-                                    # Filter edge_attr accordingly
-                                    if data.edge_attr is not None:
-                                        filtered_edge_attr = data.edge_attr[keep_edge_mask]
-                                    else:
-                                        filtered_edge_attr = None
-                                    
-                                    # Calculate new prediction with masked features + filtered edges
-                                    new_prediction_edge = self.clf.forward(masked_feature_graph, filtered_edge_index, batch, edge_attr=filtered_edge_attr)
-                                    
-                                    # Save masked edge results
-                                    old_pred_value_edge = float(old_prediction.squeeze().detach().cpu().item())
-                                    new_pred_value_edge = float(new_prediction_edge.squeeze().detach().cpu().item())
-                                    
-                                    masked_edge_result = {
-                                        'split': split_name,
-                                        'graph_idx': di,
-                                        'smiles': data.smiles,
-                                        'motif_idx': int(local_motif_key),
-                                        'old_prediction': old_pred_value_edge,
-                                        'new_prediction': new_pred_value_edge
+                                    keep = ~(node_mask[src] | node_mask[dst])
+                                    filt_ei = data.edge_index[:, keep]
+                                    filt_ea = data.edge_attr[keep] if data.edge_attr is not None else None
+
+                                    new_pred = self.clf.forward(masked_x, filt_ei, batch, edge_attr=filt_ea)
+                                    rec = {
+                                        'split': split_name, 'graph_idx': di, 'smiles': smiles_val,
+                                        'node_index': node_idx,
+                                        'motif_index': int(nodes_to_motifs[node_idx].item()) if nodes_to_motifs is not None else -1,
+                                        'score': float(att[node_idx].detach().cpu().item()),
+                                        'old_prediction': old_pred_val,
+                                        'new_prediction': float(new_pred.squeeze().detach().cpu().item()),
                                     }
-                                    
-                                    # Write to masked-edge-impact.jsonl file
-                                    if not hasattr(self, 'masked_edge_impact_file'):
-                                        masked_edge_impact_path = os.path.join(self.seed_dir, 'masked-edge-impact.jsonl')
-                                        self.masked_edge_impact_file = open(masked_edge_impact_path, 'w')
-                                    
-                                    self.masked_edge_impact_file.write(json.dumps(masked_edge_result) + '\n')
+                                    if not hasattr(self, '_indiv_node_f'):
+                                        self._indiv_node_f = open(os.path.join(self.seed_dir, 'Individual_node_node_masking_impact.jsonl'), 'w')
+                                    self._indiv_node_f.write(json.dumps(rec) + '\n')
+
+                                # 2) Individual_edge: remove one undirected edge at a time
+                                ei = data.edge_index
+                                seen_edges = set()
+                                for e_idx in range(ei.size(1)):
+                                    u, v = int(ei[0, e_idx].item()), int(ei[1, e_idx].item())
+                                    canon = (min(u, v), max(u, v))
+                                    if canon in seen_edges:
+                                        continue
+                                    seen_edges.add(canon)
+
+                                    drop = ~((ei[0] == u) & (ei[1] == v)) & ~((ei[0] == v) & (ei[1] == u))
+                                    filt_ei = ei[:, drop]
+                                    filt_ea = data.edge_attr[drop] if data.edge_attr is not None else None
+
+                                    new_pred_e = self.clf.forward(data.x, filt_ei, batch, edge_attr=filt_ea)
+                                    rec_e = {
+                                        'split': split_name, 'graph_idx': di, 'smiles': smiles_val,
+                                        'edge_src': u, 'edge_dst': v,
+                                        'old_prediction': old_pred_val,
+                                        'new_prediction': float(new_pred_e.squeeze().detach().cpu().item()),
+                                    }
+                                    if not hasattr(self, '_indiv_edge_f'):
+                                        self._indiv_edge_f = open(os.path.join(self.seed_dir, 'Individual_edge_node_and_edge_masking_impact.jsonl'), 'w')
+                                    self._indiv_edge_f.write(json.dumps(rec_e) + '\n')
+
+                                # ── Motif-level masking impact ──
+                                if nodes_to_motifs is not None and self.masked_data_features is not None:
+                                    for local_motif in nodes_to_motifs.unique():
+                                        local_motif_key = int(local_motif.item()) if hasattr(local_motif, 'item') else int(local_motif)
+
+                                        if local_motif_key not in self.masked_data_features[split_name]:
+                                            if local_motif in self.masked_data_features[split_name]:
+                                                local_motif_key = local_motif
+                                            else:
+                                                continue
+
+                                        if di not in self.masked_data_features[split_name][local_motif_key]:
+                                            continue
+
+                                        masked_feature_graph = self.masked_data_features[split_name][local_motif_key][di]
+                                        masked_feature_graph = masked_feature_graph.to(self.device)
+
+                                        if masked_feature_graph.numel() == 0:
+                                            continue
+
+                                        old_prediction_motif = self.clf.forward(data.x, data.edge_index, batch, edge_attr=data.edge_attr)
+                                        old_pv = float(old_prediction_motif.squeeze().detach().cpu().item())
+
+                                        # 3) Motif_level_node_masking: zero motif features only
+                                        new_prediction = self.clf.forward(masked_feature_graph, data.edge_index, batch, edge_attr=data.edge_attr)
+                                        new_pv = float(new_prediction.squeeze().detach().cpu().item())
+                                        motif_rec = {
+                                            'split': split_name, 'graph_idx': di,
+                                            'smiles': data.smiles, 'motif_idx': int(local_motif_key),
+                                            'old_prediction': old_pv, 'new_prediction': new_pv,
+                                        }
+                                        if not hasattr(self, '_motif_node_f'):
+                                            self._motif_node_f = open(os.path.join(self.seed_dir, 'Motif_level_node_masking_impact.jsonl'), 'w')
+                                        self._motif_node_f.write(json.dumps(motif_rec) + '\n')
+
+                                        # 4) Motif_level_node_and_edge_masking: zero features + remove edges between masked nodes
+                                        masked_nodes = (masked_feature_graph.abs().sum(dim=1) == 0) & (data.x.abs().sum(dim=1) > 0)
+                                        src, dst = data.edge_index
+                                        keep_edge_mask = ~(masked_nodes[src] & masked_nodes[dst])
+                                        filtered_edge_index = data.edge_index[:, keep_edge_mask]
+                                        filtered_edge_attr = data.edge_attr[keep_edge_mask] if data.edge_attr is not None else None
+
+                                        new_pred_edge = self.clf.forward(masked_feature_graph, filtered_edge_index, batch, edge_attr=filtered_edge_attr)
+                                        new_pv_e = float(new_pred_edge.squeeze().detach().cpu().item())
+                                        motif_edge_rec = {
+                                            'split': split_name, 'graph_idx': di,
+                                            'smiles': data.smiles, 'motif_idx': int(local_motif_key),
+                                            'old_prediction': old_pv, 'new_prediction': new_pv_e,
+                                        }
+                                        if not hasattr(self, '_motif_edge_f'):
+                                            self._motif_edge_f = open(os.path.join(self.seed_dir, 'Motif_level_node_and_edge_masking_impact.jsonl'), 'w')
+                                        self._motif_edge_f.write(json.dumps(motif_edge_rec) + '\n')
 
 
                             else:
@@ -1643,17 +1670,16 @@ class GSAT(nn.Module):
                         
                 print(f"[INFO] Successfully saved attention scores to {node_jsonl_path} and {edge_jsonl_path}")
                 
-                # Close masked impact file if it was opened
-                if hasattr(self, 'masked_impact_file'):
-                    self.masked_impact_file.close()
-                    masked_impact_path = os.path.join(self.seed_dir, 'masked-impact.jsonl')
-                    print(f"[INFO] Successfully saved masked prediction results to {masked_impact_path}")
-                
-                # Close masked edge impact file if it was opened
-                if hasattr(self, 'masked_edge_impact_file'):
-                    self.masked_edge_impact_file.close()
-                    masked_edge_impact_path = os.path.join(self.seed_dir, 'masked-edge-impact.jsonl')
-                    print(f"[INFO] Successfully saved masked edge prediction results to {masked_edge_impact_path}")
+                # Close all impact files
+                for attr, label in [
+                    ('_indiv_node_f',  'Individual_node_node_masking_impact.jsonl'),
+                    ('_indiv_edge_f',  'Individual_edge_node_and_edge_masking_impact.jsonl'),
+                    ('_motif_node_f',  'Motif_level_node_masking_impact.jsonl'),
+                    ('_motif_edge_f',  'Motif_level_node_and_edge_masking_impact.jsonl'),
+                ]:
+                    if hasattr(self, attr):
+                        getattr(self, attr).close()
+                        print(f"[INFO] Saved {os.path.join(self.seed_dir, label)}")
             # ===== End of saving scores =====
             if self.task_type == 'regression':
                 print(f'[Seed {self.random_state}, Epoch: {epoch}]: Best Epoch: {metric_dict["metric/best_clf_epoch"]}, '

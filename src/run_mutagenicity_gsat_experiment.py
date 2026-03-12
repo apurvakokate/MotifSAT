@@ -220,6 +220,75 @@ EXPERIMENT_GROUPS = {
     },
 
     # =========================================================================
+    # Explainer analysis experiments (score-vs-impact with r highlight)
+    # New names to avoid overwriting previous results.
+    # =========================================================================
+
+    'base_gsat_decay_r_explainer': {
+        'experiment_name': 'base_gsat_decay_r_explainer',
+        'variants': [
+            {
+                'variant_id': f'decay_final{fr}',
+                'gsat_overrides': {
+                    'tuning_id': f'decay_final{fr}',
+                    'fix_r': False,
+                    'init_r': 0.9,
+                    'final_r': fr,
+                    'decay_r': 0.1,
+                    'motif_incorporation_method': None,
+                    'motif_loss_coef': 0,
+                },
+                'learn_edge_att': False,
+            }
+            for fr in [0.8, 0.7]
+        ],
+    },
+
+    'motif_readout_decay_r_mean_explainer': {
+        'experiment_name': 'motif_readout_decay_r_mean_explainer',
+        'variants': [
+            {
+                'variant_id': f'readout_mean_decay_final{fr}',
+                'gsat_overrides': {
+                    'tuning_id': f'readout_mean_decay_final{fr}',
+                    'fix_r': False,
+                    'init_r': 0.9,
+                    'final_r': fr,
+                    'decay_r': 0.1,
+                    'motif_incorporation_method': 'readout',
+                    'motif_pooling_method': 'mean',
+                    'motif_loss_coef': 0,
+                    'motif_level_sampling': False,
+                },
+                'learn_edge_att': False,
+            }
+            for fr in [0.8, 0.7]
+        ],
+    },
+
+    'motif_readout_decay_r_mean_sampling_explainer': {
+        'experiment_name': 'motif_readout_decay_r_mean_sampling_explainer',
+        'variants': [
+            {
+                'variant_id': f'readout_mean_sampling_decay_final{fr}',
+                'gsat_overrides': {
+                    'tuning_id': f'readout_mean_sampling_decay_final{fr}',
+                    'fix_r': False,
+                    'init_r': 0.9,
+                    'final_r': fr,
+                    'decay_r': 0.1,
+                    'motif_incorporation_method': 'readout',
+                    'motif_pooling_method': 'mean',
+                    'motif_loss_coef': 0,
+                    'motif_level_sampling': True,
+                },
+                'learn_edge_att': False,
+            }
+            for fr in [0.8, 0.7]
+        ],
+    },
+
+    # =========================================================================
     # Legacy experiments (kept for reference, still functional)
     # =========================================================================
 
@@ -471,6 +540,8 @@ def main():
     motif_experiments = {'motif_readout_fix_r', 'motif_readout_fix_r_repaired',
                          'motif_readout_fix_r_mean', 'motif_readout_fix_r_sum',
                          'motif_readout_decay_r_mean', 'motif_readout_decay_r_sum',
+                         'motif_readout_decay_r_mean_explainer',
+                         'motif_readout_decay_r_mean_sampling_explainer',
                          'motif_readout_info_loss', 'motif_readout_adaptive_r',
                          'within_motif_consistency_impact', 'between_motif_consistency_impact'}
     if dataset_name not in DATASETS_WITH_MOTIFS:

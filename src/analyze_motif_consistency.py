@@ -884,6 +884,19 @@ def run_analysis(checkpoint_dir=None, from_jsonl=None, dataset_name=None,
         print(f"[ERROR] Unknown dataset type: {dataset_name}")
         return None, None
 
+    # ── Score-vs-impact plot (runs whenever seed_dir data is available) ──
+    seed_dir = None
+    if from_jsonl:
+        seed_dir = Path(from_jsonl).parent
+    elif checkpoint_dir:
+        seed_dir = Path(checkpoint_dir)
+    if seed_dir and seed_dir.exists():
+        try:
+            plot_score_vs_impact(seed_dir, split=split, output_dir=output_dir,
+                                model_name=model_name, dataset_name=dataset_name)
+        except Exception as e:
+            print(f"[WARNING] Score-vs-impact plot failed: {e}")
+
 
 def run_multi_model_analysis(checkpoint_dirs=None, jsonl_paths=None,
                              dataset_name=None, model_names=None,
@@ -937,6 +950,240 @@ def run_multi_model_analysis(checkpoint_dirs=None, jsonl_paths=None,
 
 
 # ---------------------------------------------------------------------------
+# Score-vs-Impact explainer analysis (with r-value highlight)
+# ---------------------------------------------------------------------------
+
+def _sigmoid(x):
+    if x >= 0:
+        z = math.exp(-x)
+        return 1.0 / (1.0 + z)
+    z = math.exp(x)
+    return z / (1.0 + z)
+
+
+def _read_jsonl(path, split='test'):
+    records = []
+    with open(path, 'r') as f:
+        for line in f:
+            rec = json.loads(line)
+            if rec.get('split') == split:
+                records.append(rec)
+    return records
+
+
+def _get_final_r(seed_dir):
+    """Read final_r from saved configs in seed_dir."""
+    import yaml
+    seed_dir = Path(seed_dir)
+
+    # Try method_config.yaml first
+    mc = seed_dir / 'method_config.yaml'
+    if mc.exists():
+        with open(mc) as f:
+            cfg = yaml.safe_load(f) or {}
+        if 'final_r' in cfg:
+            return float(cfg['final_r'])
+
+    # Try experiment_summary.json
+    es = seed_dir / 'experiment_summary.json'
+    if es.exists():
+        with open(es) as f:
+            summary = json.load(f)
+        wdp = summary.get('weight_distribution_params', {})
+        if 'final_r' in wdp:
+            return float(wdp['final_r'])
+
+    return None
+
+
+def plot_score_vs_impact(seed_dir, split='test', output_dir=None, model_name=None,
+                         dataset_name=None):
+    """
+    Plot node/motif attention score (x) vs masking impact (y) with r-value
+    highlighted as a vertical line.
+
+    Reads from the seed_dir:
+      - node_scores.jsonl                                    (per-node scores with motif_index)
+      - Motif_level_node_and_edge_masking_impact.jsonl       (per-motif: zero features + remove edges)
+      - Individual_node_node_masking_impact.jsonl             (per-node: zero features + remove edges)
+      - Individual_edge_node_and_edge_masking_impact.jsonl    (per-edge: remove one undirected edge)
+      - method_config.yaml                                   (to read final_r)
+
+    Generates two scatter plots:
+      1. Motif-level: x = mean node score per motif instance, y = motif masking impact
+      2. Node-level:  x = individual node score, y = node masking impact
+    """
+    seed_dir = Path(seed_dir)
+    output_dir = Path(output_dir) if output_dir else seed_dir
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    label = f'{model_name or ""}{"/" if model_name and dataset_name else ""}{dataset_name or ""}'
+    tag = f'{model_name or "model"}_{dataset_name or "data"}_{split}'
+
+    final_r = _get_final_r(seed_dir)
+    print(f"[INFO] final_r = {final_r}")
+
+    plt.style.use('seaborn-v0_8-whitegrid')
+
+    # ── Motif-level plot ──
+    node_scores_path = seed_dir / 'node_scores.jsonl'
+    motif_impact_path = seed_dir / 'Motif_level_node_and_edge_masking_impact.jsonl'
+    if not motif_impact_path.exists():
+        motif_impact_path = seed_dir / 'masked-edge-impact.jsonl'  # legacy fallback
+
+    has_motif = node_scores_path.exists() and motif_impact_path.exists()
+    if has_motif:
+        node_recs = _read_jsonl(node_scores_path, split)
+        impact_recs = _read_jsonl(motif_impact_path, split)
+
+        # Aggregate node scores per (graph_idx, motif_index) → mean score
+        from collections import defaultdict
+        motif_scores = defaultdict(list)
+        for rec in node_recs:
+            midx = rec.get('motif_index', -1)
+            if midx < 0:
+                continue
+            motif_scores[(rec['graph_idx'], midx)].append(rec['score'])
+
+        motif_avg_score = {k: float(np.mean(v)) for k, v in motif_scores.items()}
+
+        # Build impact lookup
+        motif_impacts = {}
+        for rec in impact_recs:
+            midx = rec.get('motif_idx', rec.get('motif_index', -1))
+            if midx < 0:
+                continue
+            imp = abs(_sigmoid(rec['new_prediction']) - _sigmoid(rec['old_prediction']))
+            motif_impacts[(rec['graph_idx'], midx)] = imp
+
+        # Match
+        common_keys = set(motif_avg_score.keys()) & set(motif_impacts.keys())
+        if common_keys:
+            xs = np.array([motif_avg_score[k] for k in common_keys])
+            ys = np.array([motif_impacts[k] for k in common_keys])
+
+            fig, ax = plt.subplots(figsize=(9, 6))
+            ax.scatter(xs, ys, alpha=0.3, s=8, c='#2196F3', edgecolors='none')
+            if final_r is not None:
+                ax.axvline(final_r, color='red', linestyle='--', linewidth=2,
+                           label=f'r = {final_r}')
+            ax.set_xlabel('Mean Motif Node Attention Score')
+            ax.set_ylabel('Motif Masking Impact  |Δ sigmoid(pred)|')
+            ax.set_title(f'Motif-Level Score vs Impact — {label} ({split})')
+            ax.legend(fontsize=11)
+            plt.tight_layout()
+            fig.savefig(output_dir / f'score_vs_impact_motif_{tag}.png',
+                        dpi=150, bbox_inches='tight')
+            plt.close(fig)
+
+            corr, pval = sp_stats.pearsonr(xs, ys) if len(xs) > 2 else (np.nan, np.nan)
+            print(f"[INFO] Motif-level: {len(common_keys)} points, Pearson r={corr:.4f}, p={pval:.2e}")
+        else:
+            print("[WARNING] No matching motif entries between node_scores and impact")
+    else:
+        print(f"[INFO] Skipping motif-level plot (missing files in {seed_dir})")
+
+    # ── Individual node plot (per-node: zero features + remove edges) ──
+    indiv_node_path = seed_dir / 'Individual_node_node_masking_impact.jsonl'
+    if not indiv_node_path.exists():
+        indiv_node_path = seed_dir / 'masked-node-impact.jsonl'  # legacy fallback
+    indiv_node_data = None
+    if indiv_node_path.exists():
+        recs = _read_jsonl(indiv_node_path, split)
+        if recs:
+            xs = np.array([rec['score'] for rec in recs])
+            ys = np.array([abs(_sigmoid(rec['new_prediction']) - _sigmoid(rec['old_prediction']))
+                           for rec in recs])
+            indiv_node_data = (xs, ys)
+
+            fig, ax = plt.subplots(figsize=(9, 6))
+            ax.scatter(xs, ys, alpha=0.15, s=4, c='#FF5722', edgecolors='none')
+            if final_r is not None:
+                ax.axvline(final_r, color='red', linestyle='--', linewidth=2, label=f'r = {final_r}')
+            ax.set_xlabel('Node Attention Score')
+            ax.set_ylabel('Masking Impact  |Δ sigmoid(pred)|')
+            ax.set_title(f'Individual Node (Feature+Edge) — {label} ({split})')
+            ax.legend(fontsize=11)
+            plt.tight_layout()
+            fig.savefig(output_dir / f'score_vs_impact_indiv_node_{tag}.png',
+                        dpi=150, bbox_inches='tight')
+            plt.close(fig)
+
+            corr, pval = sp_stats.pearsonr(xs, ys) if len(xs) > 2 else (np.nan, np.nan)
+            print(f"[INFO] Individual Node: {len(recs)} points, Pearson r={corr:.4f}, p={pval:.2e}")
+    else:
+        print(f"[INFO] Individual_node_node_masking_impact.jsonl not found — skipping")
+
+    # ── Individual edge plot (per-edge: remove one undirected edge) ──
+    indiv_edge_path = seed_dir / 'Individual_edge_node_and_edge_masking_impact.jsonl'
+    indiv_edge_data = None
+    if indiv_edge_path.exists():
+        recs = _read_jsonl(indiv_edge_path, split)
+        if recs:
+            ys = np.array([abs(_sigmoid(rec['new_prediction']) - _sigmoid(rec['old_prediction']))
+                           for rec in recs])
+            xs_idx = np.arange(len(ys))
+
+            fig, ax = plt.subplots(figsize=(9, 6))
+            ax.scatter(xs_idx, ys, alpha=0.2, s=4, c='#9C27B0', edgecolors='none')
+            ax.set_xlabel('Edge Index (sorted by graph)')
+            ax.set_ylabel('Edge Removal Impact  |Δ sigmoid(pred)|')
+            ax.set_title(f'Individual Edge Removal — {label} ({split})')
+            plt.tight_layout()
+            fig.savefig(output_dir / f'score_vs_impact_indiv_edge_{tag}.png',
+                        dpi=150, bbox_inches='tight')
+            plt.close(fig)
+
+            # Histogram of edge removal impacts
+            fig, ax = plt.subplots(figsize=(9, 6))
+            ax.hist(ys, bins=50, color='#9C27B0', alpha=0.7, edgecolor='white')
+            ax.set_xlabel('Edge Removal Impact  |Δ sigmoid(pred)|')
+            ax.set_ylabel('Count')
+            ax.set_title(f'Edge Removal Impact Distribution — {label} ({split})')
+            plt.tight_layout()
+            fig.savefig(output_dir / f'edge_removal_impact_hist_{tag}.png',
+                        dpi=150, bbox_inches='tight')
+            plt.close(fig)
+
+            print(f"[INFO] Individual Edge: {len(recs)} edges, "
+                  f"mean impact={ys.mean():.4f}, max={ys.max():.4f}")
+            indiv_edge_data = ys
+    else:
+        print(f"[INFO] Individual_edge_node_and_edge_masking_impact.jsonl not found — skipping")
+
+    # ── Combined figure (motif-level + individual node) ──
+    panels = []
+    if has_motif and common_keys:
+        xs_m = np.array([motif_avg_score[k] for k in common_keys])
+        ys_m = np.array([motif_impacts[k] for k in common_keys])
+        panels.append(('Motif-Level (Feature+Edge)', xs_m, ys_m, '#2196F3', 8, 0.3))
+    if indiv_node_data is not None:
+        panels.append(('Individual Node (Feature+Edge)',
+                        indiv_node_data[0], indiv_node_data[1], '#FF5722', 4, 0.15))
+
+    if len(panels) >= 2:
+        ncols = len(panels)
+        fig, axes = plt.subplots(1, ncols, figsize=(7 * ncols, 6))
+        if ncols == 1:
+            axes = [axes]
+        for ax, (title, x, y, c, sz, alpha_v) in zip(axes, panels):
+            ax.scatter(x, y, alpha=alpha_v, s=sz, c=c, edgecolors='none')
+            if final_r is not None:
+                ax.axvline(final_r, color='red', linestyle='--', linewidth=2, label=f'r = {final_r}')
+            ax.set_xlabel('Attention Score')
+            ax.set_ylabel('Masking Impact')
+            ax.set_title(title)
+            ax.legend()
+        fig.suptitle(f'Score vs Impact — {label} ({split})', fontsize=14, fontweight='bold')
+        plt.tight_layout()
+        fig.savefig(output_dir / f'score_vs_impact_combined_{tag}.png',
+                    dpi=150, bbox_inches='tight')
+        plt.close(fig)
+
+    print(f"[INFO] Score-vs-impact plots saved to {output_dir}")
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -972,10 +1219,14 @@ Examples:
                         help='Directory with gsat_clf_epoch_*.pt / gsat_att_epoch_*.pt')
     source.add_argument('--from_jsonl', type=str, default=None,
                         help='Path to node_scores.jsonl (fast, no model loading)')
+    source.add_argument('--score_vs_impact', type=str, default=None,
+                        metavar='SEED_DIR',
+                        help='Standalone: just generate the score-vs-impact plot '
+                             'from a seed_dir (no consistency analysis)')
 
-    parser.add_argument('--dataset', type=str, required=True, choices=ALL_DATASETS,
+    parser.add_argument('--dataset', type=str, default=None, choices=ALL_DATASETS,
                         help='Dataset name')
-    parser.add_argument('--model', type=str, required=True,
+    parser.add_argument('--model', type=str, default=None,
                         choices=['GIN', 'PNA', 'GAT', 'SAGE', 'GCN'],
                         help='Model architecture')
     parser.add_argument('--epoch', type=int, default=None,
@@ -994,20 +1245,33 @@ Examples:
 
     args = parser.parse_args()
 
-    run_analysis(
-        checkpoint_dir=args.checkpoint_dir,
-        from_jsonl=args.from_jsonl,
-        dataset_name=args.dataset,
-        model_name=args.model,
-        output_dir=args.output_dir,
-        epoch=args.epoch,
-        seed=args.seed,
-        split=args.split,
-        device=args.device,
-        fold=args.fold,
-        min_occurrences=args.min_occurrences,
-        top_k=args.top_k,
-    )
+    if args.score_vs_impact:
+        out = Path(args.output_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        plot_score_vs_impact(
+            seed_dir=args.score_vs_impact,
+            split=args.split,
+            output_dir=out,
+            model_name=args.model,
+            dataset_name=args.dataset,
+        )
+    else:
+        if args.dataset is None or args.model is None:
+            parser.error('--dataset and --model are required for consistency analysis')
+        run_analysis(
+            checkpoint_dir=args.checkpoint_dir,
+            from_jsonl=args.from_jsonl,
+            dataset_name=args.dataset,
+            model_name=args.model,
+            output_dir=args.output_dir,
+            epoch=args.epoch,
+            seed=args.seed,
+            split=args.split,
+            device=args.device,
+            fold=args.fold,
+            min_occurrences=args.min_occurrences,
+            top_k=args.top_k,
+        )
 
 
 if __name__ == '__main__':

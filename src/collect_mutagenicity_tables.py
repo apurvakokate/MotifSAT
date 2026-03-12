@@ -111,6 +111,21 @@ EXPERIMENT_ROW_CONFIG = {
         'row_label_prefix': 'final_r',
         'path_extract': 'final_r',
     },
+    'base_gsat_decay_r_explainer': {
+        'summary_path': ('weight_distribution_params', 'final_r'),
+        'row_label_prefix': 'final_r',
+        'path_extract': 'final_r',
+    },
+    'motif_readout_decay_r_mean_explainer': {
+        'summary_path': ('weight_distribution_params', 'final_r'),
+        'row_label_prefix': 'final_r',
+        'path_extract': 'final_r',
+    },
+    'motif_readout_decay_r_mean_sampling_explainer': {
+        'summary_path': ('weight_distribution_params', 'final_r'),
+        'row_label_prefix': 'final_r',
+        'path_extract': 'final_r',
+    },
 }
 
 
@@ -402,7 +417,9 @@ def _sigmoid(x: float) -> float:
 
 def compute_posthoc_correlation(seed_dir: Path, split: str = 'test'):
     node_scores_path = seed_dir / 'node_scores.jsonl'
-    impact_path = seed_dir / 'masked-edge-impact.jsonl'
+    impact_path = seed_dir / 'Motif_level_node_and_edge_masking_impact.jsonl'
+    if not impact_path.exists():
+        impact_path = seed_dir / 'masked-edge-impact.jsonl'  # legacy fallback
 
     if not node_scores_path.exists() or not impact_path.exists():
         return np.nan, np.nan, 0

@@ -270,7 +270,9 @@ class TuningResultsAnalyzer:
         # Load masked impact (still needed for explainer analysis, but can be large)
         # Only load first N entries to avoid memory issues
         masked_impact = []
-        masked_impact_path = exp_dir / 'masked-impact.jsonl'
+        masked_impact_path = exp_dir / 'Motif_level_node_masking_impact.jsonl'
+        if not masked_impact_path.exists():
+            masked_impact_path = exp_dir / 'masked-impact.jsonl'  # legacy fallback
         if masked_impact_path.exists():
             with open(masked_impact_path, 'r') as f:
                 for i, line in enumerate(f):
@@ -281,7 +283,9 @@ class TuningResultsAnalyzer:
         
         # Load masked edge impact (limit to avoid memory issues)
         masked_edge_impact = []
-        masked_edge_impact_path = exp_dir / 'masked-edge-impact.jsonl'
+        masked_edge_impact_path = exp_dir / 'Motif_level_node_and_edge_masking_impact.jsonl'
+        if not masked_edge_impact_path.exists():
+            masked_edge_impact_path = exp_dir / 'masked-edge-impact.jsonl'  # legacy fallback
         if masked_edge_impact_path.exists():
             with open(masked_edge_impact_path, 'r') as f:
                 for i, line in enumerate(f):
