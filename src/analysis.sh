@@ -1,5 +1,4 @@
 #!/bin/bash
-set -euo pipefail
 
 export RESULTS_DIR=${RESULTS_DIR:-~/hpc-share/ChemIntuit/MotifSAT/tuning_results}
 OUTPUT_BASE=../motif_consistency_results
@@ -12,16 +11,26 @@ EXPERIMENTS=(
 MODELS=(GCN SAGE)
 FINAL_RS=(0.8 0.7)
 
+echo "RESULTS_DIR=${RESULTS_DIR}"
+echo ""
+
 # ─── 1. Score-vs-Impact plots + Full consistency analysis ───
 for EXP in "${EXPERIMENTS[@]}"; do
   for MODEL in "${MODELS[@]}"; do
     for R in "${FINAL_RS[@]}"; do
-      # Find the seed_dir using glob (intermediate dirs vary by experiment)
-      PATTERN="${RESULTS_DIR}/Mutagenicity/model_${MODEL}/experiment_${EXP}/*/method_*/pred*/init0.9_final${R}_decay0.1/fold0_seed0"
-      SEED_DIR=$(ls -d $PATTERN 2>/dev/null | head -1)
+      # Find the seed_dir — intermediate dirs vary by experiment config
+      SEED_DIR=""
+      for d in ${RESULTS_DIR}/Mutagenicity/model_${MODEL}/experiment_${EXP}/*/method_*/pred*/init0.9_final${R}_decay0.1/fold0_seed0; do
+        if [ -d "$d" ]; then
+          SEED_DIR="$d"
+          break
+        fi
+      done
 
       if [ -z "$SEED_DIR" ]; then
         echo "[SKIP] No seed_dir found for ${EXP} ${MODEL} r=${R}"
+        echo "       looked in: ${RESULTS_DIR}/Mutagenicity/model_${MODEL}/experiment_${EXP}/.../init0.9_final${R}_decay0.1/fold0_seed0"
+        echo ""
         continue
       fi
 
@@ -35,17 +44,19 @@ for EXP in "${EXPERIMENTS[@]}"; do
       python analyze_motif_consistency.py \
         --score_vs_impact "${SEED_DIR}" \
         --dataset Mutagenicity --model "${MODEL}" --split test \
-        --output_dir "${OUT}"
+        --output_dir "${OUT}" || echo "[ERROR] score_vs_impact failed for ${EXP} ${MODEL} r=${R}"
 
       # Full consistency analysis (reads node_scores.jsonl)
       if [ -f "${SEED_DIR}/node_scores.jsonl" ]; then
         python analyze_motif_consistency.py \
           --from_jsonl "${SEED_DIR}/node_scores.jsonl" \
           --dataset Mutagenicity --model "${MODEL}" --split test --fold 0 \
-          --output_dir "${OUT}"
+          --output_dir "${OUT}" || echo "[ERROR] consistency analysis failed for ${EXP} ${MODEL} r=${R}"
       else
         echo "[SKIP] No node_scores.jsonl in ${SEED_DIR}"
       fi
+
+      echo ""
     done
   done
 done
@@ -57,8 +68,8 @@ for EXP in "${EXPERIMENTS[@]}"; do
   echo "============================================================"
   python collect_mutagenicity_tables.py \
     --experiment_name "${EXP}" \
-    --dataset Mutagenicity
+    --dataset Mutagenicity || echo "[ERROR] collect tables failed for ${EXP}"
+  echo ""
 done
 
-echo ""
 echo "Done. Results in ${OUTPUT_BASE}/"
