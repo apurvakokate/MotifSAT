@@ -1245,7 +1245,7 @@ Examples:
 
     args = parser.parse_args()
 
-    if args.score_vs_impact:
+    if args.score_vs_impact is not None:
         out = Path(args.output_dir)
         out.mkdir(parents=True, exist_ok=True)
         plot_score_vs_impact(
