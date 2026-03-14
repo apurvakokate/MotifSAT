@@ -289,6 +289,78 @@ EXPERIMENT_GROUPS = {
     },
 
     # =========================================================================
+    # Motif-level info loss variants (compare with the originals above)
+    # Same as base/readout/sampling explainer but with motif_level_info_loss=True
+    # =========================================================================
+
+    'base_gsat_decay_r_explainer_motif_info': {
+        'experiment_name': 'base_gsat_decay_r_explainer_motif_info',
+        'variants': [
+            {
+                'variant_id': f'decay_final{fr}',
+                'gsat_overrides': {
+                    'tuning_id': f'decay_final{fr}',
+                    'fix_r': False,
+                    'init_r': 0.9,
+                    'final_r': fr,
+                    'decay_r': 0.1,
+                    'motif_incorporation_method': None,
+                    'motif_loss_coef': 0,
+                    'motif_level_info_loss': True,
+                },
+                'learn_edge_att': False,
+            }
+            for fr in [0.8, 0.7]
+        ],
+    },
+
+    'motif_readout_decay_r_mean_explainer_motif_info': {
+        'experiment_name': 'motif_readout_decay_r_mean_explainer_motif_info',
+        'variants': [
+            {
+                'variant_id': f'readout_mean_decay_final{fr}',
+                'gsat_overrides': {
+                    'tuning_id': f'readout_mean_decay_final{fr}',
+                    'fix_r': False,
+                    'init_r': 0.9,
+                    'final_r': fr,
+                    'decay_r': 0.1,
+                    'motif_incorporation_method': 'readout',
+                    'motif_pooling_method': 'mean',
+                    'motif_loss_coef': 0,
+                    'motif_level_sampling': False,
+                    'motif_level_info_loss': True,
+                },
+                'learn_edge_att': False,
+            }
+            for fr in [0.8, 0.7]
+        ],
+    },
+
+    'motif_readout_decay_r_mean_sampling_explainer_motif_info': {
+        'experiment_name': 'motif_readout_decay_r_mean_sampling_explainer_motif_info',
+        'variants': [
+            {
+                'variant_id': f'readout_mean_sampling_decay_final{fr}',
+                'gsat_overrides': {
+                    'tuning_id': f'readout_mean_sampling_decay_final{fr}',
+                    'fix_r': False,
+                    'init_r': 0.9,
+                    'final_r': fr,
+                    'decay_r': 0.1,
+                    'motif_incorporation_method': 'readout',
+                    'motif_pooling_method': 'mean',
+                    'motif_loss_coef': 0,
+                    'motif_level_sampling': True,
+                    'motif_level_info_loss': True,
+                },
+                'learn_edge_att': False,
+            }
+            for fr in [0.8, 0.7]
+        ],
+    },
+
+    # =========================================================================
     # Legacy experiments (kept for reference, still functional)
     # =========================================================================
 

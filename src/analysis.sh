@@ -7,6 +7,9 @@ EXPERIMENTS=(
   base_gsat_decay_r_explainer
   motif_readout_decay_r_mean_explainer
   motif_readout_decay_r_mean_sampling_explainer
+  base_gsat_decay_r_explainer_motif_info
+  motif_readout_decay_r_mean_explainer_motif_info
+  motif_readout_decay_r_mean_sampling_explainer_motif_info
 )
 MODELS=(GCN SAGE)
 FINAL_RS=(0.8 0.7)

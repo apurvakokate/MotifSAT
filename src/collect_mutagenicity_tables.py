@@ -126,6 +126,21 @@ EXPERIMENT_ROW_CONFIG = {
         'row_label_prefix': 'final_r',
         'path_extract': 'final_r',
     },
+    'base_gsat_decay_r_explainer_motif_info': {
+        'summary_path': ('weight_distribution_params', 'final_r'),
+        'row_label_prefix': 'final_r',
+        'path_extract': 'final_r',
+    },
+    'motif_readout_decay_r_mean_explainer_motif_info': {
+        'summary_path': ('weight_distribution_params', 'final_r'),
+        'row_label_prefix': 'final_r',
+        'path_extract': 'final_r',
+    },
+    'motif_readout_decay_r_mean_sampling_explainer_motif_info': {
+        'summary_path': ('weight_distribution_params', 'final_r'),
+        'row_label_prefix': 'final_r',
+        'path_extract': 'final_r',
+    },
 }
 
 
