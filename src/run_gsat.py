@@ -1247,7 +1247,7 @@ class GSAT(nn.Module):
                 edge_att = self.lift_node_att_to_edge_att(att, data.edge_index)
 
             # Classification with W_FEAT / W_MESSAGE / W_READOUT injection points
-            if not self.learn_edge_att and (self.w_feat or not self.w_message or self.w_readout):
+            if not self.learn_edge_att:
                 x_clf = data.x * att if self.w_feat else data.x
                 edge_atten_mp = edge_att if self.w_message else None
                 clf_emb = self.clf.get_emb(x_clf, data.edge_index, batch=data.batch,
@@ -1258,7 +1258,7 @@ class GSAT(nn.Module):
             else:
                 clf_logits = self.clf(data.x, data.edge_index, data.batch,
                                       edge_attr=data.edge_attr, edge_atten=edge_att)
-            
+
         elif self.motif_method == 'readout':
             # =================================================================
             # READOUT METHOD: Pool node embeddings to motif level, score motifs
@@ -1292,7 +1292,7 @@ class GSAT(nn.Module):
             edge_att = self.lift_node_att_to_edge_att(node_att, data.edge_index)
 
             # Classification with W_FEAT / W_MESSAGE / W_READOUT injection points
-            if not self.learn_edge_att and (self.w_feat or not self.w_message or self.w_readout):
+            if not self.learn_edge_att:
                 x_clf = data.x * node_att if self.w_feat else data.x
                 edge_atten_mp = edge_att if self.w_message else None
                 clf_emb = self.clf.get_emb(x_clf, data.edge_index, batch=data.batch,
