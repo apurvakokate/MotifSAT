@@ -909,6 +909,9 @@ class GSAT(nn.Module):
         self.motif_level_sampling = method_config.get('motif_level_sampling', False)
         self.use_raw_score_loss = method_config.get('use_raw_score_loss', False)
         self.motif_pooling_method = method_config.get('motif_pooling_method', 'mean')
+
+        # Info loss warmup: prediction-only phase before info loss kicks in
+        self.info_warmup_epochs = method_config.get('info_warmup_epochs', 0)
         
         # Vanilla GNN mode: bypass attention entirely
         self.no_attention = method_config.get('no_attention', False)
@@ -953,6 +956,8 @@ class GSAT(nn.Module):
         print(f'[INFO] Motif-level info loss: {self.motif_level_info_loss}')
         print(f'[INFO] Motif-level sampling: {self.motif_level_sampling}')
         print(f'[INFO] Use raw score loss: {self.use_raw_score_loss}')
+        if self.info_warmup_epochs > 0:
+            print(f'[INFO] Info loss warmup: {self.info_warmup_epochs} epochs (prediction-only, deterministic gating)')
         if not self.learn_edge_att:
             print(f'[INFO] Node att injection: W_FEAT={self.w_feat} W_MESSAGE={self.w_message} W_READOUT={self.w_readout}')
         if self.target_k is not None:
@@ -1008,6 +1013,7 @@ class GSAT(nn.Module):
                 'motif_level_info_loss': self.motif_level_info_loss,
                 'motif_level_sampling': self.motif_level_sampling,
                 'use_raw_score_loss': self.use_raw_score_loss,
+                'info_warmup_epochs': self.info_warmup_epochs,
                 'w_feat': self.w_feat,
                 'w_message': self.w_message,
                 'w_readout': self.w_readout,
@@ -1152,7 +1158,10 @@ class GSAT(nn.Module):
                      (1-att_for_loss) * torch.log((1-att_for_loss)/(1-r+1e-6) + 1e-6)).mean()
 
         pred_loss = pred_loss * self.pred_loss_coef
-        info_loss = info_loss * self.info_loss_coef
+        if epoch < self.info_warmup_epochs:
+            info_loss = att.new_tensor(0.0)
+        else:
+            info_loss = info_loss * self.info_loss_coef
         
         # Compute motif within-variance loss for 'loss' method
         has_motif_loss = (self.motif_method == 'loss'
@@ -2079,7 +2088,10 @@ class GSAT(nn.Module):
                 edge_f.write(json.dumps(edge_record) + '\n')
 
     def sampling(self, att_log_logits, epoch, training):
-        att = self.concrete_sample(att_log_logits, temp=1, training=training)
+        if training and epoch < self.info_warmup_epochs:
+            att = att_log_logits.sigmoid()
+        else:
+            att = self.concrete_sample(att_log_logits, temp=1, training=training)
         return att
 
     @staticmethod

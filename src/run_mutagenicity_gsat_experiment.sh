@@ -20,12 +20,23 @@ export RESULTS_DIR=~/hpc-share/ChemIntuit/MotifSAT/tuning_results
 export WANDB_DIR=~/hpc-share/ChemIntuit/MotifSAT/wandb
 
 EXPERIMENTS=(
+  # Original explainer experiments
   base_gsat_decay_r_explainer
   motif_readout_decay_r_mean_explainer
   motif_readout_decay_r_mean_sampling_explainer
+  # Motif-level info loss variants
   base_gsat_decay_r_explainer_motif_info
   motif_readout_decay_r_mean_explainer_motif_info
   motif_readout_decay_r_mean_sampling_explainer_motif_info
+  # Warmup variants (conservative info loss schedule)
+  base_gsat_decay_r_explainer_warmup
+  motif_readout_decay_r_mean_explainer_warmup
+  motif_readout_decay_r_mean_sampling_explainer_warmup
+  # Injection point ablation (motif-level sampling)
+  motif_injection_node
+  motif_injection_node_readout
+  motif_injection_readout_only
+  motif_injection_edge_readout
 )
 DATASETS=(Mutagenicity)
 MODELS=(GCN SAGE)

@@ -10,6 +10,13 @@ EXPERIMENTS=(
   base_gsat_decay_r_explainer_motif_info
   motif_readout_decay_r_mean_explainer_motif_info
   motif_readout_decay_r_mean_sampling_explainer_motif_info
+  base_gsat_decay_r_explainer_warmup
+  motif_readout_decay_r_mean_explainer_warmup
+  motif_readout_decay_r_mean_sampling_explainer_warmup
+  motif_injection_node
+  motif_injection_node_readout
+  motif_injection_readout_only
+  motif_injection_edge_readout
 )
 MODELS=(GCN SAGE)
 FINAL_RS=(0.8 0.7)

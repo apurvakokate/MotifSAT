@@ -361,6 +361,188 @@ EXPERIMENT_GROUPS = {
     },
 
     # =========================================================================
+    # Warmup experiments: prediction-only warmup before info loss kicks in
+    # Conservative schedule: higher init_r, slower decay, lower info_loss_coef
+    # =========================================================================
+
+    'base_gsat_decay_r_explainer_warmup': {
+        'experiment_name': 'base_gsat_decay_r_explainer_warmup',
+        'variants': [
+            {
+                'variant_id': f'decay_final{fr}',
+                'gsat_overrides': {
+                    'tuning_id': f'decay_final{fr}',
+                    'fix_r': False,
+                    'init_r': 0.9,
+                    'final_r': fr,
+                    'decay_interval': 20,
+                    'decay_r': 0.05,
+                    'info_loss_coef': 0.5,
+                    'info_warmup_epochs': 30,
+                    'motif_incorporation_method': None,
+                    'motif_loss_coef': 0,
+                },
+                'learn_edge_att': False,
+            }
+            for fr in [0.8, 0.7]
+        ],
+    },
+
+    'motif_readout_decay_r_mean_explainer_warmup': {
+        'experiment_name': 'motif_readout_decay_r_mean_explainer_warmup',
+        'variants': [
+            {
+                'variant_id': f'readout_mean_decay_final{fr}',
+                'gsat_overrides': {
+                    'tuning_id': f'readout_mean_decay_final{fr}',
+                    'fix_r': False,
+                    'init_r': 0.9,
+                    'final_r': fr,
+                    'decay_interval': 20,
+                    'decay_r': 0.05,
+                    'info_loss_coef': 0.5,
+                    'info_warmup_epochs': 30,
+                    'motif_incorporation_method': 'readout',
+                    'motif_pooling_method': 'mean',
+                    'motif_loss_coef': 0,
+                    'motif_level_sampling': False,
+                },
+                'learn_edge_att': False,
+            }
+            for fr in [0.8, 0.7]
+        ],
+    },
+
+    'motif_readout_decay_r_mean_sampling_explainer_warmup': {
+        'experiment_name': 'motif_readout_decay_r_mean_sampling_explainer_warmup',
+        'variants': [
+            {
+                'variant_id': f'readout_mean_sampling_decay_final{fr}',
+                'gsat_overrides': {
+                    'tuning_id': f'readout_mean_sampling_decay_final{fr}',
+                    'fix_r': False,
+                    'init_r': 0.9,
+                    'final_r': fr,
+                    'decay_interval': 20,
+                    'decay_r': 0.05,
+                    'info_loss_coef': 0.5,
+                    'info_warmup_epochs': 30,
+                    'motif_incorporation_method': 'readout',
+                    'motif_pooling_method': 'mean',
+                    'motif_loss_coef': 0,
+                    'motif_level_sampling': True,
+                },
+                'learn_edge_att': False,
+            }
+            for fr in [0.8, 0.7]
+        ],
+    },
+
+    # =========================================================================
+    # Injection point ablation with motif-level sampling
+    # All use motif readout + mean pooling + motif_level_sampling=True
+    # Varying: w_feat, w_message, w_readout, learn_edge_att
+    # =========================================================================
+
+    'motif_injection_node': {
+        'experiment_name': 'motif_injection_node',
+        'variants': [
+            {
+                'variant_id': f'node_decay_final{fr}',
+                'gsat_overrides': {
+                    'tuning_id': f'node_decay_final{fr}',
+                    'fix_r': False,
+                    'init_r': 0.9,
+                    'final_r': fr,
+                    'decay_r': 0.1,
+                    'motif_incorporation_method': 'readout',
+                    'motif_pooling_method': 'mean',
+                    'motif_loss_coef': 0,
+                    'motif_level_sampling': True,
+                    'w_feat': False,
+                    'w_message': True,
+                    'w_readout': False,
+                },
+                'learn_edge_att': False,
+            }
+            for fr in [0.8, 0.7]
+        ],
+    },
+
+    'motif_injection_node_readout': {
+        'experiment_name': 'motif_injection_node_readout',
+        'variants': [
+            {
+                'variant_id': f'node_readout_decay_final{fr}',
+                'gsat_overrides': {
+                    'tuning_id': f'node_readout_decay_final{fr}',
+                    'fix_r': False,
+                    'init_r': 0.9,
+                    'final_r': fr,
+                    'decay_r': 0.1,
+                    'motif_incorporation_method': 'readout',
+                    'motif_pooling_method': 'mean',
+                    'motif_loss_coef': 0,
+                    'motif_level_sampling': True,
+                    'w_feat': False,
+                    'w_message': True,
+                    'w_readout': True,
+                },
+                'learn_edge_att': False,
+            }
+            for fr in [0.8, 0.7]
+        ],
+    },
+
+    'motif_injection_readout_only': {
+        'experiment_name': 'motif_injection_readout_only',
+        'variants': [
+            {
+                'variant_id': f'readout_only_decay_final{fr}',
+                'gsat_overrides': {
+                    'tuning_id': f'readout_only_decay_final{fr}',
+                    'fix_r': False,
+                    'init_r': 0.9,
+                    'final_r': fr,
+                    'decay_r': 0.1,
+                    'motif_incorporation_method': 'readout',
+                    'motif_pooling_method': 'mean',
+                    'motif_loss_coef': 0,
+                    'motif_level_sampling': True,
+                    'w_feat': False,
+                    'w_message': False,
+                    'w_readout': True,
+                },
+                'learn_edge_att': False,
+            }
+            for fr in [0.8, 0.7]
+        ],
+    },
+
+    'motif_injection_edge_readout': {
+        'experiment_name': 'motif_injection_edge_readout',
+        'variants': [
+            {
+                'variant_id': f'edge_readout_decay_final{fr}',
+                'gsat_overrides': {
+                    'tuning_id': f'edge_readout_decay_final{fr}',
+                    'fix_r': False,
+                    'init_r': 0.9,
+                    'final_r': fr,
+                    'decay_r': 0.1,
+                    'motif_incorporation_method': 'readout',
+                    'motif_pooling_method': 'mean',
+                    'motif_loss_coef': 0,
+                    'motif_level_sampling': True,
+                    'w_readout': True,
+                },
+                'learn_edge_att': True,
+            }
+            for fr in [0.8, 0.7]
+        ],
+    },
+
+    # =========================================================================
     # Legacy experiments (kept for reference, still functional)
     # =========================================================================
 
