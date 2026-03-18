@@ -1279,7 +1279,7 @@ class GSAT(nn.Module):
                 raise ValueError("'readout' method requires nodes_to_motifs attribute in data")
             motif_emb, motif_batch, inverse_indices, motif_ids = motif_pooling(emb, nodes_to_motifs, data.batch, reduce=self.motif_pooling_method)
             
-            motif_att_log_logits = self.extractor(motif_emb, None, motif_batch)
+            motif_att_log_logits = self.extractor(motif_emb, None, motif_batch) # Assuming node level scores to motif level scores
 
             if self.motif_level_sampling:
                 # Sample at motif level, then broadcast to nodes
@@ -2125,7 +2125,7 @@ class ExtractorMLP(nn.Module):
             self.feature_extractor = MLP([hidden_size * 1, hidden_size * 2, hidden_size, 1], dropout=dropout_p)
 
     def forward(self, emb, edge_index, batch):
-        if self.learn_edge_att:
+        if self.learn_edge_att and edge_index is not None:
             col, row = edge_index
             f1, f2 = emb[col], emb[row]
             f12 = torch.cat([f1, f2], dim=-1)

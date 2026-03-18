@@ -126,6 +126,11 @@ EXPERIMENT_ROW_CONFIG = {
         'row_label_prefix': 'final_r',
         'path_extract': 'final_r',
     },
+    'motif_readout_sampling_info_coef_sweep': {
+        'summary_path': None,
+        'row_label_prefix': '',
+        'path_extract': 'info_coef_final_r',
+    },
     'base_gsat_decay_r_explainer_motif_info': {
         'summary_path': ('weight_distribution_params', 'final_r'),
         'row_label_prefix': 'final_r',
@@ -240,6 +245,19 @@ def _extract_value_from_parts(parts, mode):
             if m:
                 return _coerce_number(m.group(2))
 
+    elif mode == 'info_coef_final_r':
+        info_val = None
+        final_val = None
+        for p in parts:
+            m = re.search(r'pred[0-9.]+_info([0-9.]+)_motif', p)
+            if m:
+                info_val = _coerce_number(m.group(1))
+            m2 = re.search(r'init[0-9.]+_final([0-9.]+)_decay', p)
+            if m2:
+                final_val = _coerce_number(m2.group(1))
+        if info_val is not None and final_val is not None:
+            return f'info={info_val}, r={final_val}'
+
     elif mode == 'vanilla':
         return 'no_attention'
 
@@ -251,12 +269,26 @@ def _get_row_value(summary: dict, experiment_name: str, parts=None):
     if cfg is None:
         return 'unknown'
 
+    extract_mode = cfg.get('path_extract')
+
+    # Composite modes: build from multiple summary fields
+    if extract_mode == 'info_coef_final_r':
+        info_val = _get_nested(summary, ('loss_coefficients', 'info_loss_coef'))
+        final_val = _get_nested(summary, ('weight_distribution_params', 'final_r'))
+        if info_val is not None and final_val is not None:
+            return f'info={_coerce_number(info_val)}, r={_coerce_number(final_val)}'
+        if parts is not None:
+            val = _extract_value_from_parts(parts, extract_mode)
+            if val is not None:
+                return val
+        return 'unknown'
+
     val = None
     if cfg.get('summary_path') is not None:
         val = _get_nested(summary, cfg['summary_path'])
 
     if val is None and parts is not None:
-        val = _extract_value_from_parts(parts, cfg.get('path_extract'))
+        val = _extract_value_from_parts(parts, extract_mode)
 
     if val is None:
         return 'unknown'

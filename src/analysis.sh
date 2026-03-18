@@ -17,6 +17,7 @@ EXPERIMENTS=(
   motif_injection_node_readout
   motif_injection_readout_only
   motif_injection_edge_readout
+  motif_readout_sampling_info_coef_sweep
 )
 MODELS=(GCN SAGE)
 FINAL_RS=(0.8 0.7)

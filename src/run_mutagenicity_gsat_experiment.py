@@ -289,6 +289,36 @@ EXPERIMENT_GROUPS = {
     },
 
     # =========================================================================
+    # Info loss coefficient sweep for motif readout + sampling
+    # Base: motif_readout_decay_r_mean_sampling_explainer (info_loss_coef=1)
+    # Sweep: 0.1, 0.25, 0.5, 0.75, 1.0 (baseline), 1.5, 2.0 × final_r {0.8, 0.7}
+    # =========================================================================
+
+    'motif_readout_sampling_info_coef_sweep': {
+        'experiment_name': 'motif_readout_sampling_info_coef_sweep',
+        'variants': [
+            {
+                'variant_id': f'info{c}_final{fr}',
+                'gsat_overrides': {
+                    'tuning_id': f'info{c}_final{fr}',
+                    'fix_r': False,
+                    'init_r': 0.9,
+                    'final_r': fr,
+                    'decay_r': 0.1,
+                    'info_loss_coef': c,
+                    'motif_incorporation_method': 'readout',
+                    'motif_pooling_method': 'mean',
+                    'motif_loss_coef': 0,
+                    'motif_level_sampling': True,
+                },
+                'learn_edge_att': False,
+            }
+            for c in [0.0, 0.25, 0.5, 1.0, 2.0]
+            for fr in [0.8, 0.7]
+        ],
+    },
+
+    # =========================================================================
     # Motif-level info loss variants (compare with the originals above)
     # Same as base/readout/sampling explainer but with motif_level_info_loss=True
     # =========================================================================
@@ -536,7 +566,7 @@ EXPERIMENT_GROUPS = {
                     'motif_level_sampling': True,
                     'w_readout': True,
                 },
-                'learn_edge_att': True,
+                'learn_edge_att': False,
             }
             for fr in [0.8, 0.7]
         ],
