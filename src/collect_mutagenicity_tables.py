@@ -131,6 +131,16 @@ EXPERIMENT_ROW_CONFIG = {
         'row_label_prefix': '',
         'path_extract': 'info_coef_final_r',
     },
+    'motif_readout_sampling_extractor_sweep': {
+        'summary_path': None,
+        'row_label_prefix': '',
+        'path_extract': 'ext_mult_final_r',
+    },
+    'motif_readout_sampling_rich_pool': {
+        'summary_path': ('weight_distribution_params', 'final_r'),
+        'row_label_prefix': 'final_r',
+        'path_extract': 'final_r',
+    },
     'base_gsat_decay_r_explainer_motif_info': {
         'summary_path': ('weight_distribution_params', 'final_r'),
         'row_label_prefix': 'final_r',
@@ -258,6 +268,17 @@ def _extract_value_from_parts(parts, mode):
         if info_val is not None and final_val is not None:
             return f'info={info_val}, r={final_val}'
 
+    elif mode == 'ext_mult_final_r':
+        mult_val = None
+        final_val = None
+        for p in parts:
+            m = re.search(r'tuning_ext([0-9]+)_final([0-9.]+)', p)
+            if m:
+                mult_val = _coerce_number(m.group(1))
+                final_val = _coerce_number(m.group(2))
+        if mult_val is not None and final_val is not None:
+            return f'ext={mult_val}x, r={final_val}'
+
     elif mode == 'vanilla':
         return 'no_attention'
 
@@ -281,6 +302,16 @@ def _get_row_value(summary: dict, experiment_name: str, parts=None):
             val = _extract_value_from_parts(parts, extract_mode)
             if val is not None:
                 return val
+        return 'unknown'
+
+    if extract_mode == 'ext_mult_final_r':
+        final_val = _get_nested(summary, ('weight_distribution_params', 'final_r'))
+        if parts is not None:
+            val = _extract_value_from_parts(parts, extract_mode)
+            if val is not None:
+                return val
+        if final_val is not None:
+            return f'ext=?x, r={_coerce_number(final_val)}'
         return 'unknown'
 
     val = None

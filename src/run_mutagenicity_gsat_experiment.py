@@ -319,6 +319,63 @@ EXPERIMENT_GROUPS = {
     },
 
     # =========================================================================
+    # Extractor MLP capacity sweep (motif readout + sampling)
+    # Base: motif_readout_decay_r_mean_sampling_explainer (extractor_hidden_mult=1)
+    # Sweep: mult 1 (baseline), 2, 4 × final_r {0.8, 0.7}
+    # =========================================================================
+
+    'motif_readout_sampling_extractor_sweep': {
+        'experiment_name': 'motif_readout_sampling_extractor_sweep',
+        'variants': [
+            {
+                'variant_id': f'ext{m}_final{fr}',
+                'gsat_overrides': {
+                    'tuning_id': f'ext{m}_final{fr}',
+                    'fix_r': False,
+                    'init_r': 0.9,
+                    'final_r': fr,
+                    'decay_r': 0.1,
+                    'motif_incorporation_method': 'readout',
+                    'motif_pooling_method': 'mean',
+                    'motif_loss_coef': 0,
+                    'motif_level_sampling': True,
+                },
+                'learn_edge_att': False,
+                'shared_overrides': {'extractor_hidden_mult': m},
+            }
+            for m in [1, 2, 4]
+            for fr in [0.8, 0.7]
+        ],
+    },
+
+    # =========================================================================
+    # Rich motif readout: concatenate mean+max+sum pooling (3× embedding width)
+    # Tests whether richer motif representations improve attention quality
+    # =========================================================================
+
+    'motif_readout_sampling_rich_pool': {
+        'experiment_name': 'motif_readout_sampling_rich_pool',
+        'variants': [
+            {
+                'variant_id': f'rich_final{fr}',
+                'gsat_overrides': {
+                    'tuning_id': f'rich_final{fr}',
+                    'fix_r': False,
+                    'init_r': 0.9,
+                    'final_r': fr,
+                    'decay_r': 0.1,
+                    'motif_incorporation_method': 'readout',
+                    'motif_pooling_method': 'multi',
+                    'motif_loss_coef': 0,
+                    'motif_level_sampling': True,
+                },
+                'learn_edge_att': False,
+            }
+            for fr in [0.8, 0.7]
+        ],
+    },
+
+    # =========================================================================
     # Motif-level info loss variants (compare with the originals above)
     # Same as base/readout/sampling explainer but with motif_level_info_loss=True
     # =========================================================================
@@ -766,6 +823,8 @@ def run_one(model_name, fold, variant, experiment_name, seed, cuda_id, data_dir,
     """Run a single experiment: one model, one fold, one variant, one seed."""
     config = get_base_config(model_name, dataset_name, gsat_overrides=variant['gsat_overrides'])
     config['shared_config']['learn_edge_att'] = variant['learn_edge_att']
+    if 'shared_overrides' in variant:
+        config['shared_config'].update(variant['shared_overrides'])
     config['GSAT_config']['experiment_name'] = experiment_name
 
     if 'model_overrides' in variant:

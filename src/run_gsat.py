@@ -178,10 +178,11 @@ def motif_pooling(emb, nodes_to_motifs, batch, reduce='mean'):
         emb: [N, hidden] node embeddings
         nodes_to_motifs: [N] global motif indices (can be non-consecutive)
         batch: [N] batch assignment for nodes
-        reduce: Aggregation method ('mean' or 'sum')
+        reduce: Aggregation method ('mean', 'sum', or 'multi' for
+                concatenated mean+max+sum giving 3× the embedding width)
     
     Returns:
-        motif_emb: [M, hidden] motif embeddings (M = number of unique graph-motif pairs)
+        motif_emb: [M, hidden] (or [M, 3*hidden] for 'multi')
         motif_batch: [M] batch assignment for motifs
         inverse_indices: [N] mapping from each node to its motif index (0..M-1)
         motif_ids: [M] original global motif index for each pooled motif
@@ -194,7 +195,13 @@ def motif_pooling(emb, nodes_to_motifs, batch, reduce='mean'):
     motif_batch = unique_graph_motifs // max_motif_id
     motif_ids = unique_graph_motifs % max_motif_id
     
-    motif_emb = scatter(emb, inverse_indices, dim=0, reduce=reduce)
+    if reduce == 'multi':
+        motif_mean = scatter(emb, inverse_indices, dim=0, reduce='mean')
+        motif_max = scatter(emb, inverse_indices, dim=0, reduce='max')
+        motif_sum = scatter(emb, inverse_indices, dim=0, reduce='sum')
+        motif_emb = torch.cat([motif_mean, motif_max, motif_sum], dim=1)
+    else:
+        motif_emb = scatter(emb, inverse_indices, dim=0, reduce=reduce)
     return motif_emb, motif_batch, inverse_indices, motif_ids
 
 
@@ -2114,15 +2121,19 @@ class GSAT(nn.Module):
 
 class ExtractorMLP(nn.Module):
 
-    def __init__(self, hidden_size, shared_config):
+    def __init__(self, hidden_size, shared_config, input_dim=None):
         super().__init__()
         self.learn_edge_att = shared_config['learn_edge_att']
         dropout_p = shared_config['extractor_dropout_p']
+        mult = shared_config.get('extractor_hidden_mult', 1)
+
+        if input_dim is None:
+            input_dim = hidden_size
 
         if self.learn_edge_att:
-            self.feature_extractor = MLP([hidden_size * 2, hidden_size * 4, hidden_size, 1], dropout=dropout_p)
+            self.feature_extractor = MLP([input_dim * 2, hidden_size * 4 * mult, hidden_size * mult, 1], dropout=dropout_p)
         else:
-            self.feature_extractor = MLP([hidden_size * 1, hidden_size * 2, hidden_size, 1], dropout=dropout_p)
+            self.feature_extractor = MLP([input_dim, hidden_size * 2 * mult, hidden_size * mult, 1], dropout=dropout_p)
 
     def forward(self, emb, edge_index, batch):
         if self.learn_edge_att and edge_index is not None:
@@ -2790,7 +2801,10 @@ def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_nam
         motif_clf = get_model(x_dim, edge_attr_dim, num_class, aux_info['multi_label'], model_config, device)
         # Note: motif_clf is trained from scratch (no pretraining on motif graphs available)
 
-    extractor = ExtractorMLP(model_config['hidden_size'], shared_config).to(device)
+    hidden_size = model_config['hidden_size']
+    motif_pool = method_config.get('motif_pooling_method', 'mean')
+    extractor_input_dim = hidden_size * 3 if motif_pool == 'multi' else hidden_size
+    extractor = ExtractorMLP(hidden_size, shared_config, input_dim=extractor_input_dim).to(device)
     lr, wd = method_config['lr'], method_config.get('weight_decay', 0)
     
     # Build parameter list for optimizer
@@ -3020,7 +3034,10 @@ def main():
         # Create model and extractor
         model_config['deg'] = aux_info['deg']
         model = get_model(x_dim, edge_attr_dim, num_class, aux_info['multi_label'], model_config, device)
-        extractor = ExtractorMLP(model_config['hidden_size'], local_config['shared_config']).to(device)
+        _hs = model_config['hidden_size']
+        _mp = local_config.get('GSAT_config', {}).get('motif_pooling_method', 'mean')
+        _ext_in = _hs * 3 if _mp == 'multi' else _hs
+        extractor = ExtractorMLP(_hs, local_config['shared_config'], input_dim=_ext_in).to(device)
         
         # Create output file
         output_file = f'test_pipeline_output_{dataset_name}_{model_name}_fold{fold}.txt'

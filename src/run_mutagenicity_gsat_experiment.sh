@@ -39,6 +39,10 @@ EXPERIMENTS=(
   motif_injection_edge_readout
   # Info loss coefficient sweep (motif readout + sampling)
   motif_readout_sampling_info_coef_sweep
+  # Extractor MLP capacity sweep
+  motif_readout_sampling_extractor_sweep
+  # Rich motif readout (mean+max+sum concatenation)
+  motif_readout_sampling_rich_pool
 )
 DATASETS=(Mutagenicity)
 MODELS=(GCN SAGE)
