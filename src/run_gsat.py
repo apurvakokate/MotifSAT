@@ -735,125 +735,125 @@ def run_test_graphs_pipeline(n_graphs, model, extractor, data_loader, device, ou
     return output_file
 
 
-def create_ordered_batch_iterator(dataset, batch_size=2):
-    """
-    Create ordered batch iterator from dataset to ensure data correspondence.
+# def create_ordered_batch_iterator(dataset, batch_size=2):
+#     """
+#     Create ordered batch iterator from dataset to ensure data correspondence.
     
-    This function creates small batches (batch_size>=2) to solve InstanceNorm issues
-    while maintaining exact correspondence with the original dataset order.
+#     This function creates small batches (batch_size>=2) to solve InstanceNorm issues
+#     while maintaining exact correspondence with the original dataset order.
     
-    Args:
-        dataset: Original dataset (PyG InMemoryDataset)
-        batch_size: Size of each batch (default=2, minimum for InstanceNorm)
+#     Args:
+#         dataset: Original dataset (PyG InMemoryDataset)
+#         batch_size: Size of each batch (default=2, minimum for InstanceNorm)
         
-    Yields:
-        batch_data: PyG Batch object containing multiple molecules
-        batch_indices: List of original dataset indices  
-        original_samples: List of original Data objects
-        skip_first: Whether to skip the first sample in results (for odd-sized batches)
-    """
-    for i in range(0, len(dataset), batch_size):
-        batch_samples = []
-        batch_indices = []
+#     Yields:
+#         batch_data: PyG Batch object containing multiple molecules
+#         batch_indices: List of original dataset indices  
+#         original_samples: List of original Data objects
+#         skip_first: Whether to skip the first sample in results (for odd-sized batches)
+#     """
+#     for i in range(0, len(dataset), batch_size):
+#         batch_samples = []
+#         batch_indices = []
         
-        # Collect consecutive samples
-        for j in range(i, min(i + batch_size, len(dataset))):
-            sample = dataset[j]
-            batch_samples.append(sample)
-            batch_indices.append(j)
+#         # Collect consecutive samples
+#         for j in range(i, min(i + batch_size, len(dataset))):
+#             sample = dataset[j]
+#             batch_samples.append(sample)
+#             batch_indices.append(j)
         
-        # Handle last batch with only 1 sample
-        if len(batch_samples) == 1 and i > 0:
-            # Add previous sample to make batch_size=2 (to satisfy InstanceNorm)
-            prev_sample = dataset[i-1]
-            batch_samples = [prev_sample, batch_samples[0]]
-            batch_indices = [i-1, i]
-            skip_first = True  # Skip the duplicated first sample in results
-        else:
-            skip_first = False
+#         # Handle last batch with only 1 sample
+#         if len(batch_samples) == 1 and i > 0:
+#             # Add previous sample to make batch_size=2 (to satisfy InstanceNorm)
+#             prev_sample = dataset[i-1]
+#             batch_samples = [prev_sample, batch_samples[0]]
+#             batch_indices = [i-1, i]
+#             skip_first = True  # Skip the duplicated first sample in results
+#         else:
+#             skip_first = False
         
-        # Create PyG batch
-        try:
-            batch_data = Batch.from_data_list(batch_samples)
-            yield batch_data, batch_indices, batch_samples, skip_first
-        except Exception as e:
-            print(f"Error creating batch at indices {batch_indices}: {e}")
-            # If batch creation fails, process individually with padding
-            for sample, idx in zip(batch_samples, batch_indices):
-                if idx > 0:
-                    # Create batch with previous sample to satisfy InstanceNorm
-                    padded_batch = Batch.from_data_list([dataset[idx-1], sample])
-                    yield padded_batch, [idx-1, idx], [dataset[idx-1], sample], True
-                else:
-                    # For first sample, duplicate it
-                    padded_batch = Batch.from_data_list([sample, sample])
-                    yield padded_batch, [idx, idx], [sample, sample], True
+#         # Create PyG batch
+#         try:
+#             batch_data = Batch.from_data_list(batch_samples)
+#             yield batch_data, batch_indices, batch_samples, skip_first
+#         except Exception as e:
+#             print(f"Error creating batch at indices {batch_indices}: {e}")
+#             # If batch creation fails, process individually with padding
+#             for sample, idx in zip(batch_samples, batch_indices):
+#                 if idx > 0:
+#                     # Create batch with previous sample to satisfy InstanceNorm
+#                     padded_batch = Batch.from_data_list([dataset[idx-1], sample])
+#                     yield padded_batch, [idx-1, idx], [dataset[idx-1], sample], True
+#                 else:
+#                     # For first sample, duplicate it
+#                     padded_batch = Batch.from_data_list([sample, sample])
+#                     yield padded_batch, [idx, idx], [sample, sample], True
 
 
-def parse_batch_attention_to_samples(batch_att, batch_data, original_samples, batch_indices, skip_first, learn_edge_att):
-    """
-    Parse batch attention results into individual sample results.
+# def parse_batch_attention_to_samples(batch_att, batch_data, original_samples, batch_indices, skip_first, learn_edge_att):
+#     """
+#     Parse batch attention results into individual sample results.
     
-    This function takes the attention results from a batch and splits them back
-    into individual molecule attention scores, maintaining exact correspondence
-    with the original dataset samples.
+#     This function takes the attention results from a batch and splits them back
+#     into individual molecule attention scores, maintaining exact correspondence
+#     with the original dataset samples.
     
-    Args:
-        batch_att: Attention tensor from batch processing
-        batch_data: PyG Batch object 
-        original_samples: List of original Data objects
-        batch_indices: List of dataset indices
-        skip_first: Whether to skip first sample (for duplicated samples)
-        learn_edge_att: Whether learning edge attention
+#     Args:
+#         batch_att: Attention tensor from batch processing
+#         batch_data: PyG Batch object 
+#         original_samples: List of original Data objects
+#         batch_indices: List of dataset indices
+#         skip_first: Whether to skip first sample (for duplicated samples)
+#         learn_edge_att: Whether learning edge attention
         
-    Returns:
-        List of dicts containing individual sample results
-    """
-    # Convert batch attention to individual attention arrays
-    if learn_edge_att:
-        batch_edge_att = batch_att.detach().cpu().numpy()
-        batch_node_att = None
-    else:
-        batch_node_att = batch_att.detach().cpu().numpy()
-        batch_edge_att = None  # Will be calculated per sample to avoid batch edge_index issues
+#     Returns:
+#         List of dicts containing individual sample results
+#     """
+#     # Convert batch attention to individual attention arrays
+#     if learn_edge_att:
+#         batch_edge_att = batch_att.detach().cpu().numpy()
+#         batch_node_att = None
+#     else:
+#         batch_node_att = batch_att.detach().cpu().numpy()
+#         batch_edge_att = None  # Will be calculated per sample to avoid batch edge_index issues
     
-    results = []
-    node_ptr = 0
-    edge_ptr = 0
+#     results = []
+#     node_ptr = 0
+#     edge_ptr = 0
     
-    # Skip first sample if needed (for duplicated samples)
-    start_idx = 1 if skip_first else 0
+#     # Skip first sample if needed (for duplicated samples)
+#     start_idx = 1 if skip_first else 0
     
-    for i in range(start_idx, len(original_samples)):
-        sample = original_samples[i]
-        dataset_idx = batch_indices[i]
+#     for i in range(start_idx, len(original_samples)):
+#         sample = original_samples[i]
+#         dataset_idx = batch_indices[i]
         
-        num_nodes = sample.x.shape[0]
-        num_edges = sample.edge_index.shape[1]
+#         num_nodes = sample.x.shape[0]
+#         num_edges = sample.edge_index.shape[1]
         
-        # Extract attention scores for current sample
-        if batch_node_att is not None:
-            sample_node_att = batch_node_att[node_ptr:node_ptr + num_nodes]
-        else:
-            sample_node_att = None
+#         # Extract attention scores for current sample
+#         if batch_node_att is not None:
+#             sample_node_att = batch_node_att[node_ptr:node_ptr + num_nodes]
+#         else:
+#             sample_node_att = None
             
-        if batch_edge_att is not None:
-            sample_edge_att = batch_edge_att[edge_ptr:edge_ptr + num_edges]
-        else:
-            sample_edge_att = None
+#         if batch_edge_att is not None:
+#             sample_edge_att = batch_edge_att[edge_ptr:edge_ptr + num_edges]
+#         else:
+#             sample_edge_att = None
         
-        results.append({
-            'dataset_idx': dataset_idx,
-            'sample': sample,
-            'node_att': sample_node_att,
-            'edge_att': sample_edge_att
-        })
+#         results.append({
+#             'dataset_idx': dataset_idx,
+#             'sample': sample,
+#             'node_att': sample_node_att,
+#             'edge_att': sample_edge_att
+#         })
         
-        # Update pointers for next sample
-        node_ptr += num_nodes
-        edge_ptr += num_edges
+#         # Update pointers for next sample
+#         node_ptr += num_nodes
+#         edge_ptr += num_edges
     
-    return results
+#     return results
 
 
 class GSAT(nn.Module):
@@ -2737,7 +2737,9 @@ def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_nam
                 'experiment_name': experiment_name,
                 **local_config.get('GSAT_config', {}),
                 **local_config.get('shared_config', {}),
-                **local_config.get('model_config', {})
+                **local_config.get('model_config', {}),
+                **local_config.get('data_config', {}),
+                **local_config.get(f'{method_name}_config', {})
             },
             reinit=True
         )
@@ -2796,9 +2798,9 @@ def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_nam
 
     # Create separate motif model if configured (for 'graph' method)
     motif_clf = None
-    if separate_motif_model and motif_method == 'graph':
-        print('[INFO] Creating separate GNN for motif graph processing...')
-        motif_clf = get_model(x_dim, edge_attr_dim, num_class, aux_info['multi_label'], model_config, device)
+    # if separate_motif_model and motif_method == 'graph':
+    #     print('[INFO] Creating separate GNN for motif graph processing...')
+    #     motif_clf = get_model(x_dim, edge_attr_dim, num_class, aux_info['multi_label'], model_config, device)
         # Note: motif_clf is trained from scratch (no pretraining on motif graphs available)
 
     hidden_size = model_config['hidden_size']
@@ -2809,8 +2811,8 @@ def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_nam
     
     # Build parameter list for optimizer
     params_to_optimize = list(extractor.parameters()) + list(model.parameters())
-    if motif_clf is not None:
-        params_to_optimize += list(motif_clf.parameters())
+    # if motif_clf is not None:
+    #     params_to_optimize += list(motif_clf.parameters())
     
     optimizer = torch.optim.Adam(params_to_optimize, lr=lr, weight_decay=wd)
 
