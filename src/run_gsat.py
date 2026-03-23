@@ -7,16 +7,21 @@ from copy import deepcopy
 from datetime import datetime
 import os
 import json
+import io
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim.lr_scheduler import ReduceLROnPlateau
-from torch_sparse import transpose
 from torch_geometric.loader import DataLoader
 from torch_geometric.data import Batch
-from torch_geometric.utils import subgraph, is_undirected
+from torch_geometric.utils import subgraph
 from ogb.graphproppred import Evaluator
 from sklearn.metrics import roc_auc_score, mean_squared_error
+from sklearn.decomposition import PCA
+import matplotlib
+
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 from rdkit import Chem
 import wandb
 
@@ -224,6 +229,70 @@ def lift_motif_att_to_node_att(motif_att, inverse_indices):
         node_att: [N, 1] attention per node
     """
     return motif_att[inverse_indices]
+
+
+def forward_clf_with_node_attention_injection(
+    clf, data, node_att, edge_att, learn_edge_att, w_feat, w_message, w_readout, edge_attr=None,
+):
+    """
+    <USAGE> Shared GSAT classifier forward: W_FEAT / W_MESSAGE / W_READOUT when using node-level attention.
+
+    Matches the node-attention branch in forward_pass (previously duplicated at ~1266–1273 and ~1311–1318).
+    When learn_edge_att is True, falls back to full-graph forward with edge_atten (legacy; disabled in streamlined configs).
+    """
+    if learn_edge_att:
+        return clf(data.x, data.edge_index, data.batch, edge_attr=edge_attr, edge_atten=edge_att)
+    x_clf = data.x * node_att if w_feat else data.x
+    edge_atten_mp = edge_att if w_message else None
+    clf_emb = clf.get_emb(
+        x_clf, data.edge_index, batch=data.batch, edge_attr=edge_attr, edge_atten=edge_atten_mp,
+    )
+    if w_readout:
+        clf_emb = clf_emb * node_att
+    return clf.get_pred_from_emb(clf_emb, data.batch)
+
+
+def sample_node_level_gsat(sampling_fn, att_log_logits, epoch, training, use_raw_score_loss):
+    """
+    <SAMPLING> Node-level Concrete / sigmoid sampling (baseline GSAT path).
+    sampling_fn: typically model.sampling bound method.
+    """
+    att = sampling_fn(att_log_logits, epoch, training)
+    raw_att_for_loss = att_log_logits.sigmoid() if use_raw_score_loss else None
+    return att, raw_att_for_loss
+
+
+def sample_motif_readout_branch(
+    sampling_fn,
+    motif_att_log_logits,
+    inverse_indices,
+    motif_level_sampling,
+    motif_level_info_loss,
+    epoch,
+    training,
+    use_raw_score_loss,
+):
+    """
+    <SAMPLING> Motif readout: either sample at motif level then broadcast, or lift logits to nodes then sample.
+    Returns (node_att, att_for_loss_scalar_path, raw_att_for_loss).
+    """
+    if motif_level_sampling:
+        motif_att = sampling_fn(motif_att_log_logits, epoch, training)
+        node_att = lift_motif_att_to_node_att(motif_att, inverse_indices)
+        att = motif_att if motif_level_info_loss else node_att
+        if use_raw_score_loss:
+            raw_motif = motif_att_log_logits.sigmoid()
+            raw_att_for_loss = (
+                raw_motif if motif_level_info_loss else lift_motif_att_to_node_att(raw_motif, inverse_indices)
+            )
+        else:
+            raw_att_for_loss = None
+    else:
+        node_att_log_logits = lift_motif_att_to_node_att(motif_att_log_logits, inverse_indices)
+        node_att = sampling_fn(node_att_log_logits, epoch, training)
+        att = node_att
+        raw_att_for_loss = node_att_log_logits.sigmoid() if use_raw_score_loss else None
+    return node_att, att, raw_att_for_loss
 
 
 def construct_motif_graph(x, edge_index, edge_attr, nodes_to_motifs, batch):
@@ -879,12 +948,17 @@ class GSAT(nn.Module):
         self.datasets = datasets
         self.masked_data_features = masked_data
         self.task_type = task_type
+        self.motif_list = motif_list  # SMILES (or str) per global motif id; None for datasets without vocabulary
 
         self.learn_edge_att = shared_config['learn_edge_att']
         self.k = shared_config['precision_k']
         self.num_viz_samples = shared_config['num_viz_samples']
         self.viz_interval = shared_config['viz_interval']
         self.viz_norm_att = shared_config['viz_norm_att']
+        self.embedding_viz_every = int(shared_config.get('embedding_viz_every', 0))
+        self.embedding_viz_max_points = int(shared_config.get('embedding_viz_max_points', 8000))
+        self.embedding_viz_max_batches = int(shared_config.get('embedding_viz_max_batches', 40))
+        self.embedding_viz_max_motif_annotations = int(shared_config.get('embedding_viz_max_motif_annotations', 500))
 
         self.epochs = method_config['epochs']
         self.pred_loss_coef = method_config['pred_loss_coef']
@@ -925,6 +999,7 @@ class GSAT(nn.Module):
         if self.no_attention:
             self.info_loss_coef = 0
             self.motif_loss_coef = 0
+            self.between_motif_coef = 0
 
         # Node attention injection points (only for learn_edge_att=False)
         self.w_feat = method_config.get('w_feat', False)
@@ -946,9 +1021,10 @@ class GSAT(nn.Module):
         #     if motif_scores_path is not None and motif_list is None:
         #         print(f'[WARNING] motif_scores_path set but motif_list not provided — score-based r disabled')
         
-        # If method is None (baseline), disable motif loss automatically
+        # If method is None (baseline), disable motif-structure losses automatically
         if self.motif_method is None:
             self.motif_loss_coef = 0.0
+            self.between_motif_coef = 0.0
         # If method is 'readout' or 'graph', motif consistency loss is not applicable
         # (consistency is enforced structurally), so disable it
         elif self.motif_method in ['readout', 'graph']:
@@ -969,6 +1045,9 @@ class GSAT(nn.Module):
             print(f'[INFO] Node att injection: W_FEAT={self.w_feat} W_MESSAGE={self.w_message} W_READOUT={self.w_readout}')
         if self.target_k is not None:
             print(f'[INFO] Graph-adaptive r: target_k={self.target_k} (r_g = {self.target_k} / M_g)')
+        if self.embedding_viz_every > 0:
+            print(f'[INFO] W&B valid embedding PCA viz every {self.embedding_viz_every} epochs '
+                  f'(binary non-multilabel only; max_batches={self.embedding_viz_max_batches})')
         # if self.motif_r_values is not None:
         #     print(f'[INFO] Score-based per-motif r: loaded {len(self.motif_r_values)} values')
         
@@ -1164,31 +1243,37 @@ class GSAT(nn.Module):
         info_loss = (att_for_loss * torch.log(att_for_loss/r + 1e-6) +
                      (1-att_for_loss) * torch.log((1-att_for_loss)/(1-r+1e-6) + 1e-6)).mean()
 
+        # <LOSS> Tunable coefficients: pred_loss_coef, info_loss_coef, motif_loss_coef (within-motif), between_motif_coef (spread across motifs)
         pred_loss = pred_loss * self.pred_loss_coef
         if epoch < self.info_warmup_epochs:
             info_loss = att.new_tensor(0.0)
         else:
             info_loss = info_loss * self.info_loss_coef
-        
-        # Compute motif within-variance loss for 'loss' method
-        has_motif_loss = (self.motif_method == 'loss'
-                         and self.motif_loss_coef > 0
-                         and nodes_to_motifs is not None)
-        if has_motif_loss:
-            within_var, _between_var = motif_consistency_loss(att_for_loss, nodes_to_motifs, batch)
-            within_term = within_var * self.motif_loss_coef
-            motif_loss = within_term
-        else:
-            motif_loss = att.new_tensor(0.0)
-            within_term = att.new_tensor(0.0)
-        
-        loss = pred_loss + info_loss + motif_loss
-        
+
+        within_term = att.new_tensor(0.0)
+        between_term = att.new_tensor(0.0)
+        needs_motif_structure = (
+            self.motif_method == 'loss'
+            and nodes_to_motifs is not None
+            and (self.motif_loss_coef > 0 or self.between_motif_coef > 0)
+        )
+        if needs_motif_structure:
+            within_var, between_var = motif_consistency_loss(att_for_loss, nodes_to_motifs, batch)
+            if self.motif_loss_coef > 0:
+                within_term = within_var * self.motif_loss_coef
+            if self.between_motif_coef > 0:
+                # Maximize between-motif variance → minimize negative between_var
+                between_term = -self.between_motif_coef * between_var
+
+        motif_loss = within_term
+        loss = pred_loss + info_loss + within_term + between_term
+
         loss_dict = {
-            'loss': loss.item(), 
-            'pred': pred_loss.item(), 
-            'info': info_loss.item(), 
+            'loss': loss.item(),
+            'pred': pred_loss.item(),
+            'info': info_loss.item(),
             'motif_within': within_term.item(),
+            'motif_between': between_term.item(),
             'motif_consistency': motif_loss.item(),
         }
 
@@ -1225,7 +1310,7 @@ class GSAT(nn.Module):
             pred_loss = self.criterion(clf_logits, data.y)
             loss = self.pred_loss_coef * pred_loss
             loss_dict = {'loss': loss.item(), 'pred': pred_loss.item(), 'info': 0.0,
-                        'motif_within': 0.0, 'motif_consistency': 0.0}
+                        'motif_within': 0.0, 'motif_between': 0.0, 'motif_consistency': 0.0}
             return edge_att, loss, loss_dict, clf_logits
 
         # Check for unmapped nodes if using motif incorporation methods
@@ -1248,32 +1333,28 @@ class GSAT(nn.Module):
             # =================================================================
             emb = self.clf.get_emb(data.x, data.edge_index, batch=data.batch, edge_attr=data.edge_attr)
             att_log_logits = self.extractor(emb, data.edge_index, data.batch)
-            att = self.sampling(att_log_logits, epoch, training)
-            if self.use_raw_score_loss:
-                raw_att_for_loss = att_log_logits.sigmoid()
+            att, raw_att_for_loss = sample_node_level_gsat(
+                self.sampling, att_log_logits, epoch, training, self.use_raw_score_loss,
+            )
 
             if self.learn_edge_att:
-                if is_undirected(data.edge_index):
-                    trans_idx, trans_val = transpose(data.edge_index, att, None, None, coalesced=False)
-                    trans_val_perm = reorder_like(trans_idx, data.edge_index, trans_val)
-                    edge_att = (att + trans_val_perm) / 2
-                else:
-                    edge_att = att
-            else:
-                edge_att = self.lift_node_att_to_edge_att(att, data.edge_index)
+                # Edge-level attention (preserved for reference; not used in streamlined configs).
+                # if is_undirected(data.edge_index):
+                #     trans_idx, trans_val = transpose(data.edge_index, att, None, None, coalesced=False)
+                #     trans_val_perm = reorder_like(trans_idx, data.edge_index, trans_val)
+                #     edge_att = (att + trans_val_perm) / 2
+                # else:
+                #     edge_att = att
+                raise ValueError(
+                    "learn_edge_att=True is disabled in the streamlined training path; "
+                    "set shared_config['learn_edge_att'] to False."
+                )
+            edge_att = self.lift_node_att_to_edge_att(att, data.edge_index)
 
-            # Classification with W_FEAT / W_MESSAGE / W_READOUT injection points
-            if not self.learn_edge_att:
-                x_clf = data.x * att if self.w_feat else data.x
-                edge_atten_mp = edge_att if self.w_message else None
-                clf_emb = self.clf.get_emb(x_clf, data.edge_index, batch=data.batch,
-                                           edge_attr=data.edge_attr, edge_atten=edge_atten_mp)
-                if self.w_readout:
-                    clf_emb = clf_emb * att
-                clf_logits = self.clf.get_pred_from_emb(clf_emb, data.batch)
-            else:
-                clf_logits = self.clf(data.x, data.edge_index, data.batch,
-                                      edge_attr=data.edge_attr, edge_atten=edge_att)
+            clf_logits = forward_clf_with_node_attention_injection(
+                self.clf, data, att, edge_att, self.learn_edge_att,
+                self.w_feat, self.w_message, self.w_readout, edge_attr=data.edge_attr,
+            )
 
         elif self.motif_method == 'readout':
             # =================================================================
@@ -1286,39 +1367,32 @@ class GSAT(nn.Module):
                 raise ValueError("'readout' method requires nodes_to_motifs attribute in data")
             motif_emb, motif_batch, inverse_indices, motif_ids = motif_pooling(emb, nodes_to_motifs, data.batch, reduce=self.motif_pooling_method)
             
-            motif_att_log_logits = self.extractor(motif_emb, None, motif_batch) # Assuming node level scores to motif level scores
+            motif_att_log_logits = self.extractor(motif_emb, None, motif_batch)
 
-            if self.motif_level_sampling:
-                # Sample at motif level, then broadcast to nodes
-                motif_att = self.sampling(motif_att_log_logits, epoch, training)
-                node_att = lift_motif_att_to_node_att(motif_att, inverse_indices)
-                att = motif_att if self.motif_level_info_loss else node_att
-                if self.use_raw_score_loss:
-                    raw_motif = motif_att_log_logits.sigmoid()
-                    raw_att_for_loss = raw_motif if self.motif_level_info_loss else \
-                        lift_motif_att_to_node_att(raw_motif, inverse_indices)
-            else:
-                # Lift motif logits to node level, then follow base GSAT node-level sampling
-                node_att_log_logits = lift_motif_att_to_node_att(motif_att_log_logits, inverse_indices)
-                node_att = self.sampling(node_att_log_logits, epoch, training)
-                att = node_att
-                if self.use_raw_score_loss:
-                    raw_att_for_loss = node_att_log_logits.sigmoid()
+            node_att, att, raw_att_for_loss = sample_motif_readout_branch(
+                self.sampling,
+                motif_att_log_logits,
+                inverse_indices,
+                self.motif_level_sampling,
+                self.motif_level_info_loss,
+                epoch,
+                training,
+                self.use_raw_score_loss,
+            )
 
             edge_att = self.lift_node_att_to_edge_att(node_att, data.edge_index)
 
-            # Classification with W_FEAT / W_MESSAGE / W_READOUT injection points
-            if not self.learn_edge_att:
-                x_clf = data.x * node_att if self.w_feat else data.x
-                edge_atten_mp = edge_att if self.w_message else None
-                clf_emb = self.clf.get_emb(x_clf, data.edge_index, batch=data.batch,
-                                           edge_attr=data.edge_attr, edge_atten=edge_atten_mp)
-                if self.w_readout:
-                    clf_emb = clf_emb * node_att
-                clf_logits = self.clf.get_pred_from_emb(clf_emb, data.batch)
-            else:
-                clf_logits = self.clf(data.x, data.edge_index, data.batch,
-                                      edge_attr=data.edge_attr, edge_atten=edge_att)
+            if self.learn_edge_att:
+                # clf_logits = self.clf(data.x, data.edge_index, data.batch,
+                #                       edge_attr=data.edge_attr, edge_atten=edge_att)
+                raise ValueError(
+                    "learn_edge_att=True is disabled in the streamlined training path; "
+                    "set shared_config['learn_edge_att'] to False."
+                )
+            clf_logits = forward_clf_with_node_attention_injection(
+                self.clf, data, node_att, edge_att, self.learn_edge_att,
+                self.w_feat, self.w_message, self.w_readout, edge_attr=data.edge_attr,
+            )
             
         # # GRAPH METHOD (commented out for simplification)
         # elif self.motif_method == 'graph':
@@ -1355,6 +1429,252 @@ class GSAT(nn.Module):
                                         aux_clf_logits=aux_clf_logits, motif_batch=motif_batch,
                                         motif_ids=motif_ids, raw_att_for_loss=raw_att_for_loss)
         return edge_att, loss, loss_dict, clf_logits
+
+    @torch.no_grad()
+    def _embedding_snapshot_batch(self, data, epoch):
+        """
+        Return (emb, node_att, motif_emb, motif_imp, batch, motif_batch, motif_global_ids) on CPU for wandb PCA viz.
+        motif_global_ids: [M] vocabulary index per pooled motif row (same order as motif_emb).
+        motif_* / motif_global_ids are None when nodes_to_motifs is absent.
+        """
+        if self.no_attention:
+            return None
+
+        if self.motif_method in [None, 'loss']:
+            emb = self.clf.get_emb(data.x, data.edge_index, batch=data.batch, edge_attr=data.edge_attr)
+            att_log_logits = self.extractor(emb, data.edge_index, data.batch)
+            node_att, _ = sample_node_level_gsat(
+                self.sampling, att_log_logits, epoch, False, self.use_raw_score_loss,
+            )
+            nodes_to_motifs = getattr(data, 'nodes_to_motifs', None)
+            if nodes_to_motifs is None:
+                return emb.detach().cpu(), node_att.detach().cpu(), None, None, data.batch.detach().cpu(), None, None
+            motif_emb, motif_batch_vec, inverse_indices, motif_global_ids = motif_pooling(
+                emb, nodes_to_motifs, data.batch, reduce=self.motif_pooling_method,
+            )
+            na = node_att.squeeze(-1)
+            motif_imp = scatter(na, inverse_indices, dim=0, reduce='mean', dim_size=motif_emb.size(0))
+            return (
+                emb.detach().cpu(),
+                node_att.detach().cpu(),
+                motif_emb.detach().cpu(),
+                motif_imp.detach().cpu(),
+                data.batch.detach().cpu(),
+                motif_batch_vec.detach().cpu(),
+                motif_global_ids.detach().cpu(),
+            )
+
+        if self.motif_method == 'readout':
+            emb = self.clf.get_emb(data.x, data.edge_index, batch=data.batch, edge_attr=data.edge_attr)
+            nodes_to_motifs = getattr(data, 'nodes_to_motifs', None)
+            if nodes_to_motifs is None:
+                return None
+            motif_emb, motif_batch_vec, inverse_indices, motif_global_ids = motif_pooling(
+                emb, nodes_to_motifs, data.batch, reduce=self.motif_pooling_method,
+            )
+            motif_att_log_logits = self.extractor(motif_emb, None, motif_batch_vec)
+            node_att, _, _ = sample_motif_readout_branch(
+                self.sampling,
+                motif_att_log_logits,
+                inverse_indices,
+                self.motif_level_sampling,
+                self.motif_level_info_loss,
+                epoch,
+                False,
+                self.use_raw_score_loss,
+            )
+            na = node_att.squeeze(-1)
+            motif_imp = scatter(na, inverse_indices, dim=0, reduce='mean', dim_size=motif_emb.size(0))
+            return (
+                emb.detach().cpu(),
+                node_att.detach().cpu(),
+                motif_emb.detach().cpu(),
+                motif_imp.detach().cpu(),
+                data.batch.detach().cpu(),
+                motif_batch_vec.detach().cpu(),
+                motif_global_ids.detach().cpu(),
+            )
+
+        return None
+
+    @staticmethod
+    def _graph_labels_to_bin01(y_graph):
+        """[num_graphs] or [num_graphs,1] -> long {0,1}."""
+        y = y_graph.view(-1)
+        if y.dtype.is_floating_point:
+            return (y >= 0.5).long()
+        return y.long()
+
+    def _subsample_xy(self, X, imp, rng):
+        n = X.shape[0]
+        m = self.embedding_viz_max_points
+        if n <= m:
+            return X, imp
+        idx = rng.choice(n, size=m, replace=False)
+        return X[idx], imp[idx]
+
+    def _subsample_xy_motif(self, X, imp, motif_ids, rng):
+        n = X.shape[0]
+        m = self.embedding_viz_max_points
+        if n <= m:
+            return X, imp, motif_ids
+        idx = rng.choice(n, size=m, replace=False)
+        return X[idx], imp[idx], motif_ids[idx]
+
+    def _motif_vocab_label(self, mid):
+        mid = int(mid)
+        if self.motif_list is None or mid < 0 or mid >= len(self.motif_list):
+            return f'motif_id_{mid}'
+        return str(self.motif_list[mid])
+
+    def _pca_scatter_panel(self, ax, X, imp, title):
+        if X.shape[0] < 2:
+            ax.set_title(f'{title} (n<2)')
+            ax.axis('off')
+            return
+        pca = PCA(n_components=2, random_state=0)
+        xy = pca.fit_transform(X)
+        imp = np.asarray(imp).reshape(-1)
+        imp = np.clip(imp, 0.0, 1.0)
+        sc = ax.scatter(xy[:, 0], xy[:, 1], c=imp, cmap='viridis', s=6, alpha=0.65, vmin=0.0, vmax=1.0)
+        ax.set_title(title + f' (n={X.shape[0]})')
+        ax.set_xlabel('PC1')
+        ax.set_ylabel('PC2')
+        plt.colorbar(sc, ax=ax, fraction=0.046, pad=0.04, label='importance')
+
+    def _pca_scatter_motif_panel(self, ax, X, imp, motif_ids_np, title):
+        """PCA scatter for motif embeddings; annotate points with motif names (capped); full labels in wandb Table."""
+        if X.shape[0] < 2:
+            ax.set_title(f'{title} (n<2)')
+            ax.axis('off')
+            return None
+        pca = PCA(n_components=2, random_state=0)
+        xy = pca.fit_transform(X)
+        imp = np.clip(np.asarray(imp).reshape(-1), 0.0, 1.0)
+        mids = np.asarray(motif_ids_np).reshape(-1).astype(np.int64)
+        sc = ax.scatter(xy[:, 0], xy[:, 1], c=imp, cmap='viridis', s=10, alpha=0.65, vmin=0.0, vmax=1.0)
+        n_ann = min(len(xy), self.embedding_viz_max_motif_annotations)
+        fs = max(2.5, min(7.0, 520.0 / max(n_ann, 1)))
+        for i in range(n_ann):
+            label = self._motif_vocab_label(mids[i])
+            if len(label) > 22:
+                label = label[:19] + '…'
+            ax.annotate(
+                label,
+                (xy[i, 0], xy[i, 1]),
+                fontsize=fs,
+                alpha=0.75,
+                ha='center',
+                va='center',
+            )
+        if len(xy) > n_ann:
+            ax.set_title(title + f' (n={len(xy)}, labeled {n_ann})')
+        else:
+            ax.set_title(title + f' (n={len(xy)})')
+        ax.set_xlabel('PC1')
+        ax.set_ylabel('PC2')
+        plt.colorbar(sc, ax=ax, fraction=0.046, pad=0.04, label='importance')
+        table_rows = []
+        for i in range(len(xy)):
+            table_rows.append([
+                float(xy[i, 0]),
+                float(xy[i, 1]),
+                float(imp[i]),
+                self._motif_vocab_label(mids[i]),
+                int(mids[i]),
+            ])
+        return table_rows
+
+    @torch.no_grad()
+    def log_valid_embedding_viz_wandb(self, valid_loader, epoch, use_edge_attr):
+        if self.embedding_viz_every <= 0:
+            return
+        if self.task_type != 'classification' or self.multi_label or self.num_class != 2:
+            return
+
+        buckets = {
+            0: {'node_emb': [], 'node_imp': [], 'motif_emb': [], 'motif_imp': [], 'motif_gid': []},
+            1: {'node_emb': [], 'node_imp': [], 'motif_emb': [], 'motif_imp': [], 'motif_gid': []},
+        }
+
+        self.clf.eval()
+        self.extractor.eval()
+        n_batches = 0
+        for data in valid_loader:
+            if n_batches >= self.embedding_viz_max_batches:
+                break
+            n_batches += 1
+            data = process_data(data, use_edge_attr).to(self.device)
+            snap = self._embedding_snapshot_batch(data, epoch)
+            if snap is None:
+                continue
+            emb, node_att, motif_emb, motif_imp, batch, motif_batch_vec, motif_global_ids = snap
+            y_graph_cpu = self._graph_labels_to_bin01(data.y.cpu())
+            if y_graph_cpu.numel() != data.num_graphs:
+                continue
+            node_y = y_graph_cpu[batch.long()]
+            na = node_att.view(-1).numpy()
+            ne = emb.numpy()
+            for cls in (0, 1):
+                sel = (node_y == cls).numpy()
+                if sel.any():
+                    buckets[cls]['node_emb'].append(ne[sel])
+                    buckets[cls]['node_imp'].append(na[sel])
+            if motif_emb is not None and motif_batch_vec is not None and motif_global_ids is not None:
+                mb = motif_batch_vec.long()
+                motif_y = y_graph_cpu[mb]
+                me = motif_emb.numpy()
+                mi = motif_imp.numpy()
+                mg = motif_global_ids.numpy()
+                for cls in (0, 1):
+                    sel = (motif_y == cls).numpy()
+                    if sel.any():
+                        buckets[cls]['motif_emb'].append(me[sel])
+                        buckets[cls]['motif_imp'].append(mi[sel])
+                        buckets[cls]['motif_gid'].append(mg[sel])
+
+        rng = np.random.RandomState((self.random_state or 0) * 100000 + int(epoch))
+
+        for cls in (0, 1):
+            parts = buckets[cls]
+            if not parts['node_emb']:
+                continue
+            Xn = np.concatenate(parts['node_emb'], axis=0)
+            In = np.concatenate(parts['node_imp'], axis=0)
+            Xn, In = self._subsample_xy(Xn, In, rng)
+
+            Xm, Im, Gm = None, None, None
+            if parts['motif_emb']:
+                Xm = np.concatenate(parts['motif_emb'], axis=0)
+                Im = np.concatenate(parts['motif_imp'], axis=0)
+                Gm = np.concatenate(parts['motif_gid'], axis=0)
+                Xm, Im, Gm = self._subsample_xy_motif(Xm, Im, Gm, rng)
+
+            fig, axes = plt.subplots(1, 2 if Xm is not None else 1, figsize=(12 if Xm is not None else 6, 5))
+            if Xm is None:
+                axes = [axes]
+            self._pca_scatter_panel(axes[0], Xn, In, f'Nodes (y={cls})')
+            motif_table_rows = None
+            if Xm is not None:
+                motif_table_rows = self._pca_scatter_motif_panel(
+                    axes[1], Xm, Im, Gm, f'Motifs (y={cls})',
+                )
+            fig.suptitle(f'Valid PCA embeddings (epoch {epoch})')
+            fig.tight_layout()
+            buf = io.BytesIO()
+            fig.savefig(buf, format='png', dpi=120, bbox_inches='tight')
+            buf.seek(0)
+            plt.close(fig)
+            try:
+                wandb.log({f'valid/embedding_viz_y{cls}': wandb.Image(buf)}, step=epoch)
+                if motif_table_rows:
+                    tbl = wandb.Table(
+                        columns=['pc1', 'pc2', 'importance', 'motif_name', 'motif_id'],
+                        data=motif_table_rows,
+                    )
+                    wandb.log({f'valid/motif_emb_table_y{cls}': tbl}, step=epoch)
+            except Exception:
+                pass
 
     @torch.no_grad()
     def eval_one_batch(self, data, epoch):
@@ -1419,6 +1739,11 @@ class GSAT(nn.Module):
         for epoch in range(self.epochs):
             train_res = self.run_one_epoch(loaders['train'], epoch, 'train', use_edge_attr)
             valid_res = self.run_one_epoch(loaders['valid'], epoch, 'valid', use_edge_attr)
+            if self.embedding_viz_every > 0 and epoch % self.embedding_viz_every == 0:
+                try:
+                    self.log_valid_embedding_viz_wandb(loaders['valid'], epoch, use_edge_attr)
+                except Exception as e:
+                    print(f'[WARNING] log_valid_embedding_viz_wandb failed: {e}')
             test_res = self.run_one_epoch(loaders['test'], epoch, 'test', use_edge_attr)
             self.writer.add_scalar('gsat_train/lr', get_lr(self.optimizer), epoch)
 
@@ -2502,6 +2827,7 @@ def train_vanilla_gnn_one_seed(local_config, data_dir, log_dir, model_name, data
     set_seed(random_state)
 
     model_config = local_config['model_config']
+    model_config['use_edge_attr'] = False
     data_config = local_config['data_config']
     method_config = local_config['GSAT_config']
 
@@ -2751,6 +3077,7 @@ def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_nam
     set_seed(random_state)
 
     model_config = local_config['model_config']
+    model_config['use_edge_attr'] = False
     data_config = local_config['data_config']
     method_config = local_config[f'{method_name}_config']
     shared_config = local_config['shared_config']
@@ -2835,7 +3162,7 @@ def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_nam
     with open(os.path.join(gsat.seed_dir, "model_config.yaml"), "w") as f:
         yaml.safe_dump(model_config_save, f, sort_keys=False)
 
-    metric_dict = gsat.train(loaders, test_set, metric_dict, model_config.get('use_edge_attr', True))
+    metric_dict = gsat.train(loaders, test_set, metric_dict, model_config.get('use_edge_attr', False))
     scalar_metric_dict = {k: v for k, v in metric_dict.items() if isinstance(v, (int, float))}
     writer.add_hparams(hparam_dict=hparam_dict, metric_dict=scalar_metric_dict)
     
@@ -2907,6 +3234,9 @@ def main():
                              'max=use max(score_r, decaying_global_r), None=fixed from epoch 0')
     parser.add_argument('--run_test_graphs', type=int, default=0,
                         help='Run N graphs through the pipeline and save detailed outputs to file (0 = disabled)')
+    parser.add_argument('--embedding_viz_every', type=int, default=None,
+                        help='If set, log valid-set PCA embedding scatters (nodes + motifs) to wandb every N epochs; '
+                             'binary non-multilabel classification only. Overrides shared_config value.')
     parser.add_argument('--config', type=str, default=None,
                    help='Path to tuning config file')
     parser.add_argument('--cuda', type=int, help='cuda device id, -1 for cpu')
@@ -2998,6 +3328,9 @@ def main():
         local_config['shared_config']['learn_edge_att'] = True
     if args.no_learn_edge_att:
         local_config['shared_config']['learn_edge_att'] = False
+
+    if args.embedding_viz_every is not None:
+        local_config['shared_config']['embedding_viz_every'] = int(args.embedding_viz_every)
 
     print(f'[INFO] Motif incorporation method: {local_config["GSAT_config"].get("motif_incorporation_method", None)}')
     print(f'[INFO] Learn edge attention: {local_config["shared_config"].get("learn_edge_att", False)}')

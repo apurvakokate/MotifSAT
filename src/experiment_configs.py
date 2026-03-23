@@ -207,11 +207,12 @@ def get_base_config(model_name, dataset_name, gsat_overrides=None):
     hp = PAPER_HYPERPARAMS.get(dataset_name, {}).get(model_name, {'r': 0.7, 'epochs': 100, 'lr': 1e-3, 'batch_size': 128})
 
     use_atom_encoder = 'ogbg' in dataset_name
-    use_edge_attr = (
-        'ogbg' in dataset_name
-        or 'spmotif' in dataset_name
-        # or dataset_name in MOL_DATASETS_WITH_FOLDS
-    )
+    # Streamlined GSAT runs: backbones do not consume edge attributes (matches current testing scope).
+    # use_edge_attr = (
+    #     'ogbg' in dataset_name
+    #     or 'spmotif' in dataset_name
+    # )
+    use_edge_attr = False
 
     data_config = {
         'splits': {'train': 0.8, 'valid': 0.1, 'test': 0.1},
@@ -229,10 +230,16 @@ def get_base_config(model_name, dataset_name, gsat_overrides=None):
     }
 
     shared_config = {
-        'learn_edge_att': True,
+        # Node-level attention only for current motif / injection experiments (edge-level path disabled in run_gsat.forward_pass).
+        'learn_edge_att': False,
         'precision_k': 5,
         'num_viz_samples': 0,
         'viz_interval': 10,
+        # PCA embedding scatter on valid set (wandb); 0 = disabled
+        'embedding_viz_every': 0,
+        'embedding_viz_max_points': 8000,
+        'embedding_viz_max_batches': 40,
+        'embedding_viz_max_motif_annotations': 500,
         'viz_norm_att': True,
         'extractor_dropout_p': 0.6 if dataset_name == 'ogbg_molbace' else 0.5,
     }
