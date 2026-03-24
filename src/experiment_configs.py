@@ -241,6 +241,7 @@ def get_base_config(model_name, dataset_name, gsat_overrides=None):
         'embedding_viz_max_batches': 12,
         'embedding_viz_max_motif_annotations': 200,
         'embedding_viz_skip_epoch0': True,
+        'embedding_viz_dpi': 300,
         'viz_norm_att': True,
         'extractor_dropout_p': 0.6 if dataset_name == 'ogbg_molbace' else 0.5,
     }

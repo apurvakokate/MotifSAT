@@ -962,6 +962,7 @@ class GSAT(nn.Module):
         self.embedding_viz_max_batches = int(shared_config.get('embedding_viz_max_batches', 12))
         self.embedding_viz_max_motif_annotations = int(shared_config.get('embedding_viz_max_motif_annotations', 200))
         self.embedding_viz_skip_epoch0 = bool(shared_config.get('embedding_viz_skip_epoch0', True))
+        self.embedding_viz_dpi = int(shared_config.get('embedding_viz_dpi', 300))
 
         self.epochs = method_config['epochs']
         self.pred_loss_coef = method_config['pred_loss_coef']
@@ -1556,50 +1557,51 @@ class GSAT(nn.Module):
 
     def _pca_scatter_panel(self, ax, X, imp, title):
         if X.shape[0] < 2:
-            ax.set_title(f'{title} (n<2)')
+            ax.set_title(f'{title} (n<2)', fontsize=12)
             ax.axis('off')
             return
         pca = PCA(n_components=2, random_state=0)
         xy = pca.fit_transform(X)
         imp = np.asarray(imp).reshape(-1)
         imp = np.clip(imp, 0.0, 1.0)
-        sc = ax.scatter(xy[:, 0], xy[:, 1], c=imp, cmap='viridis', s=6, alpha=0.65, vmin=0.0, vmax=1.0)
-        ax.set_title(title + f' (n={X.shape[0]})')
-        ax.set_xlabel('PC1')
-        ax.set_ylabel('PC2')
+        sc = ax.scatter(xy[:, 0], xy[:, 1], c=imp, cmap='viridis', s=12, alpha=0.65, vmin=0.0, vmax=1.0)
+        ax.set_title(title + f' (n={X.shape[0]})', fontsize=12)
+        ax.set_xlabel('PC1', fontsize=11)
+        ax.set_ylabel('PC2', fontsize=11)
         plt.colorbar(sc, ax=ax, fraction=0.046, pad=0.04, label='importance')
 
     def _pca_scatter_motif_panel(self, ax, X, imp, motif_ids_np, title):
         """PCA scatter for motif embeddings; annotate points with motif names (capped); full labels in wandb Table."""
         if X.shape[0] < 2:
-            ax.set_title(f'{title} (n<2)')
+            ax.set_title(f'{title} (n<2)', fontsize=12)
             ax.axis('off')
             return None
         pca = PCA(n_components=2, random_state=0)
         xy = pca.fit_transform(X)
         imp = np.clip(np.asarray(imp).reshape(-1), 0.0, 1.0)
         mids = np.asarray(motif_ids_np).reshape(-1).astype(np.int64)
-        sc = ax.scatter(xy[:, 0], xy[:, 1], c=imp, cmap='viridis', s=10, alpha=0.65, vmin=0.0, vmax=1.0)
+        sc = ax.scatter(xy[:, 0], xy[:, 1], c=imp, cmap='viridis', s=18, alpha=0.65, vmin=0.0, vmax=1.0)
         n_ann = min(len(xy), self.embedding_viz_max_motif_annotations)
-        fs = max(2.5, min(7.0, 520.0 / max(n_ann, 1)))
+        # Readable when exported at embedding_viz_dpi (avoid 2.5–7pt caps that look fine on screen but blur when downloaded).
+        fs = max(8.0, min(16.0, 2200.0 / max(n_ann, 1)))
         for i in range(n_ann):
             label = self._motif_vocab_label(mids[i])
-            if len(label) > 22:
-                label = label[:19] + '…'
+            if len(label) > 36:
+                label = label[:33] + '…'
             ax.annotate(
                 label,
                 (xy[i, 0], xy[i, 1]),
                 fontsize=fs,
-                alpha=0.75,
+                alpha=0.85,
                 ha='center',
                 va='center',
             )
         if len(xy) > n_ann:
-            ax.set_title(title + f' (n={len(xy)}, labeled {n_ann})')
+            ax.set_title(title + f' (n={len(xy)}, labeled {n_ann})', fontsize=12)
         else:
-            ax.set_title(title + f' (n={len(xy)})')
-        ax.set_xlabel('PC1')
-        ax.set_ylabel('PC2')
+            ax.set_title(title + f' (n={len(xy)})', fontsize=12)
+        ax.set_xlabel('PC1', fontsize=11)
+        ax.set_ylabel('PC2', fontsize=11)
         plt.colorbar(sc, ax=ax, fraction=0.046, pad=0.04, label='importance')
         table_rows = []
         for i in range(len(xy)):
@@ -1693,19 +1695,27 @@ class GSAT(nn.Module):
                 Gm = np.concatenate(parts['motif_gid'], axis=0)
                 Xm, Im, Gm = self._subsample_xy_motif(Xm, Im, Gm, rng)
 
-            fig, axes = plt.subplots(1, 2 if Xm is not None else 1, figsize=(12 if Xm is not None else 6, 5))
-            if Xm is None:
+            dual = Xm is not None
+            fig_w, fig_h = (24, 9) if dual else (12, 9)
+            fig, axes = plt.subplots(1, 2 if dual else 1, figsize=(fig_w, fig_h))
+            if not dual:
                 axes = [axes]
             self._pca_scatter_panel(axes[0], Xn, In, f'Nodes (y={cls})')
             motif_table_rows = None
-            if Xm is not None:
+            if dual:
                 motif_table_rows = self._pca_scatter_motif_panel(
                     axes[1], Xm, Im, Gm, f'Motifs (y={cls})',
                 )
-            fig.suptitle(f'Valid PCA embeddings (epoch {epoch})')
+            fig.suptitle(f'Valid PCA embeddings (epoch {epoch})', fontsize=14, y=1.02)
             fig.tight_layout()
             buf = io.BytesIO()
-            fig.savefig(buf, format='png', dpi=120, bbox_inches='tight')
+            fig.savefig(
+                buf,
+                format='png',
+                dpi=self.embedding_viz_dpi,
+                bbox_inches='tight',
+                pad_inches=0.25,
+            )
             plt.close(fig)
             # Materialize PNG bytes before wandb.Image — lazy uploads can read after the BytesIO is gone.
             png_bytes = buf.getvalue()
