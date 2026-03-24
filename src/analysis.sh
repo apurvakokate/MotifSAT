@@ -1,88 +1,85 @@
 #!/bin/bash
+# Post-hoc analysis for Mutagenicity runs under RESULTS_DIR.
+#
+# Streamlined experiments (run_mutagenicity_gsat_experiment.py) use experiment_* names below.
+# Legacy sweeps still live under the old experiment_* names; add them to EXPERIMENTS if needed.
+#
+# Requirements per GSAT seed_dir (molecular loader with datasets + masked_data):
+#   - node_scores.jsonl, Motif_level_node_and_edge_masking_impact.jsonl (last-epoch export in run_gsat.train)
+# vanilla_gnn uses train_vanilla_gnn_one_seed: empty node_scores.jsonl → consistency step is skipped.
 
-export RESULTS_DIR=${RESULTS_DIR:-~/hpc-share/ChemIntuit/MotifSAT/tuning_results}
-OUTPUT_BASE=../motif_consistency_results
+set -euo pipefail
+
+export RESULTS_DIR="${RESULTS_DIR:-$HOME/hpc-share/ChemIntuit/MotifSAT/tuning_results}"
+OUTPUT_BASE="${OUTPUT_BASE:-../motif_consistency_results}"
+DATASET="${DATASET:-Mutagenicity}"
 
 EXPERIMENTS=(
-  base_gsat_decay_r_explainer
-  motif_readout_decay_r_mean_explainer
-  motif_readout_decay_r_mean_sampling_explainer
-  base_gsat_decay_r_explainer_motif_info
-  motif_readout_decay_r_mean_explainer_motif_info
-  motif_readout_decay_r_mean_sampling_explainer_motif_info
-  base_gsat_decay_r_explainer_warmup
-  motif_readout_decay_r_mean_explainer_warmup
-  motif_readout_decay_r_mean_sampling_explainer_warmup
-  motif_injection_node
-  motif_injection_node_readout
-  motif_injection_readout_only
-  motif_injection_edge_readout
-  motif_readout_sampling_info_coef_sweep
-  motif_readout_sampling_extractor_sweep
-  motif_readout_sampling_rich_pool
+  vanilla_gnn
+  base_gsat_fix_r
+  base_gsat_decay_r
+  base_gsat_decay_r_injection
+  base_gsat_motif_loss
+  motif_readout_decay_w_message
+  motif_readout_decay_injection_ablation
 )
-MODELS=(GCN SAGE)
-FINAL_RS=(0.8 0.7)
+
+MODELS=(GIN PNA GAT SAGE GCN)
 
 echo "RESULTS_DIR=${RESULTS_DIR}"
+echo "OUTPUT_BASE=${OUTPUT_BASE}"
 echo ""
 
-# ─── 1. Score-vs-Impact plots + Full consistency analysis ───
+# ─── 1. Score-vs-Impact + consistency (every fold0_seed0 under each experiment) ───
 for EXP in "${EXPERIMENTS[@]}"; do
   for MODEL in "${MODELS[@]}"; do
-    for R in "${FINAL_RS[@]}"; do
-      # Find the seed_dir — intermediate dirs vary by experiment config
-      SEED_DIR=""
-      for d in ${RESULTS_DIR}/Mutagenicity/model_${MODEL}/experiment_${EXP}/*/method_*/pred*/init0.9_final${R}_decay0.1/fold0_seed0; do
-        if [ -d "$d" ]; then
-          SEED_DIR="$d"
-          break
-        fi
-      done
+    EXP_ROOT="${RESULTS_DIR}/${DATASET}/model_${MODEL}/experiment_${EXP}"
+    if [[ ! -d "$EXP_ROOT" ]]; then
+      echo "[SKIP] No directory: ${EXP_ROOT}"
+      continue
+    fi
 
-      if [ -z "$SEED_DIR" ]; then
-        echo "[SKIP] No seed_dir found for ${EXP} ${MODEL} r=${R}"
-        echo "       looked in: ${RESULTS_DIR}/Mutagenicity/model_${MODEL}/experiment_${EXP}/.../init0.9_final${R}_decay0.1/fold0_seed0"
-        echo ""
-        continue
-      fi
+    while IFS= read -r SEED_DIR; do
+      [[ -d "$SEED_DIR" ]] || continue
 
-      OUT="${OUTPUT_BASE}/${EXP}/${MODEL}_r${R}"
+      # Unique output folder from path tail (tuning_*, method_*, pred*, init*)
+      REL="${SEED_DIR#"${RESULTS_DIR}/${DATASET}/model_${MODEL}/"}"
+      SAFE_REL=$(echo "$REL" | tr '/' '_')
+
+      OUT="${OUTPUT_BASE}/${EXP}/${MODEL}/${SAFE_REL}"
       echo "============================================================"
-      echo "  ${EXP}  model=${MODEL}  final_r=${R}"
+      echo "  ${EXP}  model=${MODEL}"
       echo "  seed_dir: ${SEED_DIR}"
       echo "============================================================"
 
-      # Score-vs-Impact plot (standalone, reads impact JSONLs)
       python analyze_motif_consistency.py \
         --score_vs_impact "${SEED_DIR}" \
-        --dataset Mutagenicity --model "${MODEL}" --split test \
-        --output_dir "${OUT}" || echo "[ERROR] score_vs_impact failed for ${EXP} ${MODEL} r=${R}"
+        --dataset "${DATASET}" --model "${MODEL}" --split test \
+        --output_dir "${OUT}" || echo "[ERROR] score_vs_impact failed for ${SEED_DIR}"
 
-      # Full consistency analysis (reads node_scores.jsonl)
-      if [ -f "${SEED_DIR}/node_scores.jsonl" ]; then
+      if [[ -f "${SEED_DIR}/node_scores.jsonl" ]] && [[ -s "${SEED_DIR}/node_scores.jsonl" ]]; then
         python analyze_motif_consistency.py \
           --from_jsonl "${SEED_DIR}/node_scores.jsonl" \
-          --dataset Mutagenicity --model "${MODEL}" --split test --fold 0 \
-          --output_dir "${OUT}" || echo "[ERROR] consistency analysis failed for ${EXP} ${MODEL} r=${R}"
+          --dataset "${DATASET}" --model "${MODEL}" --split test --fold 0 \
+          --output_dir "${OUT}" || echo "[ERROR] consistency analysis failed for ${SEED_DIR}"
       else
-        echo "[SKIP] No node_scores.jsonl in ${SEED_DIR}"
+        echo "[SKIP] Missing or empty node_scores.jsonl in ${SEED_DIR}"
       fi
 
       echo ""
-    done
+    done < <(find "${EXP_ROOT}" -type d \( -name 'fold0_seed0' -o -name 'fold1_seed0' \) 2>/dev/null | sort)
   done
 done
 
-# ─── 2. Collect summary tables (one per experiment) ───
+# ─── 2. Collect summary tables (one invocation per experiment name) ───
 for EXP in "${EXPERIMENTS[@]}"; do
   echo "============================================================"
   echo "  Collecting tables for ${EXP}"
   echo "============================================================"
   python collect_mutagenicity_tables.py \
     --experiment_name "${EXP}" \
-    --dataset Mutagenicity || echo "[ERROR] collect tables failed for ${EXP}"
+    --dataset "${DATASET}" || echo "[ERROR] collect tables failed for ${EXP}"
   echo ""
 done
 
-echo "Done. Results in ${OUTPUT_BASE}/"
+echo "Done. Results under ${OUTPUT_BASE}/"

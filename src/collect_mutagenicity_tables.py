@@ -191,6 +191,43 @@ EXPERIMENT_ROW_CONFIG = {
         'row_label_prefix': 'final_r',
         'path_extract': 'final_r',
     },
+
+    # Current run_mutagenicity_gsat_experiment.py EXPERIMENT_GROUPS (streamlined)
+    'vanilla_gnn': {
+        'summary_path': None,
+        'row_label_prefix': 'variant',
+        'path_extract': 'vanilla',
+    },
+    'base_gsat_fix_r': {
+        'summary_path': ('weight_distribution_params', 'fix_r'),
+        'row_label_prefix': 'fix_r',
+        'path_extract': 'fix_r',
+    },
+    'base_gsat_decay_r': {
+        'summary_path': ('weight_distribution_params', 'final_r'),
+        'row_label_prefix': 'final_r',
+        'path_extract': 'final_r',
+    },
+    'base_gsat_decay_r_injection': {
+        'summary_path': None,
+        'row_label_prefix': 'inj',
+        'path_extract': 'injection_code',
+    },
+    'base_gsat_motif_loss': {
+        'summary_path': ('weight_distribution_params', 'final_r'),
+        'row_label_prefix': 'final_r',
+        'path_extract': 'final_r',
+    },
+    'motif_readout_decay_w_message': {
+        'summary_path': None,
+        'row_label_prefix': 'sampling',
+        'path_extract': 'readout_sampling_mode',
+    },
+    'motif_readout_decay_injection_ablation': {
+        'summary_path': None,
+        'row_label_prefix': 'inj',
+        'path_extract': 'injection_code',
+    },
 }
 
 
@@ -281,6 +318,21 @@ def _extract_value_from_parts(parts, mode):
 
     elif mode == 'vanilla':
         return 'no_attention'
+
+    elif mode == 'injection_code':
+        for p in parts:
+            m = re.search(r'inj([0-9]{3})', p)
+            if m:
+                return m.group(1)
+        return None
+
+    elif mode == 'readout_sampling_mode':
+        for p in parts:
+            if 'node_samp' in p:
+                return 'node_samp'
+            if 'motif_samp' in p:
+                return 'motif_samp'
+        return None
 
     return None
 
