@@ -3075,12 +3075,16 @@ def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_nam
     if no_attention:
         info_coef = 0
         motif_coef = 0
+    # Must match GSAT.__init__: when motif_method is None, both motif and between are forced to 0.0
+    # (float). Using int 0 for between_coef here produced ...between0 while GSAT wrote ...between0.0,
+    # so check_artifacts_exist pointed at a non-existent directory and every rerun trained from scratch.
     if motif_method is None:
         motif_coef = 0.0
-    
+        between_coef = 0.0
+
     # Use environment variable if set (for HPC), otherwise use relative path
     results_base = os.environ.get('RESULTS_DIR', '../tuning_results')
-    
+
     seed_dir = os.path.join(
         results_base,
         str(dataset_name),
