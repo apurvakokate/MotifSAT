@@ -219,13 +219,13 @@ EXPERIMENT_GROUPS = {
 ALL_EXPERIMENT_NAMES = list(EXPERIMENT_GROUPS.keys())
 
 
-def run_one(model_name, fold, variant, experiment_name, seed, cuda_id, data_dir, dataset_name, embedding_viz_every=None):
+def run_one(model_name, fold, variant, experiment_name, seed, cuda_id, data_dir, dataset_name, embedding_viz_every=10):
     """Run a single experiment: one model, one fold, one variant, one seed."""
     config = get_base_config(model_name, dataset_name, gsat_overrides=variant['gsat_overrides'])
     config['model_config']['use_edge_attr'] = False
     config['shared_config']['learn_edge_att'] = variant['learn_edge_att']
-    if embedding_viz_every is not None:
-        config['shared_config']['embedding_viz_every'] = int(embedding_viz_every)
+    # W&B embedding PCA (run_gsat.log_valid_embedding_viz_wandb); 0 disables
+    config['shared_config']['embedding_viz_every'] = int(embedding_viz_every)
     if 'shared_overrides' in variant:
         config['shared_config'].update(variant['shared_overrides'])
     config['GSAT_config']['experiment_name'] = experiment_name
@@ -270,9 +270,9 @@ def main():
     parser.add_argument('--models', type=str, nargs='+', default=ARCHITECTURES, help='Models (backbones)')
     parser.add_argument('--seeds', type=int, nargs='+', default=[0], help='Random seeds')
     parser.add_argument('--cuda', type=int, default=0, help='CUDA device id (-1 for CPU)')
-    parser.add_argument('--embedding_viz_every', type=int, default=None,
-                        help='If set, log W&B PCA embedding panels + motif tables every N valid epochs '
-                             '(binary non-multilabel GSAT only; molecular motif names when motif_list exists).')
+    parser.add_argument('--embedding_viz_every', type=int, default=10,
+                        help='Log W&B PCA embedding panels + motif tables every N valid epochs (0=off). '
+                             'Binary non-multilabel GSAT only. Default: 10.')
     args = parser.parse_args()
     
     dataset_name = args.dataset
@@ -308,6 +308,7 @@ def main():
 
     print(f'\n[INFO] Dataset: {dataset_name}')
     print(f'[INFO] Folds: {folds}')
+    print(f'[INFO] embedding_viz_every={args.embedding_viz_every} (W&B PCA panels; use 0 to disable)')
 
     for exp_key in args.experiments:
         group = EXPERIMENT_GROUPS[exp_key]

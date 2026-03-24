@@ -1048,6 +1048,11 @@ class GSAT(nn.Module):
         if self.embedding_viz_every > 0:
             print(f'[INFO] W&B valid embedding PCA viz every {self.embedding_viz_every} epochs '
                   f'(binary non-multilabel only; max_batches={self.embedding_viz_max_batches})')
+            if self.task_type != 'classification' or self.multi_label or self.num_class != 2:
+                print(
+                    f'[WARNING] Embedding PCA viz will be skipped: need binary single-label classification '
+                    f'(got task={self.task_type}, multi_label={self.multi_label}, num_class={self.num_class}).'
+                )
         # if self.motif_r_values is not None:
         #     print(f'[INFO] Score-based per-motif r: loaded {len(self.motif_r_values)} values')
         
@@ -1673,8 +1678,8 @@ class GSAT(nn.Module):
                         data=motif_table_rows,
                     )
                     wandb.log({f'valid/motif_emb_table_y{cls}': tbl}, step=epoch)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f'[WARNING] wandb embedding viz log failed (epoch {epoch}, y={cls}): {e}')
 
     @torch.no_grad()
     def eval_one_batch(self, data, epoch):
