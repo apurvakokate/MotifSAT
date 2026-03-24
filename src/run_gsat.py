@@ -1706,25 +1706,27 @@ class GSAT(nn.Module):
             fig.tight_layout()
             buf = io.BytesIO()
             fig.savefig(buf, format='png', dpi=120, bbox_inches='tight')
-            buf.seek(0)
             plt.close(fig)
+            # Materialize PNG bytes before wandb.Image — lazy uploads can read after the BytesIO is gone.
+            png_bytes = buf.getvalue()
             try:
-                pil_img = Image.open(buf).convert('RGB')
-                wandb.log({f'valid/embedding_viz_y{cls}': wandb.Image(pil_img)}, step=epoch)
+                pil_img = Image.open(io.BytesIO(png_bytes)).convert('RGB')
+                log_payload = {f'valid/embedding_viz_y{cls}': wandb.Image(pil_img)}
                 if motif_table_rows:
-                    tbl = wandb.Table(
+                    log_payload[f'valid/motif_emb_table_y{cls}'] = wandb.Table(
                         columns=['pc1', 'pc2', 'importance', 'motif_name', 'motif_id'],
                         data=motif_table_rows,
                     )
-                    wandb.log({f'valid/motif_emb_table_y{cls}': tbl}, step=epoch)
+                # One log per step avoids W&B merging quirks when image + table share the same step.
+                wandb.log(log_payload, step=epoch)
             except Exception as e:
                 print(f'[WARNING] wandb embedding viz log failed (epoch {epoch}, y={cls}): {e}')
             else:
                 any_logged = True
         if any_logged:
             print(
-                f'[INFO] W&B embedding PCA logged at epoch {epoch}: Media → '
-                f'valid/embedding_viz_y0, valid/embedding_viz_y1 (and valid/motif_emb_table_y* when motifs exist).'
+                f'[INFO] W&B embedding PCA logged at epoch {epoch}: view plots under the run Media panel '
+                f'(keys valid/embedding_viz_y0, valid/embedding_viz_y1; tables may also appear under Tables/Artifacts).'
             )
         del buckets
         gc.collect()
