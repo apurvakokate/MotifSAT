@@ -24,6 +24,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from rdkit import Chem
 import wandb
+from PIL import Image
 
 from pretrain_clf import train_clf_one_seed
 from utils import Writer, Criterion, MLP, visualize_a_graph, save_checkpoint, load_checkpoint, get_preds, get_lr, set_seed, process_data
@@ -1671,7 +1672,8 @@ class GSAT(nn.Module):
             buf.seek(0)
             plt.close(fig)
             try:
-                wandb.log({f'valid/embedding_viz_y{cls}': wandb.Image(buf)}, step=epoch)
+                pil_img = Image.open(buf).convert('RGB')
+                wandb.log({f'valid/embedding_viz_y{cls}': wandb.Image(pil_img)}, step=epoch)
                 if motif_table_rows:
                     tbl = wandb.Table(
                         columns=['pc1', 'pc2', 'importance', 'motif_name', 'motif_id'],
