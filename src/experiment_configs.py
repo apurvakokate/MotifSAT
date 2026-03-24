@@ -237,9 +237,10 @@ def get_base_config(model_name, dataset_name, gsat_overrides=None):
         'viz_interval': 10,
         # PCA embedding scatter on valid set (wandb); 0 = disabled
         'embedding_viz_every': 0,
-        'embedding_viz_max_points': 8000,
-        'embedding_viz_max_batches': 40,
-        'embedding_viz_max_motif_annotations': 500,
+        'embedding_viz_max_points': 5000,
+        'embedding_viz_max_batches': 12,
+        'embedding_viz_max_motif_annotations': 200,
+        'embedding_viz_skip_epoch0': True,
         'viz_norm_att': True,
         'extractor_dropout_p': 0.6 if dataset_name == 'ogbg_molbace' else 0.5,
     }

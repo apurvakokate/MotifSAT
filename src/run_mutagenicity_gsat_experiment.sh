@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=gsat_motifsat_full
 #SBATCH --time=7-00:00:00
-#SBATCH --mem=64G
+#SBATCH --mem=128G
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=6
 #SBATCH --output=logs/%x_%j.out
@@ -9,7 +9,8 @@
 #
 # Full grid: all experiment groups × SUPPORTED_DATASETS × ARCHITECTURES × dataset-specific folds.
 # W&B: PCA node/motif embedding panels + per-motif wandb.Table (full motif_name) for distribution checks.
-# Override: EMBEDDING_VIZ_EVERY=0 to disable embedding logs, EMBEDDING_VIZ_EVERY=5 for denser plots.
+# Override: EMBEDDING_VIZ_EVERY=0 to disable embedding logs (helps if the job is OOM-killed).
+# Mem 128G: embedding PCA + large batches can spike RSS; use 0 or lower EMBEDDING_VIZ_EVERY if needed.
 
 set -euo pipefail
 

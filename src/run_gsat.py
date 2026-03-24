@@ -8,6 +8,7 @@ from datetime import datetime
 import os
 import json
 import io
+import gc
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -957,9 +958,10 @@ class GSAT(nn.Module):
         self.viz_interval = shared_config['viz_interval']
         self.viz_norm_att = shared_config['viz_norm_att']
         self.embedding_viz_every = int(shared_config.get('embedding_viz_every', 0))
-        self.embedding_viz_max_points = int(shared_config.get('embedding_viz_max_points', 8000))
-        self.embedding_viz_max_batches = int(shared_config.get('embedding_viz_max_batches', 40))
-        self.embedding_viz_max_motif_annotations = int(shared_config.get('embedding_viz_max_motif_annotations', 500))
+        self.embedding_viz_max_points = int(shared_config.get('embedding_viz_max_points', 5000))
+        self.embedding_viz_max_batches = int(shared_config.get('embedding_viz_max_batches', 12))
+        self.embedding_viz_max_motif_annotations = int(shared_config.get('embedding_viz_max_motif_annotations', 200))
+        self.embedding_viz_skip_epoch0 = bool(shared_config.get('embedding_viz_skip_epoch0', True))
 
         self.epochs = method_config['epochs']
         self.pred_loss_coef = method_config['pred_loss_coef']
@@ -1047,8 +1049,9 @@ class GSAT(nn.Module):
         if self.target_k is not None:
             print(f'[INFO] Graph-adaptive r: target_k={self.target_k} (r_g = {self.target_k} / M_g)')
         if self.embedding_viz_every > 0:
+            sk0 = 'skip epoch 0' if self.embedding_viz_skip_epoch0 else 'include epoch 0'
             print(f'[INFO] W&B valid embedding PCA viz every {self.embedding_viz_every} epochs '
-                  f'(binary non-multilabel only; max_batches={self.embedding_viz_max_batches})')
+                  f'(binary non-multilabel only; max_batches={self.embedding_viz_max_batches}; {sk0})')
             if self.task_type != 'classification' or self.multi_label or self.num_class != 2:
                 print(
                     f'[WARNING] Embedding PCA viz will be skipped: need binary single-label classification '
@@ -1606,6 +1609,8 @@ class GSAT(nn.Module):
         self.clf.eval()
         self.extractor.eval()
         n_batches = 0
+        # Stop early if we already have enough rows to subsample (limits peak RAM before np.concatenate).
+        max_accum = max(self.embedding_viz_max_points * 6, 20000)
         for data in valid_loader:
             if n_batches >= self.embedding_viz_max_batches:
                 break
@@ -1613,6 +1618,7 @@ class GSAT(nn.Module):
             data = process_data(data, use_edge_attr).to(self.device)
             snap = self._embedding_snapshot_batch(data, epoch)
             if snap is None:
+                del data
                 continue
             emb, node_att, motif_emb, motif_imp, batch, motif_batch_vec, motif_global_ids = snap
             y_graph_cpu = self._graph_labels_to_bin01(data.y.cpu())
@@ -1638,6 +1644,10 @@ class GSAT(nn.Module):
                         buckets[cls]['motif_emb'].append(me[sel])
                         buckets[cls]['motif_imp'].append(mi[sel])
                         buckets[cls]['motif_gid'].append(mg[sel])
+            del data
+            rows = sum(len(a) for c in (0, 1) for a in buckets[c]['node_emb'])
+            if rows >= max_accum:
+                break
 
         rng = np.random.RandomState((self.random_state or 0) * 100000 + int(epoch))
 
@@ -1682,6 +1692,10 @@ class GSAT(nn.Module):
                     wandb.log({f'valid/motif_emb_table_y{cls}': tbl}, step=epoch)
             except Exception as e:
                 print(f'[WARNING] wandb embedding viz log failed (epoch {epoch}, y={cls}): {e}')
+        del buckets
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     @torch.no_grad()
     def eval_one_batch(self, data, epoch):
@@ -1746,12 +1760,17 @@ class GSAT(nn.Module):
         for epoch in range(self.epochs):
             train_res = self.run_one_epoch(loaders['train'], epoch, 'train', use_edge_attr)
             valid_res = self.run_one_epoch(loaders['valid'], epoch, 'valid', use_edge_attr)
-            if self.embedding_viz_every > 0 and epoch % self.embedding_viz_every == 0:
+            test_res = self.run_one_epoch(loaders['test'], epoch, 'test', use_edge_attr)
+            do_embed_viz = (
+                self.embedding_viz_every > 0
+                and epoch % self.embedding_viz_every == 0
+                and (not self.embedding_viz_skip_epoch0 or epoch > 0)
+            )
+            if do_embed_viz:
                 try:
                     self.log_valid_embedding_viz_wandb(loaders['valid'], epoch, use_edge_attr)
                 except Exception as e:
                     print(f'[WARNING] log_valid_embedding_viz_wandb failed: {e}')
-            test_res = self.run_one_epoch(loaders['test'], epoch, 'test', use_edge_attr)
             self.writer.add_scalar('gsat_train/lr', get_lr(self.optimizer), epoch)
 
             assert len(train_res) == 5
