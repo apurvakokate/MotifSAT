@@ -1446,8 +1446,26 @@ class GSAT(nn.Module):
         motif_global_ids: [M] vocabulary index per pooled motif row (same order as motif_emb).
         motif_* / motif_global_ids are None when nodes_to_motifs is absent.
         """
+        # Vanilla GNN: no GSAT attention, but still log node (and motif) embeddings with flat importance for PCA coloring.
         if self.no_attention:
-            return None
+            emb = self.clf.get_emb(data.x, data.edge_index, batch=data.batch, edge_attr=data.edge_attr)
+            node_att = torch.ones(emb.size(0), 1, device=emb.device, dtype=emb.dtype)
+            nodes_to_motifs = getattr(data, 'nodes_to_motifs', None)
+            if nodes_to_motifs is None:
+                return emb.detach().cpu(), node_att.detach().cpu(), None, None, data.batch.detach().cpu(), None, None
+            motif_emb, motif_batch_vec, inverse_indices, motif_global_ids = motif_pooling(
+                emb, nodes_to_motifs, data.batch, reduce=self.motif_pooling_method,
+            )
+            motif_imp = torch.ones(motif_emb.size(0), 1, device=emb.device, dtype=emb.dtype)
+            return (
+                emb.detach().cpu(),
+                node_att.detach().cpu(),
+                motif_emb.detach().cpu(),
+                motif_imp.detach().cpu(),
+                data.batch.detach().cpu(),
+                motif_batch_vec.detach().cpu(),
+                motif_global_ids.detach().cpu(),
+            )
 
         if self.motif_method in [None, 'loss']:
             emb = self.clf.get_emb(data.x, data.edge_index, batch=data.batch, edge_attr=data.edge_attr)
@@ -1649,7 +1667,16 @@ class GSAT(nn.Module):
             if rows >= max_accum:
                 break
 
+        has_nodes = any(buckets[c]['node_emb'] for c in (0, 1))
+        if not has_nodes:
+            print(
+                f'[WARNING] W&B embedding viz at epoch {epoch}: no node embeddings collected '
+                f'(check valid batches: y vs num_graphs, or unsupported motif_method for snapshots).'
+            )
+            return
+
         rng = np.random.RandomState((self.random_state or 0) * 100000 + int(epoch))
+        any_logged = False
 
         for cls in (0, 1):
             parts = buckets[cls]
@@ -1692,6 +1719,13 @@ class GSAT(nn.Module):
                     wandb.log({f'valid/motif_emb_table_y{cls}': tbl}, step=epoch)
             except Exception as e:
                 print(f'[WARNING] wandb embedding viz log failed (epoch {epoch}, y={cls}): {e}')
+            else:
+                any_logged = True
+        if any_logged:
+            print(
+                f'[INFO] W&B embedding PCA logged at epoch {epoch}: Media → '
+                f'valid/embedding_viz_y0, valid/embedding_viz_y1 (and valid/motif_emb_table_y* when motifs exist).'
+            )
         del buckets
         gc.collect()
         if torch.cuda.is_available():
