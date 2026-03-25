@@ -26,14 +26,24 @@ export WANDB_DIR=~/hpc-share/ChemIntuit/MotifSAT/wandb
 
 EMBEDDING_VIZ_EVERY="${EMBEDDING_VIZ_EVERY:-10}"
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export PYTHONPATH="${SCRIPT_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
-cd "$SCRIPT_DIR" || exit 1
-if [[ ! -f "${SCRIPT_DIR}/run_mutagenicity_gsat_experiment.py" ]]; then
-  echo "[ERROR] run_mutagenicity_gsat_experiment.py not found in ${SCRIPT_DIR}" >&2
-  echo "[ERROR] Run this script from the repo copy under src/ (same folder as the driver .py)." >&2
+# Resolve Python package root: either this script lives in src/ next to the driver, or it lives one level
+# above a src/ copy (common for OnDemand job dirs that only duplicate project root + src/).
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f "${HERE}/run_mutagenicity_gsat_experiment.py" ]]; then
+  SRC_DIR="$HERE"
+elif [[ -f "${HERE}/src/run_mutagenicity_gsat_experiment.py" ]]; then
+  SRC_DIR="${HERE}/src"
+else
+  echo "[ERROR] Could not find run_mutagenicity_gsat_experiment.py in:" >&2
+  echo "        ${HERE}/" >&2
+  echo "        ${HERE}/src/" >&2
+  echo "[ERROR] Use layout (a) .../src/run_mutagenicity_gsat_experiment.sh next to the .py files, or" >&2
+  echo "[ERROR] layout (b) .../run_mutagenicity_gsat_experiment.sh with .../src/*.py alongside." >&2
   exit 1
 fi
+export PYTHONPATH="${SRC_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
+cd "$SRC_DIR" || exit 1
+echo "[INFO] MotifSAT src root: ${SRC_DIR}"
 
 # Populate arrays from Python (keeps shell in sync with run_mutagenicity_gsat_experiment.py / experiment_configs)
 EXPERIMENTS=()
