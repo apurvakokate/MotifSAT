@@ -27,7 +27,13 @@ export WANDB_DIR=~/hpc-share/ChemIntuit/MotifSAT/wandb
 EMBEDDING_VIZ_EVERY="${EMBEDDING_VIZ_EVERY:-10}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
+export PYTHONPATH="${SCRIPT_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
+cd "$SCRIPT_DIR" || exit 1
+if [[ ! -f "${SCRIPT_DIR}/run_mutagenicity_gsat_experiment.py" ]]; then
+  echo "[ERROR] run_mutagenicity_gsat_experiment.py not found in ${SCRIPT_DIR}" >&2
+  echo "[ERROR] Run this script from the repo copy under src/ (same folder as the driver .py)." >&2
+  exit 1
+fi
 
 # Populate arrays from Python (keeps shell in sync with run_mutagenicity_gsat_experiment.py / experiment_configs)
 EXPERIMENTS=()
