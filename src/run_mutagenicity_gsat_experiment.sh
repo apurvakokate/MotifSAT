@@ -27,8 +27,13 @@ export WANDB_DIR=~/hpc-share/ChemIntuit/MotifSAT/wandb
 
 EMBEDDING_VIZ_EVERY="${EMBEDDING_VIZ_EVERY:-10}"
 
-# Directory with run_mutagenicity_gsat_experiment.py. Override when the batch file is not there (e.g. Slurm spool).
-cd "${MOTIFSAT_SRC_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}" || exit 1
+# Slurm runs a *copy* of this script under /var/spool/slurmd/job*/ — never cd to dirname(BASH_SOURCE).
+# Default job cwd is $SLURM_SUBMIT_DIR (where you ran sbatch), like your older script that never cd'd.
+if [[ -n "${MOTIFSAT_SRC_DIR:-}" ]]; then
+  cd "$MOTIFSAT_SRC_DIR" || exit 1
+elif [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
+  cd "$SLURM_SUBMIT_DIR" || exit 1
+fi
 export PYTHONPATH="$(pwd)${PYTHONPATH:+:${PYTHONPATH}}"
 echo "[INFO] MotifSAT cwd: $(pwd)"
 
