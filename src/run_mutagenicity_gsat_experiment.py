@@ -11,6 +11,7 @@ Active groups (EXPERIMENT_GROUPS):
   motif_readout_decay_w_message — decay, final_r=0.8, w_message only; node- vs motif-level sampling
   motif_readout_decay_injection_ablation — decay, final_r=0.8, node-level sampling; injection ablation (100..011)
   base_gsat_readout_intra_att — decay, final_r=0.8, w_message only; readout with intra-motif attention pooling only
+  base_gsat_decay_r_minority_global — same as base_gsat_decay_r but motif pickles from FOLDS/minority_global/...
 
 Injection codes map to GSAT flags (w_node ≡ w_feat): 100=w_feat only, 010=w_message only, 001=w_readout only.
 
@@ -239,6 +240,17 @@ EXPERIMENT_GROUPS = {
     },
 }
 
+# Same hyperparameter grid as base_gsat_decay_r, but loads motif dictionaries from
+# path/FOLDS/minority_global/{dataset}_{algo}_fold_{k}_{algo}_minority_global (see DataLoader.py).
+_base_decay_r = EXPERIMENT_GROUPS['base_gsat_decay_r']
+EXPERIMENT_GROUPS['base_gsat_decay_r_minority_global'] = {
+    'experiment_name': 'base_gsat_decay_r_minority_global',
+    'variants': [
+        {**v, 'data_overrides': {'dictionary_fold_variant': 'minority_global'}}
+        for v in _base_decay_r['variants']
+    ],
+}
+
 ALL_EXPERIMENT_NAMES = list(EXPERIMENT_GROUPS.keys())
 
 
@@ -251,6 +263,8 @@ def run_one(model_name, fold, variant, experiment_name, seed, cuda_id, data_dir,
     config['shared_config']['embedding_viz_every'] = int(embedding_viz_every)
     if 'shared_overrides' in variant:
         config['shared_config'].update(variant['shared_overrides'])
+    if 'data_overrides' in variant:
+        config['data_config'].update(variant['data_overrides'])
     config['GSAT_config']['experiment_name'] = experiment_name
 
     if 'model_overrides' in variant:

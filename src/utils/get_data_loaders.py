@@ -89,7 +89,17 @@ CHOSEN_THRESHOLD = {'BRICS':
                      'tox21':0.2}
                    }
 
-def get_data_loaders(data_dir, dataset_name, batch_size, splits, random_state, mutag_x=False, fold=None, path = "/nfs/stak/users/kokatea/hpc-share/ChemIntuit/MOSE-GNN/DICTIONARY"):
+def get_data_loaders(
+    data_dir,
+    dataset_name,
+    batch_size,
+    splits,
+    random_state,
+    mutag_x=False,
+    fold=None,
+    path="/nfs/stak/users/kokatea/hpc-share/ChemIntuit/MOSE-GNN/DICTIONARY",
+    dictionary_fold_variant="nofilter",
+):
     multi_label = False
     assert dataset_name in ['ba_2motifs', 'mutag', 'Graph-SST2', 'mnist',
                             'spmotif_0.5', 'spmotif_0.7', 'spmotif_0.9',
@@ -168,7 +178,7 @@ def get_data_loaders(data_dir, dataset_name, batch_size, splits, random_state, m
         csv_path = f"/nfs/stak/users/kokatea/hpc-share/ChemIntuit/MOSE-GNN/DomainDrivenGlobalExpl/datasets/FOLDS/{base_name}_{fold}.csv"
 
         lookup, motif_list, _, _, _, _, test_data_lookup, _, train_mask_data,val_mask_data,test_mask_data = get_setup_files_with_folds(
-            base_name, date_tag, fold, algorithm, path=path
+            base_name, date_tag, fold, algorithm, path=path, dictionary_fold_variant=dictionary_fold_variant,
         )
         
         if DATASET_TYPE[dataset_name] == 'Regression':

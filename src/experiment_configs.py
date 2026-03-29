@@ -218,6 +218,8 @@ def get_base_config(model_name, dataset_name, gsat_overrides=None):
         'splits': {'train': 0.8, 'valid': 0.1, 'test': 0.1},
         'batch_size': hp['batch_size'],
         'mutag_x': dataset_name == 'mutag',
+        # Motif dictionary layout under path/FOLDS/... (see DataLoader.DICTIONARY_FOLD_VARIANTS)
+        'dictionary_fold_variant': 'nofilter',
     }
 
     model_config = {

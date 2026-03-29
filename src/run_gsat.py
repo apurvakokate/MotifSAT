@@ -1939,7 +1939,7 @@ class GSAT(nn.Module):
                     explainer_metrics = calculate_explainer_performance(
                         self.clf, self.extractor, loaders['valid'], self.device, epoch, self.learn_edge_att
                     )
-                    wandb.log(explainer_metrics)
+                    wandb.log(explainer_metrics, step=epoch)
                     # Persist explainer metrics so they can be collected later without retraining
                     metric_dict.update(explainer_metrics)
                     print(f"[INFO] Fidelity-: {explainer_metrics['explainer/fidelity_minus']:.4f}, "
@@ -2209,6 +2209,11 @@ class GSAT(nn.Module):
                 att_quality = self._compute_attention_quality_metrics(att)
                 wandb_metrics.update({f'{phase}/{k}': v for k, v in att_quality.items()})
                 
+                # Per-edge attention histogram (`att` is flattened edge_att from forward_pass)
+                h_edge = _wandb_histogram_safe(att)
+                if h_edge is not None:
+                    wandb_metrics[f'{phase}/edge_att/distribution'] = h_edge
+                
                 # Log label distributions (true and predicted)
                 if self.task_type != 'regression':
                     clf_preds = get_preds(clf_logits, self.multi_label)
@@ -2263,15 +2268,17 @@ class GSAT(nn.Module):
                     wandb_metrics[f'{phase}/pred_confidence_min'] = float(np.min(clf_probs_flat))
                     wandb_metrics[f'{phase}/pred_confidence_max'] = float(np.max(clf_probs_flat))
                     
-                    # Log histograms for distributions
-                    wandb.log({
-                        f'{phase}/true_label_distribution': wandb.Histogram(clf_labels_flat[valid_mask]),
-                        f'{phase}/pred_label_distribution': wandb.Histogram(clf_preds_flat),
-                        f'{phase}/pred_confidence_distribution': wandb.Histogram(clf_probs_flat),
-                    })
+                    for key, arr in (
+                        (f'{phase}/true_label_distribution', clf_labels_flat[valid_mask]),
+                        (f'{phase}/pred_label_distribution', clf_preds_flat),
+                        (f'{phase}/pred_confidence_distribution', clf_probs_flat),
+                    ):
+                        h = _wandb_histogram_safe(arr, num_bins=50)
+                        if h is not None:
+                            wandb_metrics[key] = h
                 
-                wandb.log(wandb_metrics)
-            except Exception as e:
+                wandb.log(wandb_metrics, step=epoch)
+            except Exception:
                 pass  # Silently fail if wandb is not initialized
         
         return desc, att_auroc, precision, clf_acc, clf_roc, loss_dict['pred']
@@ -2630,6 +2637,33 @@ def check_artifacts_exist(seed_dir):
     return exists
 
 
+def _wandb_histogram_safe(values, max_samples=100_000, num_bins=64):
+    """
+    Build wandb.Histogram from 1D float values. Handles large tensors and API quirks
+    (some wandb versions reject certain num_bins or empty inputs).
+    """
+    a = np.asarray(values, dtype=np.float64).reshape(-1)
+    a = a[np.isfinite(a)]
+    if a.size == 0:
+        return None
+    if a.size > max_samples:
+        rng = np.random.default_rng(0)
+        a = rng.choice(a, size=max_samples, replace=False)
+    try:
+        return wandb.Histogram(a, num_bins=num_bins)
+    except Exception:
+        pass
+    try:
+        return wandb.Histogram(a)
+    except Exception:
+        pass
+    try:
+        counts, bin_edges = np.histogram(a, bins=min(num_bins, max(1, a.size)))
+        return wandb.Histogram(np_histogram=(counts, bin_edges))
+    except Exception:
+        return None
+
+
 def calculate_explainer_performance(model, extractor, data_loader, device, epoch, learn_edge_att=False):
     """
     Calculate explainer performance using edge masking approach.
@@ -2858,11 +2892,7 @@ def calculate_explainer_performance(model, extractor, data_loader, device, epoch
         pct_low = float(np.mean(all_att < 0.3))  # % of edges with att < 0.3
         pct_high = float(np.mean(all_att > 0.7))  # % of edges with att > 0.7
         
-        # Create histogram for wandb
-        try:
-            att_histogram = wandb.Histogram(all_att, num_bins=50)
-        except:
-            att_histogram = None
+        att_histogram = _wandb_histogram_safe(all_att, num_bins=50)
     else:
         att_mean = att_std = att_median = att_min = att_max = pct_low = pct_high = 0.0
         att_histogram = None
@@ -2882,7 +2912,6 @@ def calculate_explainer_performance(model, extractor, data_loader, device, epoch
         'edge_att/pct_above_0.7': pct_high,
     }
     
-    # Add histogram if available
     if att_histogram is not None:
         metrics['edge_att/distribution'] = att_histogram
     
@@ -2977,8 +3006,11 @@ def train_vanilla_gnn_one_seed(local_config, data_dir, log_dir, model_name, data
         print(f"[WARNING] wandb init failed: {e}")
 
     batch_size, splits = data_config['batch_size'], data_config.get('splits', None)
-    loader_result = get_data_loaders(data_dir, dataset_name, batch_size, splits, random_state,
-                                     data_config.get('mutag_x', False), fold, path=path)
+    loader_result = get_data_loaders(
+        data_dir, dataset_name, batch_size, splits, random_state,
+        data_config.get('mutag_x', False), fold, path=path,
+        dictionary_fold_variant=data_config.get('dictionary_fold_variant', 'nofilter'),
+    )
 
     if len(loader_result) == 9:
         loaders, test_set, x_dim, edge_attr_dim, num_class, aux_info, datasets, masked_data_features, motif_list = loader_result
@@ -3232,7 +3264,11 @@ def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_nam
     # get_data_loaders returns different number of values depending on dataset:
     # - Paper datasets (ba_2motifs, mutag, etc.): 6 values
     # - Molecular datasets with motif info (BBBP, Mutagenicity, etc.): 9 values
-    loader_result = get_data_loaders(data_dir, dataset_name, batch_size, splits, random_state, data_config.get('mutag_x', False), fold, path=path)
+    loader_result = get_data_loaders(
+        data_dir, dataset_name, batch_size, splits, random_state,
+        data_config.get('mutag_x', False), fold, path=path,
+        dictionary_fold_variant=data_config.get('dictionary_fold_variant', 'nofilter'),
+    )
     
     if len(loader_result) == 9:
         loaders, test_set, x_dim, edge_attr_dim, num_class, aux_info, datasets, masked_data_features, motif_list = loader_result
@@ -3515,7 +3551,9 @@ def main():
         path = "/nfs/stak/users/kokatea/hpc-share/ChemIntuit/MotifBreakdown/DICTIONARY_NOFILTER"
         
         loader_result = get_data_loaders(
-            data_dir, dataset_name, batch_size, splits, 0, data_config.get('mutag_x', False), fold, path = path
+            data_dir, dataset_name, batch_size, splits, 0,
+            data_config.get('mutag_x', False), fold, path=path,
+            dictionary_fold_variant=data_config.get('dictionary_fold_variant', 'nofilter'),
         )
         if len(loader_result) == 9:
             loaders, test_set, x_dim, edge_attr_dim, num_class, aux_info, datasets, _, _ = loader_result

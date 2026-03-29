@@ -53,7 +53,29 @@ def load_required_files(base_path):
     
 
 
-def get_setup_files_with_folds(dataset_name, date_tag, fold, algorithm, path = "/nfs/stak/users/kokatea/hpc-share/ChemIntuit/MOSE-GNN/DICTIONARY"):
+# Subfolder under FOLDS/ and filename suffix for motif dictionary pickles.
+# Matches on-disk layouts under `path/FOLDS/<subdir>/..._{algorithm}_<suffix>`.
+DICTIONARY_FOLD_VARIANTS = {
+    'nofilter': ('nofilter', '{algorithm}_nofilter'),
+    'minority_global': ('minority_global', '{algorithm}_minority_global'),
+}
+
+
+def get_setup_files_with_folds(
+    dataset_name,
+    date_tag,
+    fold,
+    algorithm,
+    path="/nfs/stak/users/kokatea/hpc-share/ChemIntuit/MOSE-GNN/DICTIONARY",
+    dictionary_fold_variant="nofilter",
+):
+    """
+    Load motif dictionary pickles for a train/val/test fold.
+
+    dictionary_fold_variant:
+      - 'nofilter' (default): .../FOLDS/nofilter/{ds}_{algo}_fold_{k}_{algo}_nofilter_*.pickle
+      - 'minority_global': .../FOLDS/minority_global/{ds}_{algo}_fold_{k}_{algo}_minority_global_*.pickle
+    """
     algorithm = 'RBRICS' if algorithm == 'None' else algorithm
     least_count_dict = {'1225':
                             {'Mutagenicity':{'RBRICS':3, 'MGSSL':3}, 
@@ -90,9 +112,16 @@ def get_setup_files_with_folds(dataset_name, date_tag, fold, algorithm, path = "
             
 #     else:
 #         base_path = f'{path}/FOLDS/{dataset_name}_{algorithm}_fold_{fold}_{date_tag}'
-    base_path = f'{path}/FOLDS/nofilter/{dataset_name}_{algorithm}_fold_{fold}_{algorithm}_nofilter'
-    
-    
+    if dictionary_fold_variant not in DICTIONARY_FOLD_VARIANTS:
+        raise ValueError(
+            f"dictionary_fold_variant must be one of {list(DICTIONARY_FOLD_VARIANTS)}, "
+            f"got {dictionary_fold_variant!r}"
+        )
+    subdir, suffix_tmpl = DICTIONARY_FOLD_VARIANTS[dictionary_fold_variant]
+    suffix = suffix_tmpl.format(algorithm=algorithm)
+    base_path = f'{path}/FOLDS/{subdir}/{dataset_name}_{algorithm}_fold_{fold}_{suffix}'
+    print(f'[INFO] Motif dictionary base_path ({dictionary_fold_variant}): {base_path}')
+
     return load_required_files(base_path)
 
 
