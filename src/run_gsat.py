@@ -218,6 +218,69 @@ class IntraMotifAttentionPool(nn.Module):
         return torch.cat([r_m, mean_m, max_m, size_f], dim=-1)
 
 
+class MotifPriorNodeGateMLP(nn.Module):
+    """
+    Node gate conditioned on local structure and motif context (readout + prior).
+
+    g_i = f_node([h_i || z~_{a(i)} || α_{a(i)}]),  α_i = σ(g_i) after GSAT sampling.
+
+    z~_{a(i)} is the pooled motif embedding row for node i's motif instance; α_{a(i)} is the
+    motif-level score σ(extractor logit) used as a chemical prior; f_node restores per-node flexibility.
+    """
+
+    def __init__(self, hidden_size, motif_dim, shared_config):
+        super().__init__()
+        mult = shared_config.get('extractor_hidden_mult', 1)
+        dropout_p = shared_config['extractor_dropout_p']
+        in_dim = hidden_size + motif_dim + 1
+        self.mlp = MLP([in_dim, hidden_size * 2 * mult, hidden_size * mult, 1], dropout=dropout_p)
+
+    def forward(self, h, z_tilde, alpha_motif, batch):
+        """
+        Args:
+            h: [N, H] node embeddings
+            z_tilde: [N, D_motif] motif pooled features gathered per node
+            alpha_motif: [N, 1] motif-level prior scores gathered per node
+            batch: [N] graph id per node (for InstanceNorm in MLP)
+        Returns:
+            gate_logit: [N, 1]
+        """
+        x = torch.cat([h, z_tilde, alpha_motif], dim=-1)
+        return self.mlp(x, batch)
+
+
+def sample_motif_readout_with_prior_node_gate(
+    sampling_fn,
+    motif_att_log_logits,
+    motif_emb,
+    emb,
+    inverse_indices,
+    batch,
+    epoch,
+    training,
+    use_raw_score_loss,
+    gate_module,
+    detach_alpha,
+    detach_z,
+):
+    """
+    Motif extractor defines prior α_m; node gate MLP defines stochastic node attention.
+    Info loss applies to node gates (att is node-level).
+    """
+    motif_alpha = motif_att_log_logits.sigmoid()
+    if detach_alpha:
+        motif_alpha = motif_alpha.detach()
+    z_node = motif_emb[inverse_indices]
+    if detach_z:
+        z_node = z_node.detach()
+    alpha_node = motif_alpha[inverse_indices]
+    gate_logit = gate_module(emb, z_node, alpha_node, batch)
+    node_att = sampling_fn(gate_logit, epoch, training)
+    att = node_att
+    raw_att_for_loss = gate_logit.sigmoid() if use_raw_score_loss else None
+    return node_att, att, raw_att_for_loss
+
+
 def motif_pooling(emb, nodes_to_motifs, batch, reduce='mean'):
     """
     Pool node embeddings to motif level.
@@ -971,11 +1034,12 @@ class GSAT(nn.Module):
 
     def __init__(self, clf, extractor, optimizer, scheduler, writer, device, model_dir, dataset_name, num_class, multi_label, random_state,
                  method_config, shared_config, fold, task_type='classification', datasets=None, masked_data=None, motif_clf=None,
-                 motif_list=None, intra_motif_pool=None):
+                 motif_list=None, intra_motif_pool=None, motif_prior_node_gate_module=None):
         super().__init__()
         self.clf = clf
         self.extractor = extractor
         self.intra_motif_pool = intra_motif_pool  # Intra-motif attention pool (readout + intra_att only)
+        self.motif_prior_node_gate_module = motif_prior_node_gate_module  # readout + motif_prior_node_gate only
         self.motif_clf = motif_clf  # Separate model for motif graph (optional)
         self.optimizer = optimizer
         self.scheduler = scheduler
@@ -1035,6 +1099,14 @@ class GSAT(nn.Module):
         self.motif_level_sampling = method_config.get('motif_level_sampling', False)
         self.use_raw_score_loss = method_config.get('use_raw_score_loss', False)
         self.motif_pooling_method = method_config.get('motif_pooling_method', 'mean')
+        self.motif_prior_node_gate = bool(method_config.get('motif_prior_node_gate', False))
+        self.motif_prior_detach_alpha = bool(method_config.get('motif_prior_detach_alpha', False))
+        self.motif_prior_detach_z = bool(method_config.get('motif_prior_detach_z', False))
+        if self.motif_prior_node_gate:
+            if self.motif_method != 'readout':
+                raise ValueError("motif_prior_node_gate=True requires motif_incorporation_method='readout'")
+            if motif_prior_node_gate_module is None:
+                raise ValueError("motif_prior_node_gate=True requires motif_prior_node_gate_module (train_gsat_one_seed)")
         if self.motif_pooling_method == 'intra_att':
             if self.motif_method != 'readout':
                 raise ValueError("motif_pooling_method='intra_att' requires motif_incorporation_method='readout'")
@@ -1089,6 +1161,11 @@ class GSAT(nn.Module):
         print(f'[INFO] Motif-level info loss: {self.motif_level_info_loss}')
         print(f'[INFO] Motif-level sampling: {self.motif_level_sampling}')
         print(f'[INFO] Motif pooling method: {self.motif_pooling_method}')
+        if self.motif_prior_node_gate:
+            print(
+                f'[INFO] Motif prior node gate: ON (detach_alpha={self.motif_prior_detach_alpha}, '
+                f'detach_z={self.motif_prior_detach_z})'
+            )
         print(f'[INFO] Use raw score loss: {self.use_raw_score_loss}')
         if self.info_warmup_epochs > 0:
             print(f'[INFO] Info loss warmup: {self.info_warmup_epochs} epochs (prediction-only, deterministic gating)')
@@ -1437,16 +1514,32 @@ class GSAT(nn.Module):
 
             motif_att_log_logits = self.extractor(motif_emb, None, motif_batch)
 
-            node_att, att, raw_att_for_loss = sample_motif_readout_branch(
-                self.sampling,
-                motif_att_log_logits,
-                inverse_indices,
-                self.motif_level_sampling,
-                self.motif_level_info_loss,
-                epoch,
-                training,
-                self.use_raw_score_loss,
-            )
+            if self.motif_prior_node_gate:
+                node_att, att, raw_att_for_loss = sample_motif_readout_with_prior_node_gate(
+                    self.sampling,
+                    motif_att_log_logits,
+                    motif_emb,
+                    emb,
+                    inverse_indices,
+                    data.batch,
+                    epoch,
+                    training,
+                    self.use_raw_score_loss,
+                    self.motif_prior_node_gate_module,
+                    self.motif_prior_detach_alpha,
+                    self.motif_prior_detach_z,
+                )
+            else:
+                node_att, att, raw_att_for_loss = sample_motif_readout_branch(
+                    self.sampling,
+                    motif_att_log_logits,
+                    inverse_indices,
+                    self.motif_level_sampling,
+                    self.motif_level_info_loss,
+                    epoch,
+                    training,
+                    self.use_raw_score_loss,
+                )
 
             edge_att = self.lift_node_att_to_edge_att(node_att, data.edge_index)
 
@@ -1559,16 +1652,32 @@ class GSAT(nn.Module):
                 emb, nodes_to_motifs, data.batch,
             )
             motif_att_log_logits = self.extractor(motif_emb, None, motif_batch_vec)
-            node_att, _, _ = sample_motif_readout_branch(
-                self.sampling,
-                motif_att_log_logits,
-                inverse_indices,
-                self.motif_level_sampling,
-                self.motif_level_info_loss,
-                epoch,
-                False,
-                self.use_raw_score_loss,
-            )
+            if self.motif_prior_node_gate:
+                node_att, _, _ = sample_motif_readout_with_prior_node_gate(
+                    self.sampling,
+                    motif_att_log_logits,
+                    motif_emb,
+                    emb,
+                    inverse_indices,
+                    data.batch,
+                    epoch,
+                    False,
+                    self.use_raw_score_loss,
+                    self.motif_prior_node_gate_module,
+                    self.motif_prior_detach_alpha,
+                    self.motif_prior_detach_z,
+                )
+            else:
+                node_att, _, _ = sample_motif_readout_branch(
+                    self.sampling,
+                    motif_att_log_logits,
+                    inverse_indices,
+                    self.motif_level_sampling,
+                    self.motif_level_info_loss,
+                    epoch,
+                    False,
+                    self.use_raw_score_loss,
+                )
             na = node_att.squeeze(-1)
             motif_imp = scatter(na, inverse_indices, dim=0, reduce='mean', dim_size=motif_emb.size(0))
             return (
@@ -1904,6 +2013,11 @@ class GSAT(nn.Module):
                 save_checkpoint(self.extractor, Path(self.seed_dir), model_name='gsat_att_epoch_' + str(epoch))
                 if self.intra_motif_pool is not None:
                     save_checkpoint(self.intra_motif_pool, Path(self.seed_dir), model_name='gsat_intra_motif_pool_epoch_' + str(epoch))
+                if self.motif_prior_node_gate_module is not None:
+                    save_checkpoint(
+                        self.motif_prior_node_gate_module, Path(self.seed_dir),
+                        model_name='gsat_motif_prior_node_gate_epoch_' + str(epoch),
+                    )
                 epochs_without_improvement = 0
             elif (r == self.final_r or self.fix_r) and epoch > 10:
                 epochs_without_improvement += 1
@@ -1966,6 +2080,11 @@ class GSAT(nn.Module):
                 save_checkpoint(self.extractor, Path(self.seed_dir), model_name='gsat_att_epoch_' + str(epoch))
                 if self.intra_motif_pool is not None:
                     save_checkpoint(self.intra_motif_pool, Path(self.seed_dir), model_name='gsat_intra_motif_pool_epoch_' + str(epoch))
+                if self.motif_prior_node_gate_module is not None:
+                    save_checkpoint(
+                        self.motif_prior_node_gate_module, Path(self.seed_dir),
+                        model_name='gsat_motif_prior_node_gate_epoch_' + str(epoch),
+                    )
 
             # ===== Save edge and node scores for the last epoch using small batches =====
             '''
@@ -3319,10 +3438,22 @@ def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_nam
     if motif_pool == 'intra_att':
         intra_motif_pool = IntraMotifAttentionPool(hidden_size).to(device)
 
+    motif_prior_node_gate_module = None
+    if method_config.get('motif_prior_node_gate', False):
+        if method_config.get('motif_incorporation_method') != 'readout':
+            raise ValueError('motif_prior_node_gate requires motif_incorporation_method=readout')
+        motif_prior_node_gate_module = MotifPriorNodeGateMLP(
+            hidden_size, extractor_input_dim, shared_config,
+        ).to(device)
+
     # Build parameter list for optimizer
     params_to_optimize = list(extractor.parameters()) + list(model.parameters())
     if intra_motif_pool is not None:
         params_to_optimize += list(intra_motif_pool.parameters())
+    if motif_prior_node_gate_module is not None:
+        params_to_optimize += list(motif_prior_node_gate_module.parameters())
+        if method_config.get('motif_level_sampling'):
+            print('[WARNING] motif_prior_node_gate: motif_level_sampling is ignored (always node-level gate).')
     # if motif_clf is not None:
     #     params_to_optimize += list(motif_clf.parameters())
     
@@ -3339,7 +3470,12 @@ def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_nam
 
     print('====================================')
     print('[INFO] Training GSAT...')
-    gsat = GSAT(model, extractor, optimizer, scheduler, writer, device, log_dir, dataset_name, num_class, aux_info['multi_label'], random_state, method_config, shared_config, fold, task_type, datasets, masked_data_features, motif_clf=motif_clf, motif_list=motif_list, intra_motif_pool=intra_motif_pool)
+    gsat = GSAT(
+        model, extractor, optimizer, scheduler, writer, device, log_dir, dataset_name, num_class,
+        aux_info['multi_label'], random_state, method_config, shared_config, fold, task_type,
+        datasets, masked_data_features, motif_clf=motif_clf, motif_list=motif_list,
+        intra_motif_pool=intra_motif_pool, motif_prior_node_gate_module=motif_prior_node_gate_module,
+    )
 
     # Save model_config to seed_dir for post-hoc analysis (hidden_size, n_layers, etc.)
     model_config_save = {k: v for k, v in model_config.items()
@@ -3398,6 +3534,13 @@ def main():
     parser.add_argument('--motif_pooling_method', type=str, default=None,
                         choices=['mean', 'sum', 'multi', 'intra_att'],
                         help='Pool node embeddings to motif rows for readout (overrides config if set).')
+    parser.add_argument('--motif_prior_node_gate', action='store_true', default=False,
+                        help='Readout: node gate g_i = f([h_i || z_m || α_m]) with motif prior α_m = σ(extractor); '
+                             'then α_i = σ(GSAT sampling(g_i)).')
+    parser.add_argument('--motif_prior_detach_alpha', action='store_true', default=False,
+                        help='With motif_prior_node_gate: detach α_m from gate input (no grad through prior).')
+    parser.add_argument('--motif_prior_detach_z', action='store_true', default=False,
+                        help='With motif_prior_node_gate: detach motif embedding z_m from gate input.')
     parser.add_argument('--use_raw_score_loss', action='store_true', default=False,
                         help='Use sigmoid(logits) before sampling for info_loss and motif_consistency_loss.')
     parser.add_argument('--w_feat', action='store_true', default=False,
@@ -3486,6 +3629,13 @@ def main():
 
     if args.motif_pooling_method is not None:
         local_config['GSAT_config']['motif_pooling_method'] = args.motif_pooling_method
+
+    if args.motif_prior_node_gate:
+        local_config['GSAT_config']['motif_prior_node_gate'] = True
+    if args.motif_prior_detach_alpha:
+        local_config['GSAT_config']['motif_prior_detach_alpha'] = True
+    if args.motif_prior_detach_z:
+        local_config['GSAT_config']['motif_prior_detach_z'] = True
 
     if 'use_raw_score_loss' not in local_config['GSAT_config']:
         local_config['GSAT_config']['use_raw_score_loss'] = args.use_raw_score_loss
