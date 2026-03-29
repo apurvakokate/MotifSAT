@@ -1512,8 +1512,8 @@ class GSAT(nn.Module):
             nodes_to_motifs = getattr(data, 'nodes_to_motifs', None)
             if nodes_to_motifs is None:
                 return emb.detach().cpu(), node_att.detach().cpu(), None, None, data.batch.detach().cpu(), None, None
-            motif_emb, motif_batch_vec, inverse_indices, motif_global_ids = motif_pooling(
-                emb, nodes_to_motifs, data.batch, reduce=self.motif_pooling_method,
+            motif_emb, motif_batch_vec, inverse_indices, motif_global_ids = self._motif_level_pool(
+                emb, nodes_to_motifs, data.batch,
             )
             motif_imp = torch.ones(motif_emb.size(0), 1, device=emb.device, dtype=emb.dtype)
             return (
@@ -1535,8 +1535,8 @@ class GSAT(nn.Module):
             nodes_to_motifs = getattr(data, 'nodes_to_motifs', None)
             if nodes_to_motifs is None:
                 return emb.detach().cpu(), node_att.detach().cpu(), None, None, data.batch.detach().cpu(), None, None
-            motif_emb, motif_batch_vec, inverse_indices, motif_global_ids = motif_pooling(
-                emb, nodes_to_motifs, data.batch, reduce=self.motif_pooling_method,
+            motif_emb, motif_batch_vec, inverse_indices, motif_global_ids = self._motif_level_pool(
+                emb, nodes_to_motifs, data.batch,
             )
             na = node_att.squeeze(-1)
             motif_imp = scatter(na, inverse_indices, dim=0, reduce='mean', dim_size=motif_emb.size(0))
