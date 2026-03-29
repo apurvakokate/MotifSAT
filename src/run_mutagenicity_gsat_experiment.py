@@ -12,6 +12,7 @@ Active groups (EXPERIMENT_GROUPS):
   motif_readout_decay_injection_ablation — decay, final_r=0.8, node-level sampling; injection ablation (100..011)
   base_gsat_readout_intra_att — decay, final_r=0.8, w_message only; readout with intra-motif attention pooling only
   motif_readout_prior_node_gate — readout; motif score as prior, node gates from [h||z_m||α_m] (MotifPriorNodeGateMLP)
+  motif_readout_weight_diversity — readout + motif_weight_diversity_coef (penalize identical motif scores within a graph)
   base_gsat_decay_r_minority_global — same as base_gsat_decay_r but motif pickles from FOLDS/minority_global/...
 
 Injection codes map to GSAT flags (w_node ≡ w_feat): 100=w_feat only, 010=w_message only, 001=w_readout only.
@@ -262,6 +263,29 @@ EXPERIMENT_GROUPS = {
             },
         ],
     },
+    'motif_readout_weight_diversity': {
+        'experiment_name': 'motif_readout_weight_diversity',
+        'variants': [
+            {
+                'variant_id': 'decay_f0.8_w010_readout_motif_div',
+                'gsat_overrides': {
+                    'tuning_id': 'decay_f0.8_w010_readout_motif_div',
+                    **_DECAY_R_BASE,
+                    'final_r': 0.8,
+                    'motif_incorporation_method': 'readout',
+                    'motif_pooling_method': 'mean',
+                    'motif_level_sampling': False,
+                    'motif_weight_diversity_coef': 1.0,
+                    'motif_loss_coef': 0,
+                    'between_motif_coef': 0,
+                    'pred_loss_coef': 1.0,
+                    'info_loss_coef': 1.0,
+                    **INJECTION_PRESETS['010'],
+                },
+                'learn_edge_att': False,
+            },
+        ],
+    },
 }
 
 # Same hyperparameter grid as base_gsat_decay_r, but loads motif dictionaries from
@@ -352,6 +376,7 @@ def main():
         'motif_readout_decay_w_message',
         'motif_readout_decay_injection_ablation',
         'motif_readout_prior_node_gate',
+        'motif_readout_weight_diversity',
     }
     if dataset_name not in DATASETS_WITH_MOTIFS:
         skipped = [e for e in args.experiments if e in motif_experiments]

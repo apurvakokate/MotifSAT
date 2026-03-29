@@ -1,6 +1,7 @@
 #!/bin/bash
 # GSAT decay-r grid using motif dictionaries under FOLDS/minority_global/..._*_minority_global
 # (see DataLoader.DICTIONARY_FOLD_VARIANTS and experiment base_gsat_decay_r_minority_global).
+# The same experiment is included in run_mutagenicity_gsat_experiment.sh (full EXPERIMENTS list).
 # Official GSAT reference: https://github.com/Graph-COM/GSAT
 #
 # Usage (from MotifSAT/src, after conda activate):

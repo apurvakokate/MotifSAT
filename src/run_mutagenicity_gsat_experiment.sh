@@ -37,16 +37,19 @@ fi
 export PYTHONPATH="$(pwd)${PYTHONPATH:+:${PYTHONPATH}}"
 echo "[INFO] MotifSAT cwd: $(pwd)"
 
-# --- Edit these arrays (must match names accepted by run_mutagenicity_gsat_experiment.py) ---
+# --- Edit these arrays (must match ALL_EXPERIMENT_NAMES in run_mutagenicity_gsat_experiment.py) ---
 EXPERIMENTS=(
   vanilla_gnn
   base_gsat_fix_r
   base_gsat_decay_r
+  base_gsat_decay_r_minority_global
   base_gsat_decay_r_injection
   base_gsat_motif_loss
   motif_readout_decay_w_message
   motif_readout_decay_injection_ablation
   base_gsat_readout_intra_att
+  motif_readout_prior_node_gate
+  motif_readout_weight_diversity
 )
 
 # Subset or reorder for load balancing. Full SUPPORTED_DATASETS order in driver: molecular + OGB + PAPER_DATASETS (deduped).

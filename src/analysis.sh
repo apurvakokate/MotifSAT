@@ -14,15 +14,19 @@ export RESULTS_DIR="${RESULTS_DIR:-$HOME/hpc-share/ChemIntuit/MotifSAT/tuning_re
 OUTPUT_BASE="${OUTPUT_BASE:-../motif_consistency_results}"
 DATASET="${DATASET:-Mutagenicity}"
 
+# Must match ALL_EXPERIMENT_NAMES in run_mutagenicity_gsat_experiment.py (streamlined groups).
 EXPERIMENTS=(
   vanilla_gnn
   base_gsat_fix_r
   base_gsat_decay_r
+  base_gsat_decay_r_minority_global
   base_gsat_decay_r_injection
   base_gsat_motif_loss
   motif_readout_decay_w_message
   motif_readout_decay_injection_ablation
   base_gsat_readout_intra_att
+  motif_readout_prior_node_gate
+  motif_readout_weight_diversity
 )
 
 MODELS=(GIN PNA GAT SAGE GCN)

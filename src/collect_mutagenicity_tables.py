@@ -208,6 +208,11 @@ EXPERIMENT_ROW_CONFIG = {
         'row_label_prefix': 'final_r',
         'path_extract': 'final_r',
     },
+    'base_gsat_decay_r_minority_global': {
+        'summary_path': ('weight_distribution_params', 'final_r'),
+        'row_label_prefix': 'final_r',
+        'path_extract': 'final_r',
+    },
     'base_gsat_decay_r_injection': {
         'summary_path': None,
         'row_label_prefix': 'inj',
@@ -229,6 +234,16 @@ EXPERIMENT_ROW_CONFIG = {
         'path_extract': 'injection_code',
     },
     'base_gsat_readout_intra_att': {
+        'summary_path': ('weight_distribution_params', 'final_r'),
+        'row_label_prefix': 'final_r',
+        'path_extract': 'final_r',
+    },
+    'motif_readout_prior_node_gate': {
+        'summary_path': ('weight_distribution_params', 'final_r'),
+        'row_label_prefix': 'final_r',
+        'path_extract': 'final_r',
+    },
+    'motif_readout_weight_diversity': {
         'summary_path': ('weight_distribution_params', 'final_r'),
         'row_label_prefix': 'final_r',
         'path_extract': 'final_r',

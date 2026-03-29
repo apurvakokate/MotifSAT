@@ -281,6 +281,33 @@ def sample_motif_readout_with_prior_node_gate(
     return node_att, att, raw_att_for_loss
 
 
+def motif_readout_weight_diversity_loss(motif_att_soft, motif_batch):
+    """
+    Auxiliary loss for motif readout: penalize motif-level scores being identical within a graph.
+
+    Uses σ(extractor logits) per motif row. For each graph, computes variance of those scores across
+    motif instances; averages over graphs with at least two motifs. Returns -log(mean_var + eps) so
+    the objective favors higher spread (discourages collapse to a common weight).
+    """
+    x = motif_att_soft.squeeze(-1)
+    if x.numel() == 0:
+        return motif_att_soft.new_tensor(0.0)
+    mb = motif_batch.long()
+    num_graphs = int(mb.max().item()) + 1
+    ones = torch.ones_like(x)
+    counts = scatter(ones, mb, dim=0, dim_size=num_graphs, reduce='sum')
+    sum_x = scatter(x, mb, dim=0, dim_size=num_graphs, reduce='sum')
+    sum_x2 = scatter(x * x, mb, dim=0, dim_size=num_graphs, reduce='sum')
+    denom = counts.clamp(min=1.0)
+    mean = sum_x / denom
+    var = (sum_x2 / denom - mean * mean).clamp(min=0.0)
+    mask = counts >= 2
+    if not mask.any():
+        return motif_att_soft.new_tensor(0.0)
+    mean_var = var[mask].mean()
+    return -torch.log(mean_var + 1e-8)
+
+
 def motif_pooling(emb, nodes_to_motifs, batch, reduce='mean'):
     """
     Pool node embeddings to motif level.
@@ -1102,6 +1129,7 @@ class GSAT(nn.Module):
         self.motif_prior_node_gate = bool(method_config.get('motif_prior_node_gate', False))
         self.motif_prior_detach_alpha = bool(method_config.get('motif_prior_detach_alpha', False))
         self.motif_prior_detach_z = bool(method_config.get('motif_prior_detach_z', False))
+        self.motif_weight_diversity_coef = float(method_config.get('motif_weight_diversity_coef', 0.0))
         if self.motif_prior_node_gate:
             if self.motif_method != 'readout':
                 raise ValueError("motif_prior_node_gate=True requires motif_incorporation_method='readout'")
@@ -1166,6 +1194,8 @@ class GSAT(nn.Module):
                 f'[INFO] Motif prior node gate: ON (detach_alpha={self.motif_prior_detach_alpha}, '
                 f'detach_z={self.motif_prior_detach_z})'
             )
+        if self.motif_weight_diversity_coef > 0:
+            print(f'[INFO] Motif weight diversity loss coef: {self.motif_weight_diversity_coef}')
         print(f'[INFO] Use raw score loss: {self.use_raw_score_loss}')
         if self.info_warmup_epochs > 0:
             print(f'[INFO] Info loss warmup: {self.info_warmup_epochs} epochs (prediction-only, deterministic gating)')
@@ -1246,6 +1276,7 @@ class GSAT(nn.Module):
                 'info_loss_coef': self.info_loss_coef,
                 'motif_loss_coef': self.motif_loss_coef,
                 'between_motif_coef': self.between_motif_coef,
+                'motif_weight_diversity_coef': self.motif_weight_diversity_coef,
             },
             'weight_distribution_params': {
                 'init_r': self.init_r,
@@ -1272,6 +1303,7 @@ class GSAT(nn.Module):
             'motif_within': loss_dict.get('motif_within', 0),
             'motif_between': loss_dict.get('motif_between', 0),
             'motif_loss': loss_dict['motif_consistency'],
+            'motif_weight_diversity': loss_dict.get('motif_weight_diversity', 0),
             'att_auroc': float(att_auroc) if att_auroc is not None else None,
             'precision_at_k': float(precision) if precision is not None else None,
             'clf_acc': float(clf_acc) if clf_acc is not None else None,
@@ -1336,7 +1368,7 @@ class GSAT(nn.Module):
 
     def __loss__(self, att, clf_logits, clf_labels, epoch, nodes_to_motifs, batch,
                  aux_clf_logits=None, motif_batch=None, motif_ids=None,
-                 raw_att_for_loss=None):
+                 raw_att_for_loss=None, motif_att_soft=None):
         """
         Compute the total loss for GSAT training.
         
@@ -1409,7 +1441,17 @@ class GSAT(nn.Module):
                 between_term = -self.between_motif_coef * between_var
 
         motif_loss = within_term
-        loss = pred_loss + info_loss + within_term + between_term
+        diversity_term = att.new_tensor(0.0)
+        if (
+            self.motif_weight_diversity_coef > 0
+            and self.motif_method == 'readout'
+            and motif_att_soft is not None
+            and motif_batch is not None
+        ):
+            div_raw = motif_readout_weight_diversity_loss(motif_att_soft, motif_batch)
+            diversity_term = self.motif_weight_diversity_coef * div_raw
+
+        loss = pred_loss + info_loss + within_term + between_term + diversity_term
 
         loss_dict = {
             'loss': loss.item(),
@@ -1418,6 +1460,7 @@ class GSAT(nn.Module):
             'motif_within': within_term.item(),
             'motif_between': between_term.item(),
             'motif_consistency': motif_loss.item(),
+            'motif_weight_diversity': diversity_term.item(),
         }
 
         # # Auxiliary motif graph loss (commented out for simplification)
@@ -1453,7 +1496,8 @@ class GSAT(nn.Module):
             pred_loss = self.criterion(clf_logits, data.y)
             loss = self.pred_loss_coef * pred_loss
             loss_dict = {'loss': loss.item(), 'pred': pred_loss.item(), 'info': 0.0,
-                        'motif_within': 0.0, 'motif_between': 0.0, 'motif_consistency': 0.0}
+                        'motif_within': 0.0, 'motif_between': 0.0, 'motif_consistency': 0.0,
+                        'motif_weight_diversity': 0.0}
             return edge_att, loss, loss_dict, clf_logits
 
         # Check for unmapped nodes if using motif incorporation methods
@@ -1469,6 +1513,7 @@ class GSAT(nn.Module):
         motif_batch = None    # Batch assignment for motifs (used for graph-adaptive r)
         motif_ids = None      # Original motif IDs per pooled motif (used for score-based r)
         raw_att_for_loss = None  # sigmoid(logits) before sampling, used when use_raw_score_loss=True
+        motif_att_soft = None  # σ(motif extractor logits); used for readout diversity loss
 
         if self.motif_method in [None, 'loss']:
             # =================================================================
@@ -1513,6 +1558,7 @@ class GSAT(nn.Module):
             )
 
             motif_att_log_logits = self.extractor(motif_emb, None, motif_batch)
+            motif_att_soft = motif_att_log_logits.sigmoid()
 
             if self.motif_prior_node_gate:
                 node_att, att, raw_att_for_loss = sample_motif_readout_with_prior_node_gate(
@@ -1586,9 +1632,12 @@ class GSAT(nn.Module):
 
         # Get nodes_to_motifs if available (needed for motif_method='loss')
         nodes_to_motifs = getattr(data, 'nodes_to_motifs', None)
-        loss, loss_dict = self.__loss__(att, clf_logits, data.y, epoch, nodes_to_motifs, data.batch,
-                                        aux_clf_logits=aux_clf_logits, motif_batch=motif_batch,
-                                        motif_ids=motif_ids, raw_att_for_loss=raw_att_for_loss)
+        loss, loss_dict = self.__loss__(
+            att, clf_logits, data.y, epoch, nodes_to_motifs, data.batch,
+            aux_clf_logits=aux_clf_logits, motif_batch=motif_batch,
+            motif_ids=motif_ids, raw_att_for_loss=raw_att_for_loss,
+            motif_att_soft=motif_att_soft,
+        )
         return edge_att, loss, loss_dict, clf_logits
 
     @torch.no_grad()
@@ -2309,6 +2358,7 @@ class GSAT(nn.Module):
                     f'{phase}/motif_between': loss_dict.get('motif_between', 0),
                     f'{phase}/motif_loss': loss_dict.get('motif_consistency', 0),
                     f'{phase}/motif_graph_loss': loss_dict.get('motif_graph_loss', 0),
+                    f'{phase}/motif_weight_diversity': loss_dict.get('motif_weight_diversity', 0),
                     f'{phase}/att_auroc': att_auroc if att_auroc is not None else 0,
                     f'{phase}/precision_k': precision if precision is not None else 0,
                     'epoch': epoch,
@@ -3541,6 +3591,9 @@ def main():
                         help='With motif_prior_node_gate: detach α_m from gate input (no grad through prior).')
     parser.add_argument('--motif_prior_detach_z', action='store_true', default=False,
                         help='With motif_prior_node_gate: detach motif embedding z_m from gate input.')
+    parser.add_argument('--motif_weight_diversity_coef', type=float, default=None,
+                        help='Readout: weight for -log(mean within-graph variance of σ(motif logits)); '
+                             'penalizes all motif scores being identical within a graph (0=off).')
     parser.add_argument('--use_raw_score_loss', action='store_true', default=False,
                         help='Use sigmoid(logits) before sampling for info_loss and motif_consistency_loss.')
     parser.add_argument('--w_feat', action='store_true', default=False,
@@ -3637,6 +3690,9 @@ def main():
     if args.motif_prior_detach_z:
         local_config['GSAT_config']['motif_prior_detach_z'] = True
 
+    if args.motif_weight_diversity_coef is not None:
+        local_config['GSAT_config']['motif_weight_diversity_coef'] = args.motif_weight_diversity_coef
+
     if 'use_raw_score_loss' not in local_config['GSAT_config']:
         local_config['GSAT_config']['use_raw_score_loss'] = args.use_raw_score_loss
 
@@ -3680,6 +3736,7 @@ def main():
     print(f'[INFO] Motif-level info loss: {local_config["GSAT_config"].get("motif_level_info_loss", False)}')
     print(f'[INFO] Motif-level sampling: {local_config["GSAT_config"].get("motif_level_sampling", False)}')
     print(f'[INFO] Motif pooling method: {local_config["GSAT_config"].get("motif_pooling_method", "mean")}')
+    print(f'[INFO] Motif weight diversity coef: {local_config["GSAT_config"].get("motif_weight_diversity_coef", 0.0)}')
     print(f'[INFO] Target k (graph-adaptive r): {local_config["GSAT_config"].get("target_k", None)}')
     print(f'[INFO] Motif scores path: {local_config["GSAT_config"].get("motif_scores_path", None)}')
 
