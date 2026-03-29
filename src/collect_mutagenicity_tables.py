@@ -228,6 +228,11 @@ EXPERIMENT_ROW_CONFIG = {
         'row_label_prefix': 'inj',
         'path_extract': 'injection_code',
     },
+    'base_gsat_readout_intra_att': {
+        'summary_path': ('weight_distribution_params', 'final_r'),
+        'row_label_prefix': 'final_r',
+        'path_extract': 'final_r',
+    },
 }
 
 

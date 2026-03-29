@@ -9,7 +9,8 @@ Active groups (EXPERIMENT_GROUPS):
   base_gsat_decay_r_injection — decay, final_r=0.8, injection ablation (100,010,001,101,011)
   base_gsat_motif_loss — decay, final_r=0.8, w_message only, motif_method=loss
   motif_readout_decay_w_message — decay, final_r=0.8, w_message only; node- vs motif-level sampling
-  motif_readout_decay_injection — decay, final_r=0.8, node-level sampling; injection ablation (100..011)
+  motif_readout_decay_injection_ablation — decay, final_r=0.8, node-level sampling; injection ablation (100..011)
+  base_gsat_readout_intra_att — decay, final_r=0.8, w_message only; readout with intra-motif attention pooling only
 
 Injection codes map to GSAT flags (w_node ≡ w_feat): 100=w_feat only, 010=w_message only, 001=w_readout only.
 
@@ -212,6 +213,28 @@ EXPERIMENT_GROUPS = {
                 'learn_edge_att': False,
             }
             for code in ['100', '010', '001', '101', '011']
+        ],
+    },
+    'base_gsat_readout_intra_att': {
+        'experiment_name': 'base_gsat_readout_intra_att',
+        'variants': [
+            {
+                'variant_id': 'decay_f0.8_w010_readout_intra_att',
+                'gsat_overrides': {
+                    'tuning_id': 'decay_f0.8_w010_readout_intra_att',
+                    **_DECAY_R_BASE,
+                    'final_r': 0.8,
+                    'motif_incorporation_method': 'readout',
+                    'motif_pooling_method': 'intra_att',
+                    'motif_level_sampling': False,
+                    'motif_loss_coef': 0,
+                    'between_motif_coef': 0,
+                    'pred_loss_coef': 1.0,
+                    'info_loss_coef': 1.0,
+                    **INJECTION_PRESETS['010'],
+                },
+                'learn_edge_att': False,
+            },
         ],
     },
 }

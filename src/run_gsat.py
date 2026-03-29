@@ -31,7 +31,7 @@ from pretrain_clf import train_clf_one_seed
 from utils import Writer, Criterion, MLP, visualize_a_graph, save_checkpoint, load_checkpoint, get_preds, get_lr, set_seed, process_data
 from utils import get_local_config_name, get_model, get_data_loaders, write_stat_from_metric_dicts, reorder_like, init_metric_dict
 
-from torch_geometric.utils import scatter  # or from torch_scatter import scatter
+from torch_geometric.utils import scatter, softmax  # or from torch_scatter import scatter
 import pandas as pd
 
 
@@ -173,6 +173,51 @@ def motif_consistency_loss(att, nodes_to_motifs, batch):
     return within_var, between_var
 
 
+def compute_motif_inverse_indices(nodes_to_motifs, batch):
+    """
+    Map each node to a dense motif row index (per-graph motif instances).
+
+    Returns:
+        inverse_indices: [N] in 0..M-1
+        motif_batch: [M]
+        motif_ids: [M] global motif id within vocabulary
+    """
+    max_motif_id = int(nodes_to_motifs.max().item()) + 1
+    graph_motif_id = batch.long() * max_motif_id + nodes_to_motifs.long()
+    unique_graph_motifs, inverse_indices = graph_motif_id.unique(return_inverse=True)
+    motif_batch = unique_graph_motifs // max_motif_id
+    motif_ids = unique_graph_motifs % max_motif_id
+    return inverse_indices, motif_batch, motif_ids
+
+
+class IntraMotifAttentionPool(nn.Module):
+    """
+    Attention-weighted motif embedding + mean/max/size features for readout.
+
+    Per motif instance m: softmax over nodes in V_m, r_m = sum_v alpha_v h_v;
+    concat mean(h), max(h), log(1+|V_m|) -> [3H+1] per motif row.
+    """
+
+    def __init__(self, hidden_size, att_hidden=64):
+        super().__init__()
+        self.lin1 = nn.Linear(hidden_size, att_hidden)
+        self.lin2 = nn.Linear(att_hidden, 1)
+
+    def forward(self, emb, inverse_indices):
+        q = torch.tanh(self.lin1(emb))
+        logits = self.lin2(q).squeeze(-1)
+        num_motifs = int(inverse_indices.max().item()) + 1
+        alpha = softmax(logits, inverse_indices, num_nodes=num_motifs)
+        weighted = emb * alpha.unsqueeze(-1)
+        r_m = scatter(weighted, inverse_indices, dim=0, reduce='sum')
+        mean_m = scatter(emb, inverse_indices, dim=0, reduce='mean')
+        max_m = scatter(emb, inverse_indices, dim=0, reduce='max')
+        ones = torch.ones(emb.size(0), device=emb.device, dtype=emb.dtype)
+        counts = scatter(ones, inverse_indices, dim=0, reduce='sum')
+        size_f = torch.log(1.0 + counts).unsqueeze(-1)
+        return torch.cat([r_m, mean_m, max_m, size_f], dim=-1)
+
+
 def motif_pooling(emb, nodes_to_motifs, batch, reduce='mean'):
     """
     Pool node embeddings to motif level.
@@ -186,7 +231,8 @@ def motif_pooling(emb, nodes_to_motifs, batch, reduce='mean'):
         nodes_to_motifs: [N] global motif indices (can be non-consecutive)
         batch: [N] batch assignment for nodes
         reduce: Aggregation method ('mean', 'sum', or 'multi' for
-                concatenated mean+max+sum giving 3× the embedding width)
+                concatenated mean+max+sum giving 3× the embedding width).
+                ('intra_att' is handled by IntraMotifAttentionPool on GSAT, not here.)
     
     Returns:
         motif_emb: [M, hidden] (or [M, 3*hidden] for 'multi')
@@ -194,14 +240,8 @@ def motif_pooling(emb, nodes_to_motifs, batch, reduce='mean'):
         inverse_indices: [N] mapping from each node to its motif index (0..M-1)
         motif_ids: [M] original global motif index for each pooled motif
     """
-    max_motif_id = nodes_to_motifs.max().item() + 1
-    graph_motif_id = batch * max_motif_id + nodes_to_motifs
-    
-    unique_graph_motifs, inverse_indices = graph_motif_id.unique(return_inverse=True)
-    
-    motif_batch = unique_graph_motifs // max_motif_id
-    motif_ids = unique_graph_motifs % max_motif_id
-    
+    inverse_indices, motif_batch, motif_ids = compute_motif_inverse_indices(nodes_to_motifs, batch)
+
     if reduce == 'multi':
         motif_mean = scatter(emb, inverse_indices, dim=0, reduce='mean')
         motif_max = scatter(emb, inverse_indices, dim=0, reduce='max')
@@ -931,10 +971,11 @@ class GSAT(nn.Module):
 
     def __init__(self, clf, extractor, optimizer, scheduler, writer, device, model_dir, dataset_name, num_class, multi_label, random_state,
                  method_config, shared_config, fold, task_type='classification', datasets=None, masked_data=None, motif_clf=None,
-                 motif_list=None):
+                 motif_list=None, intra_motif_pool=None):
         super().__init__()
         self.clf = clf
         self.extractor = extractor
+        self.intra_motif_pool = intra_motif_pool  # Intra-motif attention pool (readout + intra_att only)
         self.motif_clf = motif_clf  # Separate model for motif graph (optional)
         self.optimizer = optimizer
         self.scheduler = scheduler
@@ -994,6 +1035,11 @@ class GSAT(nn.Module):
         self.motif_level_sampling = method_config.get('motif_level_sampling', False)
         self.use_raw_score_loss = method_config.get('use_raw_score_loss', False)
         self.motif_pooling_method = method_config.get('motif_pooling_method', 'mean')
+        if self.motif_pooling_method == 'intra_att':
+            if self.motif_method != 'readout':
+                raise ValueError("motif_pooling_method='intra_att' requires motif_incorporation_method='readout'")
+            if intra_motif_pool is None:
+                raise ValueError("motif_pooling_method='intra_att' requires intra_motif_pool module (train_gsat_one_seed)")
 
         # Info loss warmup: prediction-only phase before info loss kicks in
         self.info_warmup_epochs = method_config.get('info_warmup_epochs', 0)
@@ -1042,6 +1088,7 @@ class GSAT(nn.Module):
         print(f'[INFO] Separate motif model: {self.separate_motif_model}')
         print(f'[INFO] Motif-level info loss: {self.motif_level_info_loss}')
         print(f'[INFO] Motif-level sampling: {self.motif_level_sampling}')
+        print(f'[INFO] Motif pooling method: {self.motif_pooling_method}')
         print(f'[INFO] Use raw score loss: {self.use_raw_score_loss}')
         if self.info_warmup_epochs > 0:
             print(f'[INFO] Info loss warmup: {self.info_warmup_epochs} epochs (prediction-only, deterministic gating)')
@@ -1104,6 +1151,7 @@ class GSAT(nn.Module):
             'motif_incorporation': {
                 'no_attention': self.no_attention,
                 'method': self.motif_method,
+                'motif_pooling_method': self.motif_pooling_method,
                 'train_motif_graph': self.train_motif_graph,
                 'separate_motif_model': self.separate_motif_model,
                 'motif_level_info_loss': self.motif_level_info_loss,
@@ -1192,6 +1240,14 @@ class GSAT(nn.Module):
         serializable = {k: v for k, v in metric_dict.items() if isinstance(v, (int, float, str, bool, type(None)))}
         with open(final_metrics_path, 'w') as f:
             json.dump(serializable, f, indent=2)
+
+    def _motif_level_pool(self, emb, nodes_to_motifs, batch):
+        """Pool node embeddings to motif rows (same indexing as readout)."""
+        if self.motif_pooling_method == 'intra_att':
+            inverse_indices, motif_batch, motif_ids = compute_motif_inverse_indices(nodes_to_motifs, batch)
+            motif_emb = self.intra_motif_pool(emb, inverse_indices)
+            return motif_emb, motif_batch, inverse_indices, motif_ids
+        return motif_pooling(emb, nodes_to_motifs, batch, reduce=self.motif_pooling_method)
             
     @staticmethod
     def _calculate_entropy(weights, num_bins=20):
@@ -1375,8 +1431,10 @@ class GSAT(nn.Module):
             nodes_to_motifs = getattr(data, 'nodes_to_motifs', None)
             if nodes_to_motifs is None:
                 raise ValueError("'readout' method requires nodes_to_motifs attribute in data")
-            motif_emb, motif_batch, inverse_indices, motif_ids = motif_pooling(emb, nodes_to_motifs, data.batch, reduce=self.motif_pooling_method)
-            
+            motif_emb, motif_batch, inverse_indices, motif_ids = self._motif_level_pool(
+                emb, nodes_to_motifs, data.batch,
+            )
+
             motif_att_log_logits = self.extractor(motif_emb, None, motif_batch)
 
             node_att, att, raw_att_for_loss = sample_motif_readout_branch(
@@ -1497,8 +1555,8 @@ class GSAT(nn.Module):
             nodes_to_motifs = getattr(data, 'nodes_to_motifs', None)
             if nodes_to_motifs is None:
                 return None
-            motif_emb, motif_batch_vec, inverse_indices, motif_global_ids = motif_pooling(
-                emb, nodes_to_motifs, data.batch, reduce=self.motif_pooling_method,
+            motif_emb, motif_batch_vec, inverse_indices, motif_global_ids = self._motif_level_pool(
+                emb, nodes_to_motifs, data.batch,
             )
             motif_att_log_logits = self.extractor(motif_emb, None, motif_batch_vec)
             node_att, _, _ = sample_motif_readout_branch(
@@ -1844,6 +1902,8 @@ class GSAT(nn.Module):
                                'metric/best_x_precision_train': train_res[1], 'metric/best_x_precision_valid': valid_res[1], 'metric/best_x_precision_test': test_res[1]}
                 save_checkpoint(self.clf, Path(self.seed_dir), model_name='gsat_clf_epoch_' + str(epoch))
                 save_checkpoint(self.extractor, Path(self.seed_dir), model_name='gsat_att_epoch_' + str(epoch))
+                if self.intra_motif_pool is not None:
+                    save_checkpoint(self.intra_motif_pool, Path(self.seed_dir), model_name='gsat_intra_motif_pool_epoch_' + str(epoch))
                 epochs_without_improvement = 0
             elif (r == self.final_r or self.fix_r) and epoch > 10:
                 epochs_without_improvement += 1
@@ -1904,7 +1964,9 @@ class GSAT(nn.Module):
             if epoch == self.epochs - 1:
                 save_checkpoint(self.clf, Path(self.seed_dir), model_name='gsat_clf_epoch_' + str(epoch))
                 save_checkpoint(self.extractor, Path(self.seed_dir), model_name='gsat_att_epoch_' + str(epoch))
-                
+                if self.intra_motif_pool is not None:
+                    save_checkpoint(self.intra_motif_pool, Path(self.seed_dir), model_name='gsat_intra_motif_pool_epoch_' + str(epoch))
+
             # ===== Save edge and node scores for the last epoch using small batches =====
             '''
             NOTE: CHECK LOGIC
@@ -1935,8 +1997,8 @@ class GSAT(nn.Module):
                             if self.motif_method == 'readout':
                                 n2m = getattr(data, 'nodes_to_motifs', None)
                                 if n2m is not None:
-                                    motif_emb, motif_batch, inv_idx, _ = motif_pooling(
-                                        emb, n2m, batch, reduce=self.motif_pooling_method)
+                                    motif_emb, motif_batch, inv_idx, _ = self._motif_level_pool(
+                                        emb, n2m, batch)
                                     motif_logits = self.extractor(motif_emb, None, motif_batch)
                                     if self.motif_level_sampling:
                                         motif_att = self.sampling(motif_logits, epoch, training=False)
@@ -3208,12 +3270,23 @@ def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_nam
 
     hidden_size = model_config['hidden_size']
     motif_pool = method_config.get('motif_pooling_method', 'mean')
-    extractor_input_dim = hidden_size * 3 if motif_pool == 'multi' else hidden_size
+    if motif_pool == 'multi':
+        extractor_input_dim = hidden_size * 3
+    elif motif_pool == 'intra_att':
+        extractor_input_dim = hidden_size * 3 + 1
+    else:
+        extractor_input_dim = hidden_size
     extractor = ExtractorMLP(hidden_size, shared_config, input_dim=extractor_input_dim).to(device)
     lr, wd = method_config['lr'], method_config.get('weight_decay', 0)
-    
+
+    intra_motif_pool = None
+    if motif_pool == 'intra_att':
+        intra_motif_pool = IntraMotifAttentionPool(hidden_size).to(device)
+
     # Build parameter list for optimizer
     params_to_optimize = list(extractor.parameters()) + list(model.parameters())
+    if intra_motif_pool is not None:
+        params_to_optimize += list(intra_motif_pool.parameters())
     # if motif_clf is not None:
     #     params_to_optimize += list(motif_clf.parameters())
     
@@ -3230,7 +3303,7 @@ def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_nam
 
     print('====================================')
     print('[INFO] Training GSAT...')
-    gsat = GSAT(model, extractor, optimizer, scheduler, writer, device, log_dir, dataset_name, num_class, aux_info['multi_label'], random_state, method_config, shared_config, fold, task_type, datasets, masked_data_features, motif_clf=motif_clf, motif_list=motif_list)
+    gsat = GSAT(model, extractor, optimizer, scheduler, writer, device, log_dir, dataset_name, num_class, aux_info['multi_label'], random_state, method_config, shared_config, fold, task_type, datasets, masked_data_features, motif_clf=motif_clf, motif_list=motif_list, intra_motif_pool=intra_motif_pool)
 
     # Save model_config to seed_dir for post-hoc analysis (hidden_size, n_layers, etc.)
     model_config_save = {k: v for k, v in model_config.items()
@@ -3286,6 +3359,9 @@ def main():
     parser.add_argument('--motif_level_sampling', action='store_true', default=False,
                         help='For motif_method=readout: sample at motif level then broadcast to nodes. '
                              'Default (False): lift motif logits to nodes, sample per-node like base GSAT.')
+    parser.add_argument('--motif_pooling_method', type=str, default=None,
+                        choices=['mean', 'sum', 'multi', 'intra_att'],
+                        help='Pool node embeddings to motif rows for readout (overrides config if set).')
     parser.add_argument('--use_raw_score_loss', action='store_true', default=False,
                         help='Use sigmoid(logits) before sampling for info_loss and motif_consistency_loss.')
     parser.add_argument('--w_feat', action='store_true', default=False,
@@ -3372,6 +3448,9 @@ def main():
     elif 'motif_level_sampling' not in local_config['GSAT_config']:
         local_config['GSAT_config']['motif_level_sampling'] = False
 
+    if args.motif_pooling_method is not None:
+        local_config['GSAT_config']['motif_pooling_method'] = args.motif_pooling_method
+
     if 'use_raw_score_loss' not in local_config['GSAT_config']:
         local_config['GSAT_config']['use_raw_score_loss'] = args.use_raw_score_loss
 
@@ -3414,6 +3493,7 @@ def main():
     print(f'[INFO] Separate motif model: {local_config["GSAT_config"].get("separate_motif_model", False)}')
     print(f'[INFO] Motif-level info loss: {local_config["GSAT_config"].get("motif_level_info_loss", False)}')
     print(f'[INFO] Motif-level sampling: {local_config["GSAT_config"].get("motif_level_sampling", False)}')
+    print(f'[INFO] Motif pooling method: {local_config["GSAT_config"].get("motif_pooling_method", "mean")}')
     print(f'[INFO] Target k (graph-adaptive r): {local_config["GSAT_config"].get("target_k", None)}')
     print(f'[INFO] Motif scores path: {local_config["GSAT_config"].get("motif_scores_path", None)}')
 
@@ -3447,7 +3527,12 @@ def main():
         model = get_model(x_dim, edge_attr_dim, num_class, aux_info['multi_label'], model_config, device)
         _hs = model_config['hidden_size']
         _mp = local_config.get('GSAT_config', {}).get('motif_pooling_method', 'mean')
-        _ext_in = _hs * 3 if _mp == 'multi' else _hs
+        if _mp == 'multi':
+            _ext_in = _hs * 3
+        elif _mp == 'intra_att':
+            _ext_in = _hs * 3 + 1
+        else:
+            _ext_in = _hs
         extractor = ExtractorMLP(_hs, local_config['shared_config'], input_dim=_ext_in).to(device)
         
         # Create output file

@@ -22,6 +22,7 @@ EXPERIMENTS=(
   base_gsat_motif_loss
   motif_readout_decay_w_message
   motif_readout_decay_injection_ablation
+  base_gsat_readout_intra_att
 )
 
 MODELS=(GIN PNA GAT SAGE GCN)
