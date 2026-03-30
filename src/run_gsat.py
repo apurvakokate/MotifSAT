@@ -220,12 +220,14 @@ class IntraMotifAttentionPool(nn.Module):
 
 class MotifPriorNodeGateMLP(nn.Module):
     """
-    Node gate conditioned on local structure and motif context (readout + prior).
+    Local shift on top of motif-level extractor logits (readout + prior).
 
-    g_i = f_node([h_i || z~_{a(i)} || α_{a(i)}]),  α_i = σ(g_i) after GSAT sampling.
+    With motif_prior_residual_logit (default): node logit = ℓ_motif(i) + s · f_node([h_i || z~ || α])
+    with motif_prior_shift_scale s (default 0.1) so the motif extractor dominates.
 
-    z~_{a(i)} is the pooled motif embedding row for node i's motif instance; α_{a(i)} is the
-    motif-level score σ(extractor logit) used as a chemical prior; f_node restores per-node flexibility.
+    Legacy (motif_prior_gate_full_mlp): g_i = f_node([h_i || z~ || α]) only — motif scores enter only as MLP inputs.
+
+    z~_{a(i)} is the pooled motif embedding row for node i's motif instance; α_{a(i)} is σ(extractor logit).
     """
 
     def __init__(self, hidden_size, motif_dim, shared_config):
@@ -262,10 +264,18 @@ def sample_motif_readout_with_prior_node_gate(
     gate_module,
     detach_alpha,
     detach_z,
+    residual_motif_logit=True,
+    shift_scale=0.1,
 ):
     """
-    Motif extractor defines prior α_m; node gate MLP defines stochastic node attention.
-    Info loss applies to node gates (att is node-level).
+    Motif extractor produces per-motif logits ℓ_m; per-node attention uses GSAT sampling.
+
+    If residual_motif_logit (default): node_logit_i = ℓ_motif(node i) + shift_scale * shift_i, where
+    shift_i = gate MLP([h_i || z || α]). Smaller shift_scale keeps node attention closer to motif logits.
+
+    Else (legacy full MLP): node_logit_i = shift_i only (shift_scale ignored).
+
+    Info loss applies to sampled node attention (att is node-level).
     """
     motif_alpha = motif_att_log_logits.sigmoid()
     if detach_alpha:
@@ -274,10 +284,16 @@ def sample_motif_readout_with_prior_node_gate(
     if detach_z:
         z_node = z_node.detach()
     alpha_node = motif_alpha[inverse_indices]
-    gate_logit = gate_module(emb, z_node, alpha_node, batch)
-    node_att = sampling_fn(gate_logit, epoch, training)
+    shift_logit = gate_module(emb, z_node, alpha_node, batch)
+    if residual_motif_logit:
+        motif_logit_node = motif_att_log_logits[inverse_indices]
+        s = 0.1 if shift_scale is None else float(shift_scale)
+        node_logit = motif_logit_node + s * shift_logit
+    else:
+        node_logit = shift_logit
+    node_att = sampling_fn(node_logit, epoch, training)
     att = node_att
-    raw_att_for_loss = gate_logit.sigmoid() if use_raw_score_loss else None
+    raw_att_for_loss = node_logit.sigmoid() if use_raw_score_loss else None
     return node_att, att, raw_att_for_loss
 
 
@@ -1129,6 +1145,11 @@ class GSAT(nn.Module):
         self.motif_prior_node_gate = bool(method_config.get('motif_prior_node_gate', False))
         self.motif_prior_detach_alpha = bool(method_config.get('motif_prior_detach_alpha', False))
         self.motif_prior_detach_z = bool(method_config.get('motif_prior_detach_z', False))
+        # False = legacy path (gate MLP output is the full logit; motif scores only as MLP inputs).
+        self.motif_prior_residual_logit = not bool(method_config.get('motif_prior_gate_full_mlp', False))
+        self.motif_prior_shift_scale = float(method_config.get('motif_prior_shift_scale', 0.1))
+        if self.motif_prior_shift_scale < 0:
+            raise ValueError('motif_prior_shift_scale must be >= 0')
         self.motif_weight_diversity_coef = float(method_config.get('motif_weight_diversity_coef', 0.0))
         if self.motif_prior_node_gate:
             if self.motif_method != 'readout':
@@ -1191,8 +1212,9 @@ class GSAT(nn.Module):
         print(f'[INFO] Motif pooling method: {self.motif_pooling_method}')
         if self.motif_prior_node_gate:
             print(
-                f'[INFO] Motif prior node gate: ON (detach_alpha={self.motif_prior_detach_alpha}, '
-                f'detach_z={self.motif_prior_detach_z})'
+                f'[INFO] Motif prior node gate: ON (residual_logit={self.motif_prior_residual_logit}, '
+                f'shift_scale={self.motif_prior_shift_scale}, '
+                f'detach_alpha={self.motif_prior_detach_alpha}, detach_z={self.motif_prior_detach_z})'
             )
         if self.motif_weight_diversity_coef > 0:
             print(f'[INFO] Motif weight diversity loss coef: {self.motif_weight_diversity_coef}')
@@ -1574,6 +1596,8 @@ class GSAT(nn.Module):
                     self.motif_prior_node_gate_module,
                     self.motif_prior_detach_alpha,
                     self.motif_prior_detach_z,
+                    residual_motif_logit=self.motif_prior_residual_logit,
+                    shift_scale=self.motif_prior_shift_scale,
                 )
             else:
                 node_att, att, raw_att_for_loss = sample_motif_readout_branch(
@@ -1715,6 +1739,8 @@ class GSAT(nn.Module):
                     self.motif_prior_node_gate_module,
                     self.motif_prior_detach_alpha,
                     self.motif_prior_detach_z,
+                    residual_motif_logit=self.motif_prior_residual_logit,
+                    shift_scale=self.motif_prior_shift_scale,
                 )
             else:
                 node_att, _, _ = sample_motif_readout_branch(
@@ -3585,8 +3611,13 @@ def main():
                         choices=['mean', 'sum', 'multi', 'intra_att'],
                         help='Pool node embeddings to motif rows for readout (overrides config if set).')
     parser.add_argument('--motif_prior_node_gate', action='store_true', default=False,
-                        help='Readout: node gate g_i = f([h_i || z_m || α_m]) with motif prior α_m = σ(extractor); '
-                             'then α_i = σ(GSAT sampling(g_i)).')
+                        help='Readout: node logit = motif_logit + shift_scale * f([h||z||α]) (default shift_scale=0.1); '
+                             'then GSAT sampling. Use --motif_prior_gate_full_mlp for legacy gate-only logits.')
+    parser.add_argument('--motif_prior_gate_full_mlp', action='store_true', default=False,
+                        help='With motif_prior_node_gate: use legacy node_logit = f([h||z||α]) only (no additive motif logit).')
+    parser.add_argument('--motif_prior_shift_scale', type=float, default=None,
+                        help='Residual node_gate only: node_logit = motif_logit + scale * MLP (default 0.1 in GSAT_config; '
+                             '1.0 ≈ unscaled shift). Ignored for motif_prior_gate_full_mlp.')
     parser.add_argument('--motif_prior_detach_alpha', action='store_true', default=False,
                         help='With motif_prior_node_gate: detach α_m from gate input (no grad through prior).')
     parser.add_argument('--motif_prior_detach_z', action='store_true', default=False,
@@ -3685,10 +3716,14 @@ def main():
 
     if args.motif_prior_node_gate:
         local_config['GSAT_config']['motif_prior_node_gate'] = True
+    if args.motif_prior_gate_full_mlp:
+        local_config['GSAT_config']['motif_prior_gate_full_mlp'] = True
     if args.motif_prior_detach_alpha:
         local_config['GSAT_config']['motif_prior_detach_alpha'] = True
     if args.motif_prior_detach_z:
         local_config['GSAT_config']['motif_prior_detach_z'] = True
+    if args.motif_prior_shift_scale is not None:
+        local_config['GSAT_config']['motif_prior_shift_scale'] = args.motif_prior_shift_scale
 
     if args.motif_weight_diversity_coef is not None:
         local_config['GSAT_config']['motif_weight_diversity_coef'] = args.motif_weight_diversity_coef
