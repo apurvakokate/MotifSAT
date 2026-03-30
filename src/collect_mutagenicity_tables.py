@@ -355,11 +355,17 @@ def _extract_value_from_parts(parts, mode):
         return None
 
     elif mode == 'prior_gate_shift':
-        # tuning_...readout_prior_gate_s{scale} (variant_id from run_mutagenicity_gsat_experiment)
+        # tuning_...readout_prior_gate_s{scale} (shift sweep variant_id)
         for p in parts:
             m = re.search(r'readout_prior_gate_s([0-9.]+)', p)
             if m:
                 return _coerce_number(m.group(1))
+        # Pre-sweep runs: tuning_* ended with ..._readout_prior_gate (no _s{scale}); default was 0.1
+        for p in parts:
+            if re.search(r'readout_prior_gate(?:_|$)', p) and not re.search(
+                r'readout_prior_gate_s[0-9.]', p
+            ):
+                return 0.1
         return None
 
     return None
