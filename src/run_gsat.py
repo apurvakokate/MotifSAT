@@ -1292,6 +1292,9 @@ class GSAT(nn.Module):
                 'w_readout': self.w_readout,
                 'target_k': self.target_k,
                 'motif_scores_path': method_config.get('motif_scores_path', None),
+                'motif_prior_shift_scale': (
+                    float(self.motif_prior_shift_scale) if self.motif_prior_node_gate else None
+                ),
             },
             'loss_coefficients': {
                 'pred_loss_coef': self.pred_loss_coef,

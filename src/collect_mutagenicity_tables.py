@@ -239,9 +239,9 @@ EXPERIMENT_ROW_CONFIG = {
         'path_extract': 'final_r',
     },
     'motif_readout_prior_node_gate': {
-        'summary_path': ('weight_distribution_params', 'final_r'),
-        'row_label_prefix': 'final_r',
-        'path_extract': 'final_r',
+        'summary_path': ('motif_incorporation', 'motif_prior_shift_scale'),
+        'row_label_prefix': 'shift_scale',
+        'path_extract': 'prior_gate_shift',
     },
     'motif_readout_weight_diversity': {
         'summary_path': ('weight_distribution_params', 'final_r'),
@@ -352,6 +352,14 @@ def _extract_value_from_parts(parts, mode):
                 return 'node_samp'
             if 'motif_samp' in p:
                 return 'motif_samp'
+        return None
+
+    elif mode == 'prior_gate_shift':
+        # tuning_...readout_prior_gate_s{scale} (variant_id from run_mutagenicity_gsat_experiment)
+        for p in parts:
+            m = re.search(r'readout_prior_gate_s([0-9.]+)', p)
+            if m:
+                return _coerce_number(m.group(1))
         return None
 
     return None
