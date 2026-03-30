@@ -4,7 +4,7 @@ from pathlib import Path
 from torch_geometric.data import Batch, InMemoryDataset
 from torch_geometric.utils import degree
 from torch_geometric.loader import DataLoader
-from DataLoader import MolDataset, get_setup_files_with_folds
+from DataLoader import CHOSEN_THRESHOLD, MolDataset, get_setup_files_with_folds
 from ogb.graphproppred import PygGraphPropPredDataset
 from datasets import SynGraphDataset, Mutag, SPMotif, MNIST75sp, graph_sst2
 
@@ -76,18 +76,6 @@ DATASET_TYPE = {
                   'Alkane_Carbonyl':'BinaryClass',
                   'Fluoride_Carbonyl':'BinaryClass',
                 }
-
-CHOSEN_THRESHOLD = {'BRICS': 
-                    {'Mutagenicity':0.2,
-                     'hERG':0.5,
-                     'BBBP':0.6,
-                     'Benzene':0.5,
-                     'Alkane_Carbonyl':0.5,
-                     'Fluoride_Carbonyl':0.5,
-                     'esol':0.2,
-                     'Lipophilicity':0.5,
-                     'tox21':0.2}
-                   }
 
 def get_data_loaders(
     data_dir,

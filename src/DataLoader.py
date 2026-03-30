@@ -54,10 +54,36 @@ def load_required_files(base_path):
 
 
 # Subfolder under FOLDS/ and filename suffix for motif dictionary pickles.
-# Matches on-disk layouts under `path/FOLDS/<subdir>/..._{algorithm}_<suffix>`.
+# Matches on-disk layouts under `path/FOLDS/<subdir>/...`.
 DICTIONARY_FOLD_VARIANTS = {
     'nofilter': ('nofilter', '{algorithm}_nofilter'),
-    'minority_global': ('minority_global', '{algorithm}_minority_global'),
+    # minority_global: suffix is built with CHOSEN_THRESHOLD, e.g.
+    # Mutagenicity_BRICS_fold_0_BRICS0.2_minority_global_*.pickle
+    'minority_global': ('minority_global', None),
+}
+
+# Embedded in minority_global pickle stem: {algorithm}{threshold}_minority_global (per dataset and algo).
+CHOSEN_THRESHOLD = {
+    'RBRICS': {
+        'Mutagenicity': 0.2,
+        'hERG': 0.5,
+        'BBBP': 0.6,
+        'Benzene': 0.5,
+        'Alkane_Carbonyl': 0.5,
+        'Fluoride_Carbonyl': 0.5,
+        'esol': 0.2,
+        'Lipophilicity': 0.5,
+    },
+    'BRICS': {
+        'Mutagenicity': 0.2,
+        'hERG': 0.5,
+        'BBBP': 0.6,
+        'Benzene': 0.5,
+        'Alkane_Carbonyl': 0.5,
+        'Fluoride_Carbonyl': 0.5,
+        'esol': 0.2,
+        'Lipophilicity': 0.5,
+    },
 }
 
 
@@ -74,7 +100,8 @@ def get_setup_files_with_folds(
 
     dictionary_fold_variant:
       - 'nofilter' (default): .../FOLDS/nofilter/{ds}_{algo}_fold_{k}_{algo}_nofilter_*.pickle
-      - 'minority_global': .../FOLDS/minority_global/{ds}_{algo}_fold_{k}_{algo}_minority_global_*.pickle
+      - 'minority_global': .../FOLDS/minority_global/{ds}_{algo}_fold_{k}_{algo}{τ}_minority_global_*.pickle
+        (τ from CHOSEN_THRESHOLD[algorithm][dataset_name], e.g. BRICS0.2)
     """
     algorithm = 'RBRICS' if algorithm == 'None' else algorithm
     least_count_dict = {'1225':
@@ -118,8 +145,28 @@ def get_setup_files_with_folds(
             f"got {dictionary_fold_variant!r}"
         )
     subdir, suffix_tmpl = DICTIONARY_FOLD_VARIANTS[dictionary_fold_variant]
-    suffix = suffix_tmpl.format(algorithm=algorithm)
-    base_path = f'{path}/FOLDS/{subdir}/{dataset_name}_{algorithm}_fold_{fold}_{suffix}'
+
+    if dictionary_fold_variant == 'minority_global':
+        thr_map = CHOSEN_THRESHOLD.get(algorithm)
+        if thr_map is None:
+            raise ValueError(
+                f"minority_global requires CHOSEN_THRESHOLD[{algorithm!r}] "
+                f"(have: {list(CHOSEN_THRESHOLD.keys())})"
+            )
+        thr = thr_map.get(dataset_name)
+        if thr is None:
+            raise ValueError(
+                f"minority_global requires CHOSEN_THRESHOLD[{algorithm!r}][{dataset_name!r}]"
+            )
+        algo_thr_tag = f'{algorithm}{thr:g}'
+        base_path = (
+            f'{path}/FOLDS/{subdir}/{dataset_name}_{algorithm}_fold_{fold}_'
+            f'{algo_thr_tag}_minority_global'
+        )
+    else:
+        suffix = suffix_tmpl.format(algorithm=algorithm)
+        base_path = f'{path}/FOLDS/{subdir}/{dataset_name}_{algorithm}_fold_{fold}_{suffix}'
+
     print(f'[INFO] Motif dictionary base_path ({dictionary_fold_variant}): {base_path}')
 
     return load_required_files(base_path)
@@ -250,7 +297,7 @@ class MolDataset(InMemoryDataset):
         self.data, self.slices = torch.load(self.processed_paths[0], weights_only=False)
     @property
     def num_classes(self):
-        return self.num_classes_ if hasattr(self, "num_classes_") else elf.num_classes
+        return self.num_classes_ if hasattr(self, "num_classes_") else super().num_classes
 
     @property
     def processed_file_names(self):
