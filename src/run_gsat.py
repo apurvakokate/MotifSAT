@@ -2197,7 +2197,24 @@ class GSAT(nn.Module):
                                     motif_emb, motif_batch, inv_idx, _ = self._motif_level_pool(
                                         emb, n2m, batch)
                                     motif_logits = self.extractor(motif_emb, None, motif_batch)
-                                    if self.motif_level_sampling:
+                                    if self.motif_prior_node_gate:
+                                        att, _, _ = sample_motif_readout_with_prior_node_gate(
+                                            self.sampling,
+                                            motif_logits,
+                                            motif_emb,
+                                            emb,
+                                            inv_idx,
+                                            batch,
+                                            epoch,
+                                            False,
+                                            self.use_raw_score_loss,
+                                            self.motif_prior_node_gate_module,
+                                            self.motif_prior_detach_alpha,
+                                            self.motif_prior_detach_z,
+                                            residual_motif_logit=self.motif_prior_residual_logit,
+                                            shift_scale=self.motif_prior_shift_scale,
+                                        )
+                                    elif self.motif_level_sampling:
                                         motif_att = self.sampling(motif_logits, epoch, training=False)
                                         att = lift_motif_att_to_node_att(motif_att, inv_idx)
                                     else:
