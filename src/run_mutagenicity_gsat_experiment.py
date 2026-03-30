@@ -29,16 +29,19 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import torch
-from experiment_configs import get_base_config, ARCHITECTURES, PAPER_DATASETS
+from experiment_configs import get_base_config, ARCHITECTURES, PAPER_DATASETS, MOL_REGRESSION_DATASETS
 from utils import set_seed
 
 SUPPORTED_DATASETS = list(dict.fromkeys([
     'Mutagenicity', 'BBBP', 'hERG', 'Benzene',
-    'Alkane_Carbonyl', 'Fluoride_Carbonyl',
+    'Alkane_Carbonyl', 'Fluoride_Carbonyl', 'esol', 'Lipophilicity',
     'ogbg_molhiv',
     'ogbg_molbace', 'ogbg_molbbbp', 'ogbg_molclintox', 'ogbg_moltox21', 'ogbg_molsider',
 ] + list(PAPER_DATASETS)))
-DATASETS_WITH_MOTIFS = ['Mutagenicity', 'BBBP', 'hERG', 'Benzene', 'Alkane_Carbonyl', 'Fluoride_Carbonyl']
+DATASETS_WITH_MOTIFS = [
+    'Mutagenicity', 'BBBP', 'hERG', 'Benzene',
+    'Alkane_Carbonyl', 'Fluoride_Carbonyl', 'esol', 'Lipophilicity',
+]
 DATASET = 'Mutagenicity'
 MOTIF_SCORES_TEMPLATE = '/nfs/stak/users/kokatea/hpc-share/ChemIntuit/MOSE-GNN/All0.5_learn_unk+motif_scores/{dataset}_{model}_motif_scores.csv'
 
@@ -330,17 +333,19 @@ def run_one(model_name, fold, variant, experiment_name, seed, cuda_id, data_dir,
 
     set_seed(seed)
 
+    task_type = 'regression' if dataset_name in MOL_REGRESSION_DATASETS else 'classification'
+
     if variant.get('vanilla_clean', False):
         from run_gsat import train_vanilla_gnn_one_seed
         hparam_dict, metric_dict = train_vanilla_gnn_one_seed(
             config, data_dir, log_dir, model_name, dataset_name,
-            device, seed, fold=fold, task_type='classification'
+            device, seed, fold=fold, task_type=task_type
         )
     else:
         from run_gsat import train_gsat_one_seed
         hparam_dict, metric_dict = train_gsat_one_seed(
             config, data_dir, log_dir, model_name, dataset_name,
-            'GSAT', device, seed, fold=fold, task_type='classification'
+            'GSAT', device, seed, fold=fold, task_type=task_type
         )
     return metric_dict
 

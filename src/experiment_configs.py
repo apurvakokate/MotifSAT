@@ -28,6 +28,9 @@ PAPER_DATASETS = [
 # Molecular datasets using MolDataset + folds (Mutagenicity, BBBP, hERG, etc.)
 MOL_DATASETS_WITH_FOLDS = ['Mutagenicity', 'BBBP', 'hERG', 'Benzene', 'Alkane_Carbonyl', 'Fluoride_Carbonyl', 'esol', 'Lipophilicity']
 
+# MolDataset regression targets (run_mutagenicity_gsat_experiment passes task_type='regression')
+MOL_REGRESSION_DATASETS = frozenset({'esol', 'Lipophilicity'})
+
 # Architectures
 ARCHITECTURES = ['GIN', 'PNA', 'GAT', 'SAGE', 'GCN']
 

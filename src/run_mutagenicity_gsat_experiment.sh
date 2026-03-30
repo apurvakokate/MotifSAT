@@ -91,6 +91,8 @@ DATASETS_TWO_FOLDS=(
   Benzene
   Alkane_Carbonyl
   Fluoride_Carbonyl
+  esol
+  Lipophilicity
 )
 
 _dataset_uses_two_folds() {
