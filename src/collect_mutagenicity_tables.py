@@ -243,6 +243,11 @@ EXPERIMENT_ROW_CONFIG = {
         'row_label_prefix': 'shift_scale',
         'path_extract': 'prior_gate_shift',
     },
+    'motif_readout_prior_node_gate_tanh_sched': {
+        'summary_path': ('motif_incorporation', 'motif_prior_shift_scale'),
+        'row_label_prefix': 'shift_scale',
+        'path_extract': 'prior_gate_shift',
+    },
     'motif_readout_weight_diversity': {
         'summary_path': ('weight_distribution_params', 'final_r'),
         'row_label_prefix': 'final_r',
@@ -355,9 +360,11 @@ def _extract_value_from_parts(parts, mode):
         return None
 
     elif mode == 'prior_gate_shift':
-        # tuning_...readout_prior_gate_s{scale} (shift sweep variant_id)
+        # tuning_...readout_prior_gate_s{scale} or ...prior_tanhsched_s{scale}
         for p in parts:
-            m = re.search(r'readout_prior_gate_s([0-9.]+)', p)
+            m = re.search(r'readout_prior_gate_s([0-9.]+)', p) or re.search(
+                r'prior_tanhsched_s([0-9.]+)', p
+            )
             if m:
                 return _coerce_number(m.group(1))
         # Pre-sweep runs: tuning_* ended with ..._readout_prior_gate (no _s{scale}); default was 0.1

@@ -12,6 +12,7 @@ Active groups (EXPERIMENT_GROUPS):
   motif_readout_decay_injection_ablation — decay, final_r=0.8, node-level sampling; injection ablation (100..011)
   base_gsat_readout_intra_att — decay, final_r=0.8, w_message only; readout with intra-motif attention pooling only
   motif_readout_prior_node_gate — readout prior-gate; shift_scale sweep {0, 0.1, 0.5, 1.0} (see variant_id *_s*)
+  motif_readout_prior_node_gate_tanh_sched — tanh-bounded gate shift + warmup_linear s schedule; same s sweep
   motif_readout_weight_diversity — readout + motif_weight_diversity_coef (penalize identical motif scores within a graph)
   base_gsat_decay_r_minority_global — same as base_gsat_decay_r but motif pickles from FOLDS/minority_global/...
 
@@ -268,6 +269,35 @@ EXPERIMENT_GROUPS = {
             for shift_scale in (0.0, 0.1, 0.5, 1.0)
         ],
     },
+    # Bounded shift (tanh) + s(epoch): 0 until warmup, linear ramp to shift_scale, then hold (see run_gsat.effective_motif_prior_shift_scale).
+    'motif_readout_prior_node_gate_tanh_sched': {
+        'experiment_name': 'motif_readout_prior_node_gate_tanh_sched',
+        'variants': [
+            {
+                'variant_id': f'decay_f0.8_w010_prior_tanhsched_s{shift_scale:g}',
+                'gsat_overrides': {
+                    'tuning_id': f'decay_f0.8_w010_prior_tanhsched_s{shift_scale:g}',
+                    **_DECAY_R_BASE,
+                    'final_r': 0.8,
+                    'motif_incorporation_method': 'readout',
+                    'motif_pooling_method': 'mean',
+                    'motif_prior_node_gate': True,
+                    'motif_prior_gate_tanh': True,
+                    'motif_prior_shift_schedule': 'warmup_linear',
+                    'motif_prior_shift_warmup_epochs': 25,
+                    'motif_prior_shift_ramp_epochs': 45,
+                    'motif_prior_shift_scale': shift_scale,
+                    'motif_loss_coef': 0,
+                    'between_motif_coef': 0,
+                    'pred_loss_coef': 1.0,
+                    'info_loss_coef': 1.0,
+                    **INJECTION_PRESETS['010'],
+                },
+                'learn_edge_att': False,
+            }
+            for shift_scale in (0.0, 0.1, 0.5, 1.0)
+        ],
+    },
     'motif_readout_weight_diversity': {
         'experiment_name': 'motif_readout_weight_diversity',
         'variants': [
@@ -383,6 +413,7 @@ def main():
         'motif_readout_decay_w_message',
         'motif_readout_decay_injection_ablation',
         'motif_readout_prior_node_gate',
+        'motif_readout_prior_node_gate_tanh_sched',
         'motif_readout_weight_diversity',
     }
     if dataset_name not in DATASETS_WITH_MOTIFS:

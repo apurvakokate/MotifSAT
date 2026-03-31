@@ -49,6 +49,7 @@ EXPERIMENTS=(
   motif_readout_decay_injection_ablation
   base_gsat_readout_intra_att
   motif_readout_prior_node_gate
+  motif_readout_prior_node_gate_tanh_sched
   motif_readout_weight_diversity
 )
 

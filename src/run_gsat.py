@@ -251,6 +251,31 @@ class MotifPriorNodeGateMLP(nn.Module):
         return self.mlp(x, batch)
 
 
+def effective_motif_prior_shift_scale(epoch, target_scale, schedule, warmup_epochs, ramp_epochs):
+    """
+    Piecewise schedule for motif prior residual strength (target_scale = max s after ramp).
+
+    'constant': always target_scale.
+    'warmup_linear': s=0 for epoch < warmup_epochs, then linear ramp over ramp_epochs to target_scale.
+    """
+    schedule = (schedule or 'constant').lower()
+    target = float(target_scale)
+    if schedule == 'constant':
+        return target
+    if schedule != 'warmup_linear':
+        raise ValueError(f"Unknown motif_prior_shift_schedule: {schedule!r} (use 'constant' or 'warmup_linear')")
+    e = int(epoch)
+    w = int(warmup_epochs)
+    r = int(ramp_epochs)
+    if e < w:
+        return 0.0
+    if r <= 0:
+        return target
+    if e < w + r:
+        return target * float(e - w) / float(r)
+    return target
+
+
 def sample_motif_readout_with_prior_node_gate(
     sampling_fn,
     motif_att_log_logits,
@@ -266,14 +291,15 @@ def sample_motif_readout_with_prior_node_gate(
     detach_z,
     residual_motif_logit=True,
     shift_scale=0.1,
+    gate_tanh=False,
 ):
     """
     Motif extractor produces per-motif logits ℓ_m; per-node attention uses GSAT sampling.
 
-    If residual_motif_logit (default): node_logit_i = ℓ_motif(node i) + shift_scale * shift_i, where
-    shift_i = gate MLP([h_i || z || α]). Smaller shift_scale keeps node attention closer to motif logits.
+    If residual_motif_logit (default): node_logit_i = ℓ_motif(i) + s * Δ_i with
+    Δ_i = tanh(f([h,z,α])) if gate_tanh else f(...) (bounded shift in (-s, s) per dimension when tanh).
 
-    Else (legacy full MLP): node_logit_i = shift_i only (shift_scale ignored).
+    Else (legacy full MLP): node_logit_i = shift_i only (shift_scale and gate_tanh ignored).
 
     Info loss applies to sampled node attention (att is node-level).
     """
@@ -286,9 +312,10 @@ def sample_motif_readout_with_prior_node_gate(
     alpha_node = motif_alpha[inverse_indices]
     shift_logit = gate_module(emb, z_node, alpha_node, batch)
     if residual_motif_logit:
+        delta = torch.tanh(shift_logit) if gate_tanh else shift_logit
         motif_logit_node = motif_att_log_logits[inverse_indices]
         s = 0.1 if shift_scale is None else float(shift_scale)
-        node_logit = motif_logit_node + s * shift_logit
+        node_logit = motif_logit_node + s * delta
     else:
         node_logit = shift_logit
     node_att = sampling_fn(node_logit, epoch, training)
@@ -1150,6 +1177,24 @@ class GSAT(nn.Module):
         self.motif_prior_shift_scale = float(method_config.get('motif_prior_shift_scale', 0.1))
         if self.motif_prior_shift_scale < 0:
             raise ValueError('motif_prior_shift_scale must be >= 0')
+        self.motif_prior_shift_schedule = str(
+            method_config.get('motif_prior_shift_schedule', 'constant')
+        ).lower()
+        self.motif_prior_shift_warmup_epochs = int(
+            method_config.get('motif_prior_shift_warmup_epochs', 0)
+        )
+        self.motif_prior_shift_ramp_epochs = int(
+            method_config.get('motif_prior_shift_ramp_epochs', 0)
+        )
+        self.motif_prior_gate_tanh = bool(method_config.get('motif_prior_gate_tanh', False))
+        if self.motif_prior_node_gate and self.motif_prior_shift_schedule not in (
+            'constant',
+            'warmup_linear',
+        ):
+            raise ValueError(
+                "motif_prior_shift_schedule must be 'constant' or 'warmup_linear', "
+                f"got {self.motif_prior_shift_schedule!r}"
+            )
         self.motif_weight_diversity_coef = float(method_config.get('motif_weight_diversity_coef', 0.0))
         if self.motif_prior_node_gate:
             if self.motif_method != 'readout':
@@ -1213,7 +1258,9 @@ class GSAT(nn.Module):
         if self.motif_prior_node_gate:
             print(
                 f'[INFO] Motif prior node gate: ON (residual_logit={self.motif_prior_residual_logit}, '
-                f'shift_scale={self.motif_prior_shift_scale}, '
+                f'shift_target={self.motif_prior_shift_scale}, schedule={self.motif_prior_shift_schedule}, '
+                f'warmup_epochs={self.motif_prior_shift_warmup_epochs}, '
+                f'ramp_epochs={self.motif_prior_shift_ramp_epochs}, gate_tanh={self.motif_prior_gate_tanh}, '
                 f'detach_alpha={self.motif_prior_detach_alpha}, detach_z={self.motif_prior_detach_z})'
             )
         if self.motif_weight_diversity_coef > 0:
@@ -1294,6 +1341,18 @@ class GSAT(nn.Module):
                 'motif_scores_path': method_config.get('motif_scores_path', None),
                 'motif_prior_shift_scale': (
                     float(self.motif_prior_shift_scale) if self.motif_prior_node_gate else None
+                ),
+                'motif_prior_shift_schedule': (
+                    self.motif_prior_shift_schedule if self.motif_prior_node_gate else None
+                ),
+                'motif_prior_shift_warmup_epochs': (
+                    self.motif_prior_shift_warmup_epochs if self.motif_prior_node_gate else None
+                ),
+                'motif_prior_shift_ramp_epochs': (
+                    self.motif_prior_shift_ramp_epochs if self.motif_prior_node_gate else None
+                ),
+                'motif_prior_gate_tanh': (
+                    bool(self.motif_prior_gate_tanh) if self.motif_prior_node_gate else None
                 ),
             },
             'loss_coefficients': {
@@ -1499,6 +1558,18 @@ class GSAT(nn.Module):
         
         return loss, loss_dict
 
+    def _effective_motif_prior_shift_scale(self, epoch):
+        """Scheduled s(epoch) capped at motif_prior_shift_scale (target)."""
+        if not self.motif_prior_node_gate:
+            return float(self.motif_prior_shift_scale)
+        return effective_motif_prior_shift_scale(
+            epoch,
+            self.motif_prior_shift_scale,
+            self.motif_prior_shift_schedule,
+            self.motif_prior_shift_warmup_epochs,
+            self.motif_prior_shift_ramp_epochs,
+        )
+
     def forward_pass(self, data, epoch, training):
         """
         Forward pass through GSAT with different motif incorporation methods.
@@ -1600,7 +1671,8 @@ class GSAT(nn.Module):
                     self.motif_prior_detach_alpha,
                     self.motif_prior_detach_z,
                     residual_motif_logit=self.motif_prior_residual_logit,
-                    shift_scale=self.motif_prior_shift_scale,
+                    shift_scale=self._effective_motif_prior_shift_scale(epoch),
+                    gate_tanh=self.motif_prior_gate_tanh,
                 )
             else:
                 node_att, att, raw_att_for_loss = sample_motif_readout_branch(
@@ -1743,7 +1815,8 @@ class GSAT(nn.Module):
                     self.motif_prior_detach_alpha,
                     self.motif_prior_detach_z,
                     residual_motif_logit=self.motif_prior_residual_logit,
-                    shift_scale=self.motif_prior_shift_scale,
+                    shift_scale=self._effective_motif_prior_shift_scale(epoch),
+                    gate_tanh=self.motif_prior_gate_tanh,
                 )
             else:
                 node_att, _, _ = sample_motif_readout_branch(
@@ -2212,7 +2285,8 @@ class GSAT(nn.Module):
                                             self.motif_prior_detach_alpha,
                                             self.motif_prior_detach_z,
                                             residual_motif_logit=self.motif_prior_residual_logit,
-                                            shift_scale=self.motif_prior_shift_scale,
+                                            shift_scale=self._effective_motif_prior_shift_scale(epoch),
+                                            gate_tanh=self.motif_prior_gate_tanh,
                                         )
                                     elif self.motif_level_sampling:
                                         motif_att = self.sampling(motif_logits, epoch, training=False)
@@ -3638,6 +3712,15 @@ def main():
     parser.add_argument('--motif_prior_shift_scale', type=float, default=None,
                         help='Residual node_gate only: node_logit = motif_logit + scale * MLP (default 0.1 in GSAT_config; '
                              '1.0 ≈ unscaled shift). Ignored for motif_prior_gate_full_mlp.')
+    parser.add_argument('--motif_prior_gate_tanh', action='store_true', default=False,
+                        help='Residual prior gate: node_logit = motif_logit + s*tanh(MLP out) (bounded shift).')
+    parser.add_argument('--motif_prior_shift_schedule', type=str, default=None,
+                        choices=['constant', 'warmup_linear'],
+                        help='Effective s(epoch): warmup_linear ramps s after warmup (see *_warmup_epochs, *_ramp_epochs).')
+    parser.add_argument('--motif_prior_shift_warmup_epochs', type=int, default=None,
+                        help='warmup_linear: epochs with s=0 at start of training.')
+    parser.add_argument('--motif_prior_shift_ramp_epochs', type=int, default=None,
+                        help='warmup_linear: linear ramp length after warmup (0 = jump to target s).')
     parser.add_argument('--motif_prior_detach_alpha', action='store_true', default=False,
                         help='With motif_prior_node_gate: detach α_m from gate input (no grad through prior).')
     parser.add_argument('--motif_prior_detach_z', action='store_true', default=False,
@@ -3744,6 +3827,14 @@ def main():
         local_config['GSAT_config']['motif_prior_detach_z'] = True
     if args.motif_prior_shift_scale is not None:
         local_config['GSAT_config']['motif_prior_shift_scale'] = args.motif_prior_shift_scale
+    if args.motif_prior_gate_tanh:
+        local_config['GSAT_config']['motif_prior_gate_tanh'] = True
+    if args.motif_prior_shift_schedule is not None:
+        local_config['GSAT_config']['motif_prior_shift_schedule'] = args.motif_prior_shift_schedule
+    if args.motif_prior_shift_warmup_epochs is not None:
+        local_config['GSAT_config']['motif_prior_shift_warmup_epochs'] = args.motif_prior_shift_warmup_epochs
+    if args.motif_prior_shift_ramp_epochs is not None:
+        local_config['GSAT_config']['motif_prior_shift_ramp_epochs'] = args.motif_prior_shift_ramp_epochs
 
     if args.motif_weight_diversity_coef is not None:
         local_config['GSAT_config']['motif_weight_diversity_coef'] = args.motif_weight_diversity_coef
