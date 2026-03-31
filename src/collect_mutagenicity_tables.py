@@ -663,6 +663,28 @@ def compute_posthoc_correlation(seed_dir: Path, split: str = 'test'):
     return float(r), float(p), len(common)
 
 
+def compute_node_score_impact_correlation(seed_dir: Path, split: str = 'test'):
+    """
+    Pearson r between per-node attention score and |Δ sigmoid(pred)| from individual-node masking.
+    Matches analyze_motif_consistency.plot_score_vs_impact individual-node branch.
+    """
+    path = seed_dir / 'Individual_node_node_masking_impact.jsonl'
+    if not path.exists():
+        path = seed_dir / 'masked-node-impact.jsonl'
+    if not path.exists():
+        return np.nan, np.nan, 0
+    xs, ys = [], []
+    for rec in _read_jsonl(path):
+        if rec.get('split') != split:
+            continue
+        xs.append(float(rec['score']))
+        ys.append(abs(_sigmoid(rec['new_prediction']) - _sigmoid(rec['old_prediction'])))
+    if len(xs) < 3:
+        return np.nan, np.nan, len(xs)
+    r, p = pearsonr(xs, ys)
+    return float(r), float(p), len(xs)
+
+
 def build_posthoc_table(records, split='test'):
     rows = []
     for rec in records:
