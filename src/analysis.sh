@@ -92,7 +92,8 @@ for EXP in "${EXPERIMENTS[@]}"; do
 done
 
 # ─── 3. Best balanced (pred + score–impact) tables and plots ───
-# Picks best run per (experiment × model) via composite on valid ROC + valid correlations.
+# Picks best hyperparam row per (experiment × model) via global max composite (valid ROC + correlations).
+# Table cells: mean ± sample std across folds (per fold: best seed for that row). One fold → mean only.
 # Tables: ${BEST_RESULTS_DIR}/{train,validation,test}/model_prediction_performance.csv and explainer_score_impact_correlation.csv
 # Plots: rendered under ${BEST_RESULTS_DIR}/${DATASET}/<experiment>/model_<ARCH>/{test,valid}_plots/<split>/
 # from jsonl in each best seed_dir (training exports only; does not use OUTPUT_BASE).

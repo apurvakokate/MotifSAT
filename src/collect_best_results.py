@@ -7,6 +7,10 @@ and write summary CSVs under ../best_results/.
 Selection uses valid split: composite = w_pred * roc_valid + w_m * r_motif + w_n * r_node
 (nan correlations treated as 0). Default w_pred=0.6, w_m=0.2, w_n=0.2.
 
+Table cells: after picking the winning hyperparam row (same composite criterion), values are
+mean ± std (sample std, ddof=1) across folds — per fold, the best seed for that row by the same
+composite. Single-fold rows show the mean only.
+
 Requires: tuning_results with final_metrics.json and masking/attention jsonl under each seed_dir
 (same artifacts training already writes for post-hoc analysis; no separate motif_consistency pass).
 """
@@ -90,6 +94,18 @@ def _format_float(x) -> str:
         return ''
 
 
+def _format_mean_std(values: list[float]) -> str:
+    """Mean ± sample std; one value → mean only."""
+    arr = np.asarray([float(v) for v in values if v is not None and np.isfinite(v)], dtype=float)
+    if arr.size == 0:
+        return ''
+    mean = float(np.mean(arr))
+    if arr.size < 2:
+        return f'{mean:.4f}'
+    std = float(np.std(arr, ddof=1))
+    return f'{mean:.4f} ± {std:.4f}'
+
+
 def _composite(
     roc_valid: float,
     r_motif: float,
@@ -131,6 +147,39 @@ def _best_run_for_model(
     return best, best_c
 
 
+def _per_fold_best_for_row(
+    records: list,
+    model: str,
+    chosen_row: str,
+    w_pred: float,
+    w_m: float,
+    w_n: float,
+) -> list[dict]:
+    """One record per fold: best composite among runs matching model and hyperparam row."""
+    filtered = [r for r in records if r['model'] == model and r['row'] == chosen_row]
+    by_fold: dict = {}
+    for r in filtered:
+        f = r['fold']
+        by_fold.setdefault(f, []).append(r)
+    out = []
+    for fold in sorted(by_fold.keys()):
+        best = None
+        best_c = -1e18
+        for r in by_fold[fold]:
+            m = r['metrics']
+            rv = m.get('metric/best_clf_roc_valid', np.nan)
+            sd = r['seed_dir']
+            rm, _, _ = compute_posthoc_correlation(sd, 'valid')
+            rn, _, _ = compute_node_score_impact_correlation(sd, 'valid')
+            c = _composite(rv, rm, rn, w_pred, w_m, w_n)
+            if c > best_c:
+                best_c = c
+                best = r
+        if best is not None:
+            out.append(best)
+    return out
+
+
 def run(
     results_dir: Path,
     dataset: str,
@@ -149,7 +198,10 @@ def run(
         'w_motif_corr': w_m,
         'w_node_corr': w_n,
         'selection_split': 'valid',
-        'note': 'Best run per (experiment, model) maximizes composite using valid ROC and valid score–impact correlations.',
+        'note': (
+            'Best hyperparam row per (experiment, model) via global max composite (valid ROC + correlations). '
+            'Table numbers: mean ± std across folds; per fold, best seed for that row (same composite).'
+        ),
     }
     with open(best_results_dir / dataset / 'selection_weights.json', 'w') as f:
         json.dump(meta, f, indent=2)
@@ -202,27 +254,56 @@ def run(
                 ex_te[f'{model}_node_r'] = ''
                 continue
 
-            m = br['metrics']
+            chosen_row = br.get('row', '')
+            per_fold = _per_fold_best_for_row(records, model, chosen_row, w_pred, w_m, w_n)
+
+            roc_tr = []
+            roc_va = []
+            roc_te = []
+            motif_tr, motif_va, motif_te = [], [], []
+            node_tr, node_va, node_te = [], [], []
+            for pr in per_fold:
+                pm = pr['metrics']
+                psd: Path = pr['seed_dir']
+                v = pm.get('metric/best_clf_roc_train')
+                if v is not None and np.isfinite(v):
+                    roc_tr.append(float(v))
+                v = pm.get('metric/best_clf_roc_valid')
+                if v is not None and np.isfinite(v):
+                    roc_va.append(float(v))
+                v = pm.get('metric/best_clf_roc_test')
+                if v is not None and np.isfinite(v):
+                    roc_te.append(float(v))
+                rmt, _, _ = compute_posthoc_correlation(psd, 'train')
+                rmv, _, _ = compute_posthoc_correlation(psd, 'valid')
+                rme, _, _ = compute_posthoc_correlation(psd, 'test')
+                if np.isfinite(rmt):
+                    motif_tr.append(float(rmt))
+                if np.isfinite(rmv):
+                    motif_va.append(float(rmv))
+                if np.isfinite(rme):
+                    motif_te.append(float(rme))
+                rnt, _, _ = compute_node_score_impact_correlation(psd, 'train')
+                rnv, _, _ = compute_node_score_impact_correlation(psd, 'valid')
+                rne, _, _ = compute_node_score_impact_correlation(psd, 'test')
+                if np.isfinite(rnt):
+                    node_tr.append(float(rnt))
+                if np.isfinite(rnv):
+                    node_va.append(float(rnv))
+                if np.isfinite(rne):
+                    node_te.append(float(rne))
+
+            perf_tr[model] = _format_mean_std(roc_tr)
+            perf_va[model] = _format_mean_std(roc_va)
+            perf_te[model] = _format_mean_std(roc_te)
+            ex_tr[f'{model}_motif_r'] = _format_mean_std(motif_tr)
+            ex_tr[f'{model}_node_r'] = _format_mean_std(node_tr)
+            ex_va[f'{model}_motif_r'] = _format_mean_std(motif_va)
+            ex_va[f'{model}_node_r'] = _format_mean_std(node_va)
+            ex_te[f'{model}_motif_r'] = _format_mean_std(motif_te)
+            ex_te[f'{model}_node_r'] = _format_mean_std(node_te)
+
             sd: Path = br['seed_dir']
-
-            perf_tr[model] = _format_float(m.get('metric/best_clf_roc_train'))
-            perf_va[model] = _format_float(m.get('metric/best_clf_roc_valid'))
-            perf_te[model] = _format_float(m.get('metric/best_clf_roc_test'))
-
-            rm_tr, _, _ = compute_posthoc_correlation(sd, 'train')
-            rm_va, _, _ = compute_posthoc_correlation(sd, 'valid')
-            rm_te, _, _ = compute_posthoc_correlation(sd, 'test')
-            rn_tr, _, _ = compute_node_score_impact_correlation(sd, 'train')
-            rn_va, _, _ = compute_node_score_impact_correlation(sd, 'valid')
-            rn_te, _, _ = compute_node_score_impact_correlation(sd, 'test')
-
-            ex_tr[f'{model}_motif_r'] = _format_float(rm_tr) if np.isfinite(rm_tr) else ''
-            ex_tr[f'{model}_node_r'] = _format_float(rn_tr) if np.isfinite(rn_tr) else ''
-            ex_va[f'{model}_motif_r'] = _format_float(rm_va) if np.isfinite(rm_va) else ''
-            ex_va[f'{model}_node_r'] = _format_float(rn_va) if np.isfinite(rn_va) else ''
-            ex_te[f'{model}_motif_r'] = _format_float(rm_te) if np.isfinite(rm_te) else ''
-            ex_te[f'{model}_node_r'] = _format_float(rn_te) if np.isfinite(rn_te) else ''
-
             hyperparam_rows.append({
                 'dataset': dataset,
                 'experiment': exp_key,
@@ -234,6 +315,8 @@ def run(
                 'best_seed': br.get('seed'),
                 'composite_valid': round(comp, 6),
                 'seed_dir': str(sd),
+                'n_folds_aggregated': len(per_fold),
+                'folds_aggregated': ','.join(str(pr['fold']) for pr in sorted(per_fold, key=lambda x: x['fold'])),
             })
 
             dst_m = exp_plot_dir / f'model_{model}'
