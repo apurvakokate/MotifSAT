@@ -7,9 +7,11 @@ and write summary CSVs under ../best_results/.
 Selection uses valid split: composite = w_pred * roc_valid + w_m * r_motif + w_n * r_node
 (nan correlations treated as 0). Default w_pred=0.6, w_m=0.2, w_n=0.2.
 
-Table cells: after picking the winning hyperparam row (same composite criterion), values are
-mean ± std (sample std, ddof=1) across folds — per fold, the best seed for that row by the same
-composite. Single-fold rows show the mean only.
+Table cells: mean ± std across folds after fixing a hyperparam row; per-fold seed tie-break is
+composite (default) or valid ROC only when SET_R / --set_r is set.
+
+Optional SET_R (e.g. 0.8): filter to that fix_r or final_r (from experiment_summary / metrics);
+anchor row = max valid ROC among survivors (ignores correlation weights).
 
 Requires: tuning_results with final_metrics.json and masking/attention jsonl under each seed_dir
 (same artifacts training already writes for post-hoc analysis; no separate motif_consistency pass).
@@ -29,6 +31,7 @@ import pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from collect_mutagenicity_tables import (
+    EXPERIMENT_ROW_CONFIG,
     compute_node_score_impact_correlation,
     compute_posthoc_correlation,
     find_results,
@@ -56,6 +59,58 @@ DEFAULT_EXPERIMENT_LABELS = {
 
 def experiment_label(key: str) -> str:
     return DEFAULT_EXPERIMENT_LABELS.get(key, key.replace('_', ' ').title())
+
+
+def _parse_set_r_env() -> float | None:
+    raw = os.environ.get('SET_R', '').strip()
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
+def _weight_distribution_params(record: dict) -> dict:
+    w = record.get('metrics', {}).get('weight_distribution_params')
+    if isinstance(w, dict) and any(v is not None for v in w.values()):
+        return w
+    path = record['seed_dir'] / 'experiment_summary.json'
+    if path.exists():
+        try:
+            with open(path) as f:
+                data = json.load(f)
+            w = data.get('weight_distribution_params')
+            if isinstance(w, dict):
+                return w
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {}
+
+
+def _record_matches_set_r(record: dict, exp_key: str, set_r: float) -> bool:
+    cfg = EXPERIMENT_ROW_CONFIG.get(exp_key) or {}
+    px = cfg.get('path_extract')
+    wdp = _weight_distribution_params(record)
+    fix_r, final_r = wdp.get('fix_r'), wdp.get('final_r')
+    try:
+        fix_r = float(fix_r) if fix_r is not None else None
+    except (TypeError, ValueError):
+        fix_r = None
+    try:
+        final_r = float(final_r) if final_r is not None else None
+    except (TypeError, ValueError):
+        final_r = None
+    tol = 1e-5
+    if px == 'fix_r':
+        return fix_r is not None and abs(fix_r - set_r) < tol
+    if px == 'final_r':
+        return final_r is not None and abs(final_r - set_r) < tol
+    if px == 'vanilla':
+        return True
+    if px in ('injection_code', 'readout_sampling_mode', 'prior_gate_shift'):
+        return final_r is not None and abs(final_r - set_r) < tol
+    return True
 
 
 def _render_score_impact_plots_for_split(
@@ -147,6 +202,25 @@ def _best_run_for_model(
     return best, best_c
 
 
+def _best_run_max_valid_roc(records: list, model: str) -> tuple[dict | None, float]:
+    """Anchor run: max valid ROC only (no correlation terms)."""
+    best = None
+    best_rv = -1.0
+    for r in records:
+        if r['model'] != model:
+            continue
+        rv = r['metrics'].get('metric/best_clf_roc_valid', np.nan)
+        if not np.isfinite(rv):
+            continue
+        rv = float(rv)
+        if rv > best_rv:
+            best_rv = rv
+            best = r
+    if best is None:
+        return None, -1.0
+    return best, best_rv
+
+
 def _per_fold_best_for_row(
     records: list,
     model: str,
@@ -154,8 +228,9 @@ def _per_fold_best_for_row(
     w_pred: float,
     w_m: float,
     w_n: float,
+    tie_break: str = 'composite',
 ) -> list[dict]:
-    """One record per fold: best composite among runs matching model and hyperparam row."""
+    """One record per fold among runs matching model and hyperparam row."""
     filtered = [r for r in records if r['model'] == model and r['row'] == chosen_row]
     by_fold: dict = {}
     for r in filtered:
@@ -169,9 +244,12 @@ def _per_fold_best_for_row(
             m = r['metrics']
             rv = m.get('metric/best_clf_roc_valid', np.nan)
             sd = r['seed_dir']
-            rm, _, _ = compute_posthoc_correlation(sd, 'valid')
-            rn, _, _ = compute_node_score_impact_correlation(sd, 'valid')
-            c = _composite(rv, rm, rn, w_pred, w_m, w_n)
+            if tie_break == 'valid_roc':
+                c = float(rv) if np.isfinite(rv) else -1e9
+            else:
+                rm, _, _ = compute_posthoc_correlation(sd, 'valid')
+                rn, _, _ = compute_node_score_impact_correlation(sd, 'valid')
+                c = _composite(rv, rm, rn, w_pred, w_m, w_n)
             if c > best_c:
                 best_c = c
                 best = r
@@ -189,18 +267,29 @@ def run(
     w_m: float,
     w_n: float,
     verbose: bool = False,
+    set_r: float | None = None,
 ):
     best_results_dir = best_results_dir.resolve()
     (best_results_dir / dataset).mkdir(parents=True, exist_ok=True)
+    fixed_r_mode = set_r is not None
     meta = {
         'dataset': dataset,
+        'set_r': set_r,
+        'selection_mode': 'fixed_r_max_valid_roc' if fixed_r_mode else 'composite_valid_correlations',
         'w_pred': w_pred,
         'w_motif_corr': w_m,
         'w_node_corr': w_n,
         'selection_split': 'valid',
         'note': (
-            'Best hyperparam row per (experiment, model) via global max composite (valid ROC + correlations). '
-            'Table numbers: mean ± std across folds; per fold, best seed for that row (same composite).'
+            (
+                f'Fixed r = {set_r}: keep runs matching fix_r/final_r; anchor + per-fold tie-break = max valid ROC. '
+                if fixed_r_mode
+                else (
+                    'Best hyperparam row per (experiment, model) via global max composite '
+                    '(valid ROC + correlations). Per-fold tie-break for same row uses that composite. '
+                )
+            )
+            + 'Table numbers: mean ± std across folds.'
         ),
     }
     with open(best_results_dir / dataset / 'selection_weights.json', 'w') as f:
@@ -227,6 +316,16 @@ def run(
                 print(f'[SKIP] No records for {exp_key}')
             continue
 
+        if fixed_r_mode:
+            before = len(records)
+            records = [r for r in records if _record_matches_set_r(r, exp_key, set_r)]
+            if verbose:
+                print(f'[INFO] {exp_key}: SET_R={set_r} kept {len(records)}/{before} runs')
+            if not records:
+                if verbose:
+                    print(f'[SKIP] No records left after SET_R filter for {exp_key}')
+                continue
+
         row_labels = {str(r.get('row', '')) for r in records}
         has_scan = len(row_labels) > 1
 
@@ -240,8 +339,12 @@ def run(
         ex_va = {'Dataset': dataset, 'Experiment': label, 'Hyperparam_scan': 'yes' if has_scan else ''}
         ex_te = {'Dataset': dataset, 'Experiment': label, 'Hyperparam_scan': 'yes' if has_scan else ''}
 
+        tie_break = 'valid_roc' if fixed_r_mode else 'composite'
         for model in MODEL_ORDER:
-            br, comp = _best_run_for_model(records, model, w_pred, w_m, w_n)
+            if fixed_r_mode:
+                br, comp = _best_run_max_valid_roc(records, model)
+            else:
+                br, comp = _best_run_for_model(records, model, w_pred, w_m, w_n)
             if br is None:
                 perf_tr[model] = ''
                 perf_va[model] = ''
@@ -255,7 +358,9 @@ def run(
                 continue
 
             chosen_row = br.get('row', '')
-            per_fold = _per_fold_best_for_row(records, model, chosen_row, w_pred, w_m, w_n)
+            per_fold = _per_fold_best_for_row(
+                records, model, chosen_row, w_pred, w_m, w_n, tie_break=tie_break
+            )
 
             roc_tr = []
             roc_va = []
@@ -380,8 +485,15 @@ def main():
     p.add_argument('--w_pred', type=float, default=0.6)
     p.add_argument('--w_motif_corr', type=float, default=0.2)
     p.add_argument('--w_node_corr', type=float, default=0.2)
+    p.add_argument(
+        '--set_r',
+        type=float,
+        default=None,
+        help='If set (or env SET_R), keep only runs with this fix_r or final_r; pick row by max valid ROC only.',
+    )
     p.add_argument('-v', '--verbose', action='store_true')
     args = p.parse_args()
+    set_r = args.set_r if args.set_r is not None else _parse_set_r_env()
 
     if args.experiments:
         experiments = list(args.experiments)
@@ -410,6 +522,7 @@ def main():
         w_m=args.w_motif_corr,
         w_n=args.w_node_corr,
         verbose=args.verbose,
+        set_r=set_r,
     )
 
 
