@@ -1,20 +1,17 @@
 #!/usr/bin/env python
 """
-Pick best (experiment × model) runs balancing valid ROC and score–impact correlations,
-render score-vs-impact plots into best_results (via analyze_motif_consistency.plot_score_vs_impact),
-and write summary CSVs under ../best_results/.
+Pick best (experiment × model) runs, render score-vs-impact plots, write best_results CSVs.
 
-Selection uses valid split: composite = w_pred * roc_valid + w_m * r_motif + w_n * r_node
-(nan correlations treated as 0). Default w_pred=0.6, w_m=0.2, w_n=0.2.
+Selection (valid split): --selection-by composite | motif_corr_valid (see analysis.sh SELECTION_BY).
+  composite: w_pred*roc + w_m*r_motif + w_n*r_node on valid
+  motif_corr_valid: max motif-level explainer r only (tie-break valid ROC)
 
-Table cells: mean ± std across folds after fixing a hyperparam row; per-fold seed tie-break is
-composite (default) or valid ROC only when SET_R / --set_r is set.
+Table cells: mean ± std across folds; per-fold seed tie-break matches anchor rule.
 
-Optional SET_R (e.g. 0.8): filter to that fix_r or final_r (from experiment_summary / metrics);
-anchor row = max valid ROC among survivors (ignores correlation weights).
+Optional SET_R: filter to that fix_r/final_r; with composite uses max valid ROC anchor; with
+motif_corr_valid uses max motif-r anchor.
 
-Requires: tuning_results with final_metrics.json and masking/attention jsonl under each seed_dir
-(same artifacts training already writes for post-hoc analysis; no separate motif_consistency pass).
+Requires: final_metrics.json + post-hoc jsonl under each seed_dir.
 """
 
 from __future__ import annotations
@@ -221,6 +218,27 @@ def _best_run_max_valid_roc(records: list, model: str) -> tuple[dict | None, flo
     return best, best_rv
 
 
+def _best_run_motif_corr_valid(records: list, model: str) -> tuple[dict | None, float]:
+    """Anchor run: max motif-level score–impact Pearson r on valid; tie-break max valid ROC."""
+    best = None
+    best_key = (-1e18, -1e18)
+    for r in records:
+        if r['model'] != model:
+            continue
+        sd = r['seed_dir']
+        rm, _, _ = compute_posthoc_correlation(sd, 'valid')
+        rv = r['metrics'].get('metric/best_clf_roc_valid', np.nan)
+        rmc = float(rm) if np.isfinite(rm) else -1e9
+        rvc = float(rv) if np.isfinite(rv) else -1e9
+        key = (rmc, rvc)
+        if key > best_key:
+            best_key = key
+            best = r
+    if best is None:
+        return None, float('nan')
+    return best, float(best_key[0])
+
+
 def _per_fold_best_for_row(
     records: list,
     model: str,
@@ -240,19 +258,31 @@ def _per_fold_best_for_row(
     for fold in sorted(by_fold.keys()):
         best = None
         best_c = -1e18
+        best_key = (-1e18, -1e18)
         for r in by_fold[fold]:
             m = r['metrics']
             rv = m.get('metric/best_clf_roc_valid', np.nan)
             sd = r['seed_dir']
             if tie_break == 'valid_roc':
                 c = float(rv) if np.isfinite(rv) else -1e9
+                if c > best_c:
+                    best_c = c
+                    best = r
+            elif tie_break == 'motif_corr':
+                rm, _, _ = compute_posthoc_correlation(sd, 'valid')
+                rmc = float(rm) if np.isfinite(rm) else -1e9
+                rvc = float(rv) if np.isfinite(rv) else -1e9
+                key = (rmc, rvc)
+                if key > best_key:
+                    best_key = key
+                    best = r
             else:
                 rm, _, _ = compute_posthoc_correlation(sd, 'valid')
                 rn, _, _ = compute_node_score_impact_correlation(sd, 'valid')
                 c = _composite(rv, rm, rn, w_pred, w_m, w_n)
-            if c > best_c:
-                best_c = c
-                best = r
+                if c > best_c:
+                    best_c = c
+                    best = r
         if best is not None:
             out.append(best)
     return out
@@ -268,25 +298,43 @@ def run(
     w_n: float,
     verbose: bool = False,
     set_r: float | None = None,
+    selection_by: str = 'composite',
 ):
     best_results_dir = best_results_dir.resolve()
     (best_results_dir / dataset).mkdir(parents=True, exist_ok=True)
     fixed_r_mode = set_r is not None
+    use_motif_sel = selection_by == 'motif_corr_valid'
+    if selection_by not in ('composite', 'motif_corr_valid'):
+        raise ValueError(f"selection_by must be 'composite' or 'motif_corr_valid', got {selection_by!r}")
+
+    if use_motif_sel:
+        sel_label = 'motif_corr_valid_tie_roc'
+    elif fixed_r_mode:
+        sel_label = 'fixed_r_max_valid_roc'
+    else:
+        sel_label = 'composite_valid_correlations'
+
     meta = {
         'dataset': dataset,
         'set_r': set_r,
-        'selection_mode': 'fixed_r_max_valid_roc' if fixed_r_mode else 'composite_valid_correlations',
+        'selection_by': selection_by,
+        'selection_mode': sel_label,
         'w_pred': w_pred,
         'w_motif_corr': w_m,
         'w_node_corr': w_n,
         'selection_split': 'valid',
         'note': (
             (
-                f'Fixed r = {set_r}: keep runs matching fix_r/final_r; anchor + per-fold tie-break = max valid ROC. '
-                if fixed_r_mode
+                (
+                    f'SET_R={set_r}: filter runs; anchor + per-fold = max motif explainer r on valid (tie-break ROC). '
+                    if fixed_r_mode
+                    else 'Anchor + per-fold = max motif-level explainer r on valid (tie-break valid ROC). '
+                )
+                if use_motif_sel
                 else (
-                    'Best hyperparam row per (experiment, model) via global max composite '
-                    '(valid ROC + correlations). Per-fold tie-break for same row uses that composite. '
+                    f'SET_R={set_r}: filter runs; anchor + per-fold = max valid ROC. '
+                    if fixed_r_mode
+                    else 'Anchor + per-fold = max composite (valid ROC + motif + node corrs on valid). '
                 )
             )
             + 'Table numbers: mean ± std across folds.'
@@ -339,9 +387,17 @@ def run(
         ex_va = {'Dataset': dataset, 'Experiment': label, 'Hyperparam_scan': 'yes' if has_scan else ''}
         ex_te = {'Dataset': dataset, 'Experiment': label, 'Hyperparam_scan': 'yes' if has_scan else ''}
 
-        tie_break = 'valid_roc' if fixed_r_mode else 'composite'
+        if use_motif_sel:
+            tie_break = 'motif_corr'
+        elif fixed_r_mode:
+            tie_break = 'valid_roc'
+        else:
+            tie_break = 'composite'
+
         for model in MODEL_ORDER:
-            if fixed_r_mode:
+            if use_motif_sel:
+                br, comp = _best_run_motif_corr_valid(records, model)
+            elif fixed_r_mode:
                 br, comp = _best_run_max_valid_roc(records, model)
             else:
                 br, comp = _best_run_for_model(records, model, w_pred, w_m, w_n)
@@ -413,6 +469,7 @@ def run(
                 'dataset': dataset,
                 'experiment': exp_key,
                 'experiment_label': label,
+                'selection_by': selection_by,
                 'model': model,
                 'best_row': br.get('row', ''),
                 'best_variant': br.get('variant', ''),
@@ -489,11 +546,22 @@ def main():
         '--set_r',
         type=float,
         default=None,
-        help='If set (or env SET_R), keep only runs with this fix_r or final_r; pick row by max valid ROC only.',
+        help='If set (or env SET_R), keep only runs with this fix_r/final_r (per experiment type).',
+    )
+    p.add_argument(
+        '--selection-by',
+        type=str,
+        choices=['composite', 'motif_corr_valid'],
+        default=None,
+        help='Anchor hyperparam row + per-fold seed: composite vs motif-level r on valid (default: env SELECTION_BY or composite).',
     )
     p.add_argument('-v', '--verbose', action='store_true')
     args = p.parse_args()
     set_r = args.set_r if args.set_r is not None else _parse_set_r_env()
+    sel = (args.selection_by or os.environ.get('SELECTION_BY') or 'composite').strip().lower()
+    if sel not in ('composite', 'motif_corr_valid'):
+        print(f'[WARN] Invalid SELECTION_BY={sel!r}, using composite')
+        sel = 'composite'
 
     if args.experiments:
         experiments = list(args.experiments)
@@ -523,6 +591,7 @@ def main():
         w_n=args.w_node_corr,
         verbose=args.verbose,
         set_r=set_r,
+        selection_by=sel,
     )
 
 

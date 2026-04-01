@@ -14,9 +14,11 @@ export RESULTS_DIR="${RESULTS_DIR:-$HOME/hpc-share/ChemIntuit/MotifSAT/tuning_re
 OUTPUT_BASE="${OUTPUT_BASE:-../motif_consistency_results}"
 BEST_RESULTS_DIR="${BEST_RESULTS_DIR:-../best_results}"
 DATASET="${DATASET:-Mutagenicity}"
-# Optional: SET_R=0.8 → collect_best_results keeps only fix_r=0.8 or final_r=0.8 runs (per experiment type)
-# and picks hyperparam row / per-fold seeds by max valid ROC (ignores correlation-weighted composite).
+# Optional: SET_R=0.8 → keep only runs matching that fix_r/final_r (per experiment).
 SET_R="${SET_R:-}"
+# Best row + per-fold seeds: motif_corr_valid = max motif-level explainer r on valid (tie-break ROC).
+# Override: SELECTION_BY=composite for the old ROC+motif+node weighted score.
+export SELECTION_BY="${SELECTION_BY:-motif_corr_valid}"
 
 # Must match ALL_EXPERIMENT_NAMES in run_mutagenicity_gsat_experiment.py (streamlined groups).
 EXPERIMENTS=(
@@ -40,6 +42,7 @@ echo "RESULTS_DIR=${RESULTS_DIR}"
 echo "OUTPUT_BASE=${OUTPUT_BASE}"
 echo "BEST_RESULTS_DIR=${BEST_RESULTS_DIR}"
 echo "SET_R=${SET_R:-<unset>}"
+echo "SELECTION_BY=${SELECTION_BY}"
 echo ""
 
 # # ─── 1. Score-vs-Impact + consistency (every fold0_seed0 under each experiment) ───
@@ -96,7 +99,8 @@ for EXP in "${EXPERIMENTS[@]}"; do
 done
 
 # ─── 3. Best balanced (pred + score–impact) tables and plots ───
-# Default: best hyperparam row via composite (valid ROC + correlations); with SET_R=0.8 only that fix_r/final_r.
+# Default SELECTION_BY=motif_corr_valid: choose hyperparam row + per-fold seeds by max motif-level r on valid.
+# SELECTION_BY=composite: weighted valid ROC + motif + node correlations. SET_R still filters r if set.
 # Table cells: mean ± sample std across folds (per fold: best seed for that row). One fold → mean only.
 # Tables: ${BEST_RESULTS_DIR}/{train,validation,test}/model_prediction_performance.csv and explainer_score_impact_correlation.csv
 # Plots: rendered under ${BEST_RESULTS_DIR}/${DATASET}/<experiment>/model_<ARCH>/{test,valid}_plots/<split>/
