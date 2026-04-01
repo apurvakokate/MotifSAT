@@ -99,9 +99,8 @@ for EXP in "${EXPERIMENTS[@]}"; do
 done
 
 # ─── 3. Best balanced (pred + score–impact) tables and plots ───
-# Default SELECTION_BY=motif_corr_valid: choose hyperparam row + per-fold seeds by max motif-level r on valid.
-# SELECTION_BY=composite: weighted valid ROC + motif + node correlations. SET_R still filters r if set.
-# Table cells: mean ± sample std across folds (per fold: best seed for that row). One fold → mean only.
+# SELECTION_BY picks which hyperparam row (per model) to use for plots; CSV cells match collect_mutagenicity_tables
+# pivots for that row (same mean±std as the big tables). SET_R filters runs before pivots if set.
 # Tables: ${BEST_RESULTS_DIR}/{train,validation,test}/model_prediction_performance.csv and explainer_score_impact_correlation.csv
 # Plots: rendered under ${BEST_RESULTS_DIR}/${DATASET}/<experiment>/model_<ARCH>/{test,valid}_plots/<split>/
 # from jsonl in each best seed_dir (training exports only; does not use OUTPUT_BASE).

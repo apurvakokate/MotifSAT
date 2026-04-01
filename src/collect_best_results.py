@@ -1,17 +1,11 @@
 #!/usr/bin/env python
 """
-Pick best (experiment × model) runs, render score-vs-impact plots, write best_results CSVs.
+Pick anchor (experiment × model) for plots, write best_results CSVs.
 
-Selection (valid split): --selection-by composite | motif_corr_valid (see analysis.sh SELECTION_BY).
-  composite: w_pred*roc + w_m*r_motif + w_n*r_node on valid
-  motif_corr_valid: max motif-level explainer r only (tie-break valid ROC)
+Selection (--selection-by) only chooses which hyperparam row label to use per model; ROC and explainer
+cells are the same numbers as collect_mutagenicity_tables for that row (build_table / build_posthoc_table).
 
-Table cells: mean ± std across folds; per-fold seed tie-break matches anchor rule.
-
-Optional SET_R: filter to that fix_r/final_r; with composite uses max valid ROC anchor; with
-motif_corr_valid uses max motif-r anchor.
-
-Requires: final_metrics.json + post-hoc jsonl under each seed_dir.
+Plots use the anchor run's seed_dir. Optional SET_R filters runs before building pivots.
 """
 
 from __future__ import annotations
@@ -29,9 +23,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from collect_mutagenicity_tables import (
     EXPERIMENT_ROW_CONFIG,
+    build_posthoc_table,
+    build_table,
     compute_node_score_impact_correlation,
     compute_posthoc_correlation,
     find_results,
+    format_mean_std_count,
 )
 from analyze_motif_consistency import plot_score_vs_impact
 
@@ -146,16 +143,42 @@ def _format_float(x) -> str:
         return ''
 
 
-def _format_mean_std(values: list[float]) -> str:
-    """Mean ± sample std; one value → mean only."""
-    arr = np.asarray([float(v) for v in values if v is not None and np.isfinite(v)], dtype=float)
-    if arr.size == 0:
+def _cell_from_pivots(mean_df, std_df, count_df, row: str, col: str) -> str:
+    """Same formatted string as collect_mutagenicity_tables for that (row, model) cell."""
+    if mean_df is None or row not in mean_df.index or col not in mean_df.columns:
         return ''
-    mean = float(np.mean(arr))
-    if arr.size < 2:
-        return f'{mean:.4f}'
-    std = float(np.std(arr, ddof=1))
-    return f'{mean:.4f} ± {std:.4f}'
+    combined = format_mean_std_count(mean_df, std_df, count_df)
+    if combined is None:
+        return ''
+    if row not in combined.index or col not in combined.columns:
+        return ''
+    return str(combined.at[row, col])
+
+
+def _build_node_posthoc_table(records: list, split: str = 'test'):
+    """Same layout as build_posthoc_table but Pearson r from compute_node_score_impact_correlation."""
+    rows = []
+    for rec in records:
+        r, _p, _n = compute_node_score_impact_correlation(rec['seed_dir'], split=split)
+        rows.append({
+            'model': rec['model'],
+            'row': rec['row'],
+            'row_val': rec['row_val'],
+            'pearson_r': r,
+        })
+    if not rows:
+        return None, None, None
+    df = pd.DataFrame(rows)
+    agg = df.groupby(['row', 'row_val', 'model'])['pearson_r'].agg(['mean', 'std', 'count']).reset_index()
+    agg = agg.sort_values('row_val')
+    pivot_mean = agg.pivot(index='row', columns='model', values='mean')
+    pivot_std = agg.pivot(index='row', columns='model', values='std')
+    pivot_count = agg.pivot(index='row', columns='model', values='count')
+    row_order = agg.drop_duplicates('row').sort_values('row_val')['row'].tolist()
+    pivot_mean = pivot_mean.reindex(row_order).dropna(how='all')
+    pivot_std = pivot_std.reindex(row_order).dropna(how='all')
+    pivot_count = pivot_count.reindex(row_order).dropna(how='all')
+    return pivot_mean, pivot_std, pivot_count
 
 
 def _composite(
@@ -239,53 +262,11 @@ def _best_run_motif_corr_valid(records: list, model: str) -> tuple[dict | None, 
     return best, float(best_key[0])
 
 
-def _per_fold_best_for_row(
-    records: list,
-    model: str,
-    chosen_row: str,
-    w_pred: float,
-    w_m: float,
-    w_n: float,
-    tie_break: str = 'composite',
-) -> list[dict]:
-    """One record per fold among runs matching model and hyperparam row."""
-    filtered = [r for r in records if r['model'] == model and r['row'] == chosen_row]
-    by_fold: dict = {}
-    for r in filtered:
-        f = r['fold']
-        by_fold.setdefault(f, []).append(r)
-    out = []
-    for fold in sorted(by_fold.keys()):
-        best = None
-        best_c = -1e18
-        best_key = (-1e18, -1e18)
-        for r in by_fold[fold]:
-            m = r['metrics']
-            rv = m.get('metric/best_clf_roc_valid', np.nan)
-            sd = r['seed_dir']
-            if tie_break == 'valid_roc':
-                c = float(rv) if np.isfinite(rv) else -1e9
-                if c > best_c:
-                    best_c = c
-                    best = r
-            elif tie_break == 'motif_corr':
-                rm, _, _ = compute_posthoc_correlation(sd, 'valid')
-                rmc = float(rm) if np.isfinite(rm) else -1e9
-                rvc = float(rv) if np.isfinite(rv) else -1e9
-                key = (rmc, rvc)
-                if key > best_key:
-                    best_key = key
-                    best = r
-            else:
-                rm, _, _ = compute_posthoc_correlation(sd, 'valid')
-                rn, _, _ = compute_node_score_impact_correlation(sd, 'valid')
-                c = _composite(rv, rm, rn, w_pred, w_m, w_n)
-                if c > best_c:
-                    best_c = c
-                    best = r
-        if best is not None:
-            out.append(best)
-    return out
+def _unpack_mean_std_count(t):
+    """build_table / build_posthoc_table return (mean_df, std_df, count_df) or (None, None, None)."""
+    if t is None or t[0] is None:
+        return None, None, None
+    return t[0], t[1], t[2]
 
 
 def run(
@@ -324,20 +305,9 @@ def run(
         'w_node_corr': w_n,
         'selection_split': 'valid',
         'note': (
-            (
-                (
-                    f'SET_R={set_r}: filter runs; anchor + per-fold = max motif explainer r on valid (tie-break ROC). '
-                    if fixed_r_mode
-                    else 'Anchor + per-fold = max motif-level explainer r on valid (tie-break valid ROC). '
-                )
-                if use_motif_sel
-                else (
-                    f'SET_R={set_r}: filter runs; anchor + per-fold = max valid ROC. '
-                    if fixed_r_mode
-                    else 'Anchor + per-fold = max composite (valid ROC + motif + node corrs on valid). '
-                )
-            )
-            + 'Table numbers: mean ± std across folds.'
+            'Table values match collect_mutagenicity_tables pivots at the anchor row per model; '
+            'selection only picks that row for plots. '
+            + (f'SET_R={set_r} filters runs before pivots. ' if fixed_r_mode else '')
         ),
     }
     with open(best_results_dir / dataset / 'selection_weights.json', 'w') as f:
@@ -387,12 +357,21 @@ def run(
         ex_va = {'Dataset': dataset, 'Experiment': label, 'Hyperparam_scan': 'yes' if has_scan else ''}
         ex_te = {'Dataset': dataset, 'Experiment': label, 'Hyperparam_scan': 'yes' if has_scan else ''}
 
-        if use_motif_sel:
-            tie_break = 'motif_corr'
-        elif fixed_r_mode:
-            tie_break = 'valid_roc'
-        else:
-            tie_break = 'composite'
+        pred_tr_m, pred_tr_s, pred_tr_c = _unpack_mean_std_count(
+            build_table(records, 'metric/best_clf_roc_train', verbose=verbose)
+        )
+        pred_va_m, pred_va_s, pred_va_c = _unpack_mean_std_count(
+            build_table(records, 'metric/best_clf_roc_valid', verbose=verbose)
+        )
+        pred_te_m, pred_te_s, pred_te_c = _unpack_mean_std_count(
+            build_table(records, 'metric/best_clf_roc_test', verbose=verbose)
+        )
+        ph_tr_m, ph_tr_s, ph_tr_c = _unpack_mean_std_count(build_posthoc_table(records, split='train'))
+        ph_va_m, ph_va_s, ph_va_c = _unpack_mean_std_count(build_posthoc_table(records, split='valid'))
+        ph_te_m, ph_te_s, ph_te_c = _unpack_mean_std_count(build_posthoc_table(records, split='test'))
+        node_tr_m, node_tr_s, node_tr_c = _unpack_mean_std_count(_build_node_posthoc_table(records, split='train'))
+        node_va_m, node_va_s, node_va_c = _unpack_mean_std_count(_build_node_posthoc_table(records, split='valid'))
+        node_te_m, node_te_s, node_te_c = _unpack_mean_std_count(_build_node_posthoc_table(records, split='test'))
 
         for model in MODEL_ORDER:
             if use_motif_sel:
@@ -414,57 +393,22 @@ def run(
                 continue
 
             chosen_row = br.get('row', '')
-            per_fold = _per_fold_best_for_row(
-                records, model, chosen_row, w_pred, w_m, w_n, tie_break=tie_break
-            )
-
-            roc_tr = []
-            roc_va = []
-            roc_te = []
-            motif_tr, motif_va, motif_te = [], [], []
-            node_tr, node_va, node_te = [], [], []
-            for pr in per_fold:
-                pm = pr['metrics']
-                psd: Path = pr['seed_dir']
-                v = pm.get('metric/best_clf_roc_train')
-                if v is not None and np.isfinite(v):
-                    roc_tr.append(float(v))
-                v = pm.get('metric/best_clf_roc_valid')
-                if v is not None and np.isfinite(v):
-                    roc_va.append(float(v))
-                v = pm.get('metric/best_clf_roc_test')
-                if v is not None and np.isfinite(v):
-                    roc_te.append(float(v))
-                rmt, _, _ = compute_posthoc_correlation(psd, 'train')
-                rmv, _, _ = compute_posthoc_correlation(psd, 'valid')
-                rme, _, _ = compute_posthoc_correlation(psd, 'test')
-                if np.isfinite(rmt):
-                    motif_tr.append(float(rmt))
-                if np.isfinite(rmv):
-                    motif_va.append(float(rmv))
-                if np.isfinite(rme):
-                    motif_te.append(float(rme))
-                rnt, _, _ = compute_node_score_impact_correlation(psd, 'train')
-                rnv, _, _ = compute_node_score_impact_correlation(psd, 'valid')
-                rne, _, _ = compute_node_score_impact_correlation(psd, 'test')
-                if np.isfinite(rnt):
-                    node_tr.append(float(rnt))
-                if np.isfinite(rnv):
-                    node_va.append(float(rnv))
-                if np.isfinite(rne):
-                    node_te.append(float(rne))
-
-            perf_tr[model] = _format_mean_std(roc_tr)
-            perf_va[model] = _format_mean_std(roc_va)
-            perf_te[model] = _format_mean_std(roc_te)
-            ex_tr[f'{model}_motif_r'] = _format_mean_std(motif_tr)
-            ex_tr[f'{model}_node_r'] = _format_mean_std(node_tr)
-            ex_va[f'{model}_motif_r'] = _format_mean_std(motif_va)
-            ex_va[f'{model}_node_r'] = _format_mean_std(node_va)
-            ex_te[f'{model}_motif_r'] = _format_mean_std(motif_te)
-            ex_te[f'{model}_node_r'] = _format_mean_std(node_te)
+            perf_tr[model] = _cell_from_pivots(pred_tr_m, pred_tr_s, pred_tr_c, chosen_row, model)
+            perf_va[model] = _cell_from_pivots(pred_va_m, pred_va_s, pred_va_c, chosen_row, model)
+            perf_te[model] = _cell_from_pivots(pred_te_m, pred_te_s, pred_te_c, chosen_row, model)
+            ex_tr[f'{model}_motif_r'] = _cell_from_pivots(ph_tr_m, ph_tr_s, ph_tr_c, chosen_row, model)
+            ex_tr[f'{model}_node_r'] = _cell_from_pivots(node_tr_m, node_tr_s, node_tr_c, chosen_row, model)
+            ex_va[f'{model}_motif_r'] = _cell_from_pivots(ph_va_m, ph_va_s, ph_va_c, chosen_row, model)
+            ex_va[f'{model}_node_r'] = _cell_from_pivots(node_va_m, node_va_s, node_va_c, chosen_row, model)
+            ex_te[f'{model}_motif_r'] = _cell_from_pivots(ph_te_m, ph_te_s, ph_te_c, chosen_row, model)
+            ex_te[f'{model}_node_r'] = _cell_from_pivots(node_te_m, node_te_s, node_te_c, chosen_row, model)
 
             sd: Path = br['seed_dir']
+            n_runs = ''
+            if pred_va_c is not None and chosen_row in pred_va_c.index and model in pred_va_c.columns:
+                nv = pred_va_c.at[chosen_row, model]
+                if pd.notna(nv):
+                    n_runs = int(nv)
             hyperparam_rows.append({
                 'dataset': dataset,
                 'experiment': exp_key,
@@ -477,8 +421,7 @@ def run(
                 'best_seed': br.get('seed'),
                 'composite_valid': round(comp, 6),
                 'seed_dir': str(sd),
-                'n_folds_aggregated': len(per_fold),
-                'folds_aggregated': ','.join(str(pr['fold']) for pr in sorted(per_fold, key=lambda x: x['fold'])),
+                'n_runs_in_table_cell': n_runs,
             })
 
             dst_m = exp_plot_dir / f'model_{model}'
