@@ -51,6 +51,17 @@ EXPERIMENTS=(
   motif_readout_prior_node_gate
   motif_readout_prior_node_gate_tanh_sched
   motif_readout_weight_diversity
+  motif_readout_baseline_f07
+  motif_readout_e1_logit_standardize
+  motif_readout_e2_temperature
+  motif_readout_e3_max_pool
+  motif_readout_e4_max_mean_pool
+  motif_readout_e5_interp_head
+  motif_readout_e6_no_gate
+  motif_readout_e7_multiplicative_gate
+  motif_readout_e8_entropy_sweep
+  motif_readout_e9_motif_ib_sweep
+  motif_readout_e10_align_sweep
 )
 
 # Subset or reorder for load balancing. Full SUPPORTED_DATASETS order in driver: molecular + OGB + PAPER_DATASETS (deduped).
