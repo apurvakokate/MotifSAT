@@ -1462,6 +1462,20 @@ class GSAT(nn.Module):
                 'motif_loss_coef': self.motif_loss_coef,
                 'between_motif_coef': self.between_motif_coef,
                 'motif_weight_diversity_coef': self.motif_weight_diversity_coef,
+                'motif_entropy_coef': self.motif_entropy_coef,
+                'motif_level_ib_coef': self.motif_level_ib_coef,
+                'motif_align_loss_coef': self.motif_align_loss_coef,
+                'motif_interp_distill_coef': self.motif_interp_distill_coef,
+            },
+            'motif_readout_ablation': {
+                'motif_logit_standardize_per_graph': self.motif_logit_standardize_per_graph,
+                'motif_readout_no_gate': self.motif_readout_no_gate,
+                'motif_gate_mode': self.motif_gate_mode,
+                'motif_logit_temperature_learned': self.motif_logit_temperature is not None,
+                'motif_gate_mult_scale_learned': self.motif_gate_mult_scale is not None,
+                'motif_readout_interp_head': self.motif_interp_head is not None,
+                'motif_ib_final_r': self.motif_ib_final_r,
+                'motif_ib_init_r': self.motif_ib_init_r,
             },
             'weight_distribution_params': {
                 'init_r': self.init_r,
@@ -1489,6 +1503,10 @@ class GSAT(nn.Module):
             'motif_between': loss_dict.get('motif_between', 0),
             'motif_loss': loss_dict['motif_consistency'],
             'motif_weight_diversity': loss_dict.get('motif_weight_diversity', 0),
+            'motif_entropy': loss_dict.get('motif_entropy', 0),
+            'motif_ib': loss_dict.get('motif_ib', 0),
+            'motif_align': loss_dict.get('motif_align', 0),
+            'motif_interp_distill': loss_dict.get('motif_interp_distill', 0),
             'att_auroc': float(att_auroc) if att_auroc is not None else None,
             'precision_at_k': float(precision) if precision is not None else None,
             'clf_acc': float(clf_acc) if clf_acc is not None else None,
@@ -2292,11 +2310,16 @@ class GSAT(nn.Module):
             torch.cuda.empty_cache()
 
     @torch.no_grad()
-    def compute_motif_readout_correlation_metrics(self, valid_loader, epoch, use_edge_attr, max_batches=6):
+    def compute_motif_readout_correlation_metrics(
+        self, valid_loader, epoch, use_edge_attr, max_batches=6, include_wandb_histogram=True,
+    ):
         """
         Motif readout: Pearson / Spearman between σ(ℓ_m) (and optional interp head) vs motif-level impact,
         plus histogram of σ(ℓ_m). Impact = |p - p_masked| when zeroing intra-motif edges (same construction
         as calculate_explainer_performance motif block). Scores and impacts are aligned per motif row m.
+
+        If include_wandb_histogram is False, emit numeric σ(ℓ_m) summary + histogram bins (JSON-safe) instead
+        of wandb.Histogram (for disk artifacts).
         """
         if self.motif_method != 'readout':
             return {}
@@ -2388,10 +2411,72 @@ class GSAT(nn.Module):
                     pass
         if sigma_m_vals:
             sigma_cat = np.concatenate(sigma_m_vals)
-            h = _wandb_histogram_safe(sigma_cat, num_bins=50)
-            if h is not None:
-                out['motif_readout/sigma_m_histogram'] = h
+            if include_wandb_histogram:
+                h = _wandb_histogram_safe(sigma_cat, num_bins=50)
+                if h is not None:
+                    out['motif_readout/sigma_m_histogram'] = h
+            else:
+                out['motif_readout/sigma_m_mean'] = float(np.mean(sigma_cat))
+                out['motif_readout/sigma_m_std'] = float(np.std(sigma_cat))
+                out['motif_readout/sigma_m_min'] = float(np.min(sigma_cat))
+                out['motif_readout/sigma_m_max'] = float(np.max(sigma_cat))
+                out['motif_readout/sigma_m_n'] = int(sigma_cat.size)
+                counts, edges = np.histogram(sigma_cat, bins=50, range=(0.0, 1.0))
+                out['motif_readout/sigma_m_hist_counts'] = counts.tolist()
+                out['motif_readout/sigma_m_hist_bin_edges'] = edges.tolist()
         return out
+
+    def _save_post_training_analysis_artifacts(self, valid_loader, use_edge_attr, last_epoch):
+        """
+        Disk artifacts for offline analysis: final learned scalar params, JSON-safe motif readout metrics.
+        Does not replace check_artifacts_exist markers (node_scores.jsonl / edge_scores.jsonl).
+        """
+        sd = Path(self.seed_dir)
+        payload = {}
+        lp = {}
+        if self.motif_logit_temperature is not None:
+            lp['motif_logit_temperature'] = self.motif_logit_temperature.detach().cpu()
+        if self.motif_gate_mult_scale is not None:
+            lp['motif_gate_mult_scale'] = self.motif_gate_mult_scale.detach().cpu()
+        if lp:
+            torch.save(lp, sd / 'gsat_learned_scalars.pt')
+
+        if self.motif_method == 'readout':
+            mrm = self.compute_motif_readout_correlation_metrics(
+                valid_loader, last_epoch, use_edge_attr, max_batches=48, include_wandb_histogram=False,
+            )
+            serial = {}
+            for k, v in mrm.items():
+                if isinstance(v, (int, float, bool, str, type(None))):
+                    serial[k] = v
+                elif isinstance(v, list):
+                    serial[k] = v
+            with open(sd / 'motif_readout_analysis.json', 'w') as f:
+                json.dump(serial, f, indent=2)
+            payload = {k: v for k, v in serial.items() if isinstance(v, (int, float))}
+
+        self._merge_experiment_summary_artifact_paths()
+        return payload
+
+    def _merge_experiment_summary_artifact_paths(self):
+        """Record paths to post-training analysis files in experiment_summary.json."""
+        p = Path(self.seed_dir) / 'experiment_summary.json'
+        if not p.exists():
+            return
+        try:
+            with open(p) as f:
+                summary = json.load(f)
+            pt = {}
+            if (Path(self.seed_dir) / 'motif_readout_analysis.json').exists():
+                pt['motif_readout_analysis_json'] = 'motif_readout_analysis.json'
+            if (Path(self.seed_dir) / 'gsat_learned_scalars.pt').exists():
+                pt['gsat_learned_scalars_pt'] = 'gsat_learned_scalars.pt'
+            if pt:
+                summary['post_training_analysis'] = pt
+            with open(p, 'w') as f:
+                json.dump(summary, f, indent=2)
+        except Exception:
+            pass
 
     @torch.no_grad()
     def eval_one_batch(self, data, epoch):
@@ -2816,6 +2901,14 @@ class GSAT(nn.Module):
                       f'Best Test X AUROC: {metric_dict["metric/best_x_roc_test"]:.3f}')
             print('====================================')
             print('====================================')
+        try:
+            extra_m = self._save_post_training_analysis_artifacts(
+                loaders['valid'], use_edge_attr, max(0, self.epochs - 1),
+            )
+            if extra_m:
+                metric_dict.update(extra_m)
+        except Exception as e:
+            print(f'[WARNING] Post-training analysis artifacts failed: {e}')
         self.save_final_metrics(metric_dict)
         return metric_dict
 
@@ -3286,6 +3379,74 @@ def check_artifacts_exist(seed_dir):
         print(f"[INFO] ✓ Found artifacts in: {seed_dir}")
         print(f"[INFO] Skipping training. Delete artifacts to retrain.")
     return exists
+
+
+def _sanitize_value_for_wandb(v):
+    """JSON-serializable value for wandb.config (nested dicts/lists allowed)."""
+    if v is None or isinstance(v, (bool, int, float, str)):
+        return v
+    if isinstance(v, (np.integer, np.floating)):
+        return float(v) if isinstance(v, np.floating) else int(v)
+    if isinstance(v, dict):
+        return _sanitize_config_for_wandb_dict(v)
+    if isinstance(v, (list, tuple)):
+        return [_sanitize_value_for_wandb(x) for x in v]
+    if isinstance(v, Path):
+        return str(v)
+    return str(v)
+
+
+def _sanitize_config_for_wandb_dict(d):
+    """Recursively convert a config dict for wandb without dropping keys."""
+    if not isinstance(d, dict):
+        return {}
+    out = {}
+    for k, v in d.items():
+        try:
+            out[str(k)] = _sanitize_value_for_wandb(v)
+        except Exception:
+            out[str(k)] = str(v)
+    return out
+
+
+def write_seed_dir_run_configs(seed_dir, local_config, dataset_name, model_name, fold, seed):
+    """
+    Persist full data config + merged run_config JSON for offline analysis (complements method_config.yaml
+    and shared_config.yaml written by GSAT.__init__).
+    """
+    sd = Path(seed_dir)
+    sd.mkdir(parents=True, exist_ok=True)
+    with open(sd / 'data_config.yaml', 'w') as f:
+        yaml.safe_dump(local_config.get('data_config', {}) or {}, f, sort_keys=False)
+    _gsat = local_config.get('GSAT_config', {}) or {}
+    run_snapshot = {
+        'dataset': dataset_name,
+        'model': model_name,
+        'fold': fold,
+        'seed': seed,
+        'run_config': {
+            'gsat': _sanitize_config_for_wandb_dict(_gsat),
+            'shared': _sanitize_config_for_wandb_dict(local_config.get('shared_config', {}) or {}),
+            'model': _sanitize_config_for_wandb_dict(local_config.get('model_config', {}) or {}),
+            'data': _sanitize_config_for_wandb_dict(local_config.get('data_config', {}) or {}),
+        },
+    }
+    with open(sd / 'run_config_full.json', 'w') as f:
+        json.dump(run_snapshot, f, indent=2)
+
+    summary_path = sd / 'experiment_summary.json'
+    if summary_path.exists():
+        try:
+            with open(summary_path) as f:
+                summary = json.load(f)
+            summary['config_artifacts'] = {
+                'data_config_yaml': 'data_config.yaml',
+                'run_config_full_json': 'run_config_full.json',
+            }
+            with open(summary_path, 'w') as f:
+                json.dump(summary, f, indent=2)
+        except Exception:
+            pass
 
 
 def _wandb_histogram_safe(values, max_samples=100_000, num_bins=64):
@@ -3871,23 +4032,33 @@ def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_nam
         # Use environment variable if set (for HPC), otherwise use relative path
         wandb_dir = os.environ.get('WANDB_DIR', '../wandb')
         
+        # Flat merge preserved for backward compatibility with existing W&B runs / sweeps.
+        # `run_config` holds full per-section dicts so no keys are lost to cross-section overwrites.
+        _gsat_cfg = local_config.get('GSAT_config', {}) or {}
+        _wandb_flat = {
+            'dataset': dataset_name,
+            'model': model_name,
+            'fold': fold,
+            'seed': random_state,
+            'tuning_id': tuning_id,
+            'experiment_name': experiment_name,
+            **_gsat_cfg,
+            **local_config.get('shared_config', {}),
+            **local_config.get('model_config', {}),
+            **local_config.get('data_config', {}),
+            **local_config.get(f'{method_name}_config', {}),
+        }
+        _wandb_flat['run_config'] = {
+            'gsat': _sanitize_config_for_wandb_dict(_gsat_cfg),
+            'shared': _sanitize_config_for_wandb_dict(local_config.get('shared_config', {}) or {}),
+            'model': _sanitize_config_for_wandb_dict(local_config.get('model_config', {}) or {}),
+            'data': _sanitize_config_for_wandb_dict(local_config.get('data_config', {}) or {}),
+        }
         wandb.init(
             project=wandb_project,
             name=wandb_name,
             dir=wandb_dir,  # Store wandb logs (uses env var on HPC)
-            config={
-                'dataset': dataset_name,
-                'model': model_name,
-                'fold': fold,
-                'seed': random_state,
-                'tuning_id': tuning_id,
-                'experiment_name': experiment_name,
-                **local_config.get('GSAT_config', {}),
-                **local_config.get('shared_config', {}),
-                **local_config.get('model_config', {}),
-                **local_config.get('data_config', {}),
-                **local_config.get(f'{method_name}_config', {})
-            },
+            config=_wandb_flat,
             reinit=True
         )
         print(f"[INFO] Initialized wandb: {wandb_project}/{wandb_name}")
@@ -4039,6 +4210,27 @@ def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_nam
                          if not isinstance(v, torch.Tensor)}
     with open(os.path.join(gsat.seed_dir, "model_config.yaml"), "w") as f:
         yaml.safe_dump(model_config_save, f, sort_keys=False)
+
+    try:
+        write_seed_dir_run_configs(
+            gsat.seed_dir, local_config, dataset_name, model_name, fold, random_state,
+        )
+    except Exception as e:
+        print(f'[WARNING] Failed to write data_config.yaml / run_config_full.json: {e}')
+
+    try:
+        _wandb_learned = {}
+        if motif_logit_temperature is not None:
+            _wandb_learned['motif_logit_temperature_init'] = float(motif_logit_temperature.detach().cpu().item())
+        if motif_gate_mult_scale is not None:
+            _wandb_learned['motif_gate_mult_scale_init'] = float(motif_gate_mult_scale.detach().cpu().item())
+        if _wandb_learned:
+            try:
+                wandb.config.update(_wandb_learned, allow_val_change=True)
+            except Exception:
+                wandb.config.update(_wandb_learned)
+    except Exception:
+        pass
 
     metric_dict = gsat.train(loaders, test_set, metric_dict, model_config.get('use_edge_attr', False))
     scalar_metric_dict = {k: v for k, v in metric_dict.items() if isinstance(v, (int, float))}

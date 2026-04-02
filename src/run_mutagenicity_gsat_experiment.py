@@ -656,6 +656,8 @@ def run_one(model_name, fold, variant, experiment_name, seed, cuda_id, data_dir,
     if 'data_overrides' in variant:
         config['data_config'].update(variant['data_overrides'])
     config['GSAT_config']['experiment_name'] = experiment_name
+    # Log variant identity on W&B with full GSAT config (train_gsat_one_seed run_config.gsat).
+    config['GSAT_config']['variant_id'] = variant['variant_id']
 
     if 'model_overrides' in variant:
         config['model_config'].update(variant['model_overrides'])
