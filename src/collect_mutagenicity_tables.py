@@ -253,6 +253,61 @@ EXPERIMENT_ROW_CONFIG = {
         'row_label_prefix': 'final_r',
         'path_extract': 'final_r',
     },
+    'motif_readout_baseline_f07': {
+        'summary_path': ('weight_distribution_params', 'final_r'),
+        'row_label_prefix': 'final_r',
+        'path_extract': 'final_r',
+    },
+    'motif_readout_e1_logit_standardize': {
+        'summary_path': ('weight_distribution_params', 'final_r'),
+        'row_label_prefix': 'final_r',
+        'path_extract': 'final_r',
+    },
+    'motif_readout_e2_temperature': {
+        'summary_path': ('weight_distribution_params', 'final_r'),
+        'row_label_prefix': 'final_r',
+        'path_extract': 'final_r',
+    },
+    'motif_readout_e3_max_pool': {
+        'summary_path': ('weight_distribution_params', 'final_r'),
+        'row_label_prefix': 'final_r',
+        'path_extract': 'final_r',
+    },
+    'motif_readout_e4_max_mean_pool': {
+        'summary_path': ('weight_distribution_params', 'final_r'),
+        'row_label_prefix': 'final_r',
+        'path_extract': 'final_r',
+    },
+    'motif_readout_e5_interp_head': {
+        'summary_path': ('weight_distribution_params', 'final_r'),
+        'row_label_prefix': 'final_r',
+        'path_extract': 'final_r',
+    },
+    'motif_readout_e6_no_gate': {
+        'summary_path': ('weight_distribution_params', 'final_r'),
+        'row_label_prefix': 'final_r',
+        'path_extract': 'final_r',
+    },
+    'motif_readout_e7_multiplicative_gate': {
+        'summary_path': ('weight_distribution_params', 'final_r'),
+        'row_label_prefix': 'final_r',
+        'path_extract': 'final_r',
+    },
+    'motif_readout_e8_entropy_sweep': {
+        'summary_path': ('loss_coefficients', 'motif_entropy_coef'),
+        'row_label_prefix': 'entropy_gamma',
+        'path_extract': 'final_r',
+    },
+    'motif_readout_e9_motif_ib_sweep': {
+        'summary_path': None,
+        'row_label_prefix': 'motif_ib',
+        'path_extract': 'motif_ib_sweep',
+    },
+    'motif_readout_e10_align_sweep': {
+        'summary_path': ('loss_coefficients', 'motif_align_loss_coef'),
+        'row_label_prefix': 'align_lambda',
+        'path_extract': 'final_r',
+    },
 }
 
 
@@ -384,6 +439,19 @@ def _get_row_value(summary: dict, experiment_name: str, parts=None):
         return 'unknown'
 
     extract_mode = cfg.get('path_extract')
+
+    # Composite modes: build from multiple summary fields
+    if extract_mode == 'motif_ib_sweep':
+        bm = _get_nested(summary, ('loss_coefficients', 'motif_level_ib_coef'))
+        fr = _get_nested(summary, ('motif_readout_ablation', 'motif_ib_final_r'))
+        if bm is not None and fr is not None:
+            return f'bm={_coerce_number(bm)},rfr={_coerce_number(fr)}'
+        if parts is not None:
+            joined = '/'.join(parts)
+            m = re.search(r'e9_motifib_bm([0-9.]+)_rfr([0-9.]+)', joined)
+            if m:
+                return f'bm={_coerce_number(m.group(1))},rfr={_coerce_number(m.group(2))}'
+        return 'unknown'
 
     # Composite modes: build from multiple summary fields
     if extract_mode == 'info_coef_final_r':
