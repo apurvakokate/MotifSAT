@@ -48,6 +48,17 @@ DEFAULT_EXPERIMENT_LABELS = {
     'motif_readout_prior_node_gate': 'Motif readout prior node gate',
     'motif_readout_prior_node_gate_tanh_sched': 'Motif prior gate (tanh + shift schedule)',
     'motif_readout_weight_diversity': 'Motif weight diversity loss',
+    'motif_readout_baseline_f07': 'Motif readout baseline (f_r=0.7, motif samp, prior gate)',
+    'motif_readout_e1_logit_standardize': 'E1 per-graph logit standardization',
+    'motif_readout_e2_temperature': 'E2 learned temperature on motif logits',
+    'motif_readout_e3_max_pool': 'E3 max-pool motif readout',
+    'motif_readout_e4_max_mean_pool': 'E4 max+mean concat readout',
+    'motif_readout_e5_interp_head': 'E5 attention-statistics interp head',
+    'motif_readout_e6_no_gate': 'E6 no node gate (motif logit only)',
+    'motif_readout_e7_multiplicative_gate': 'E7 multiplicative gate',
+    'motif_readout_e8_entropy_sweep': 'E8 node-attention entropy sweep',
+    'motif_readout_e9_motif_ib_sweep': 'E9 motif-level IB sweep',
+    'motif_readout_e10_align_sweep': 'E10 motif–node alignment sweep',
 }
 
 

@@ -190,6 +190,45 @@ def compute_motif_inverse_indices(nodes_to_motifs, batch):
     return inverse_indices, motif_batch, motif_ids
 
 
+def standardize_motif_logits_per_graph(ell, motif_batch, eps=1e-6):
+    """
+    Per-graph z-score on motif logits (E1). ell: [M], motif_batch: [M] graph id per motif row.
+    """
+    mb = motif_batch.long()
+    num_graphs = int(mb.max().item()) + 1
+    mu = scatter(ell, mb, dim=0, dim_size=num_graphs, reduce='mean')[mb]
+    sq = scatter(ell * ell, mb, dim=0, dim_size=num_graphs, reduce='mean')[mb]
+    std = (sq - mu * mu).clamp(min=0.0).sqrt() + eps
+    return (ell - mu) / std
+
+
+def within_graph_node_attention_entropy(alpha_nodes, node_batch, eps=1e-6):
+    """
+    Mean entropy of normalized node attention within each graph (E8).
+    alpha_nodes: [N] attention in (0,1); node_batch: [N] graph indices.
+    """
+    a = alpha_nodes.clamp(eps, 1.0 - eps)
+    b = node_batch.long()
+    num_graphs = int(b.max().item()) + 1
+    Z = scatter(a, b, dim=0, dim_size=num_graphs, reduce='sum')[b]
+    p = a / Z
+    plogp = p * torch.log(p)
+    H = -scatter(plogp, b, dim=0, dim_size=num_graphs, reduce='sum')
+    return H.mean()
+
+
+def motif_node_attention_stats(alpha_i, inverse_indices, dim_m):
+    """
+    E5: per-motif statistics of node attention α_i. alpha_i: [N], inverse_indices: [N] -> [M,4].
+    Columns: mean, max, max-mean, variance.
+    """
+    mean_a = scatter(alpha_i, inverse_indices, dim=0, dim_size=dim_m, reduce='mean')
+    max_a = scatter(alpha_i, inverse_indices, dim=0, dim_size=dim_m, reduce='max')
+    mean_a2 = scatter(alpha_i * alpha_i, inverse_indices, dim=0, dim_size=dim_m, reduce='mean')
+    var_a = (mean_a2 - mean_a * mean_a).clamp(min=0.0)
+    return torch.stack([mean_a, max_a, max_a - mean_a, var_a], dim=-1)
+
+
 class IntraMotifAttentionPool(nn.Module):
     """
     Attention-weighted motif embedding + mean/max/size features for readout.
@@ -251,6 +290,23 @@ class MotifPriorNodeGateMLP(nn.Module):
         return self.mlp(x, batch)
 
 
+class MotifInterpScoreHead(nn.Module):
+    """
+    E5: second head mapping [z_mean (H) || attention stats (4)] -> scalar logit for interpretability only.
+    """
+
+    def __init__(self, hidden_size, shared_config):
+        super().__init__()
+        mult = shared_config.get('extractor_hidden_mult', 1)
+        dropout_p = shared_config['extractor_dropout_p']
+        in_dim = hidden_size + 4
+        self.mlp = MLP([in_dim, hidden_size * mult, hidden_size * mult, 1], dropout=dropout_p)
+
+    def forward(self, z_mean, stats_m, motif_batch):
+        x = torch.cat([z_mean, stats_m], dim=-1)
+        return self.mlp(x, motif_batch)
+
+
 def effective_motif_prior_shift_scale(epoch, target_scale, schedule, warmup_epochs, ramp_epochs):
     """
     Piecewise schedule for motif prior residual strength (target_scale = max s after ramp).
@@ -292,32 +348,49 @@ def sample_motif_readout_with_prior_node_gate(
     residual_motif_logit=True,
     shift_scale=0.1,
     gate_tanh=False,
+    gate_mode='additive',
+    mult_scale=0.5,
 ):
     """
     Motif extractor produces per-motif logits ℓ_m; per-node attention uses GSAT sampling.
 
-    If residual_motif_logit (default): node_logit_i = ℓ_motif(i) + s * Δ_i with
-    Δ_i = tanh(f([h,z,α])) if gate_tanh else f(...) (bounded shift in (-s, s) per dimension when tanh).
-
-    Else (legacy full MLP): node_logit_i = shift_i only (shift_scale and gate_tanh ignored).
+    gate_mode:
+      - 'additive' (default): node_logit = ℓ_m + s * Δ  (or legacy full MLP if not residual_motif_logit)
+      - 'multiplicative' (E7): node_logit = ℓ_m * (1 + mult_scale * tanh(Δ)) if gate_tanh else ℓ_m * (1 + mult_scale * Δ)
+      - 'none' (E6): node_logit = ℓ_m only (gate_module ignored)
 
     Info loss applies to sampled node attention (att is node-level).
     """
     motif_alpha = motif_att_log_logits.sigmoid()
     if detach_alpha:
         motif_alpha = motif_alpha.detach()
-    z_node = motif_emb[inverse_indices]
-    if detach_z:
-        z_node = z_node.detach()
-    alpha_node = motif_alpha[inverse_indices]
-    shift_logit = gate_module(emb, z_node, alpha_node, batch)
-    if residual_motif_logit:
-        delta = torch.tanh(shift_logit) if gate_tanh else shift_logit
-        motif_logit_node = motif_att_log_logits[inverse_indices]
-        s = 0.1 if shift_scale is None else float(shift_scale)
-        node_logit = motif_logit_node + s * delta
+    motif_logit_node = motif_att_log_logits[inverse_indices]
+
+    gate_mode = (gate_mode or 'additive').lower()
+    if gate_mode == 'none':
+        node_logit = motif_logit_node
     else:
-        node_logit = shift_logit
+        z_node = motif_emb[inverse_indices]
+        if detach_z:
+            z_node = z_node.detach()
+        alpha_node = motif_alpha[inverse_indices]
+        shift_logit = gate_module(emb, z_node, alpha_node, batch)
+        if not residual_motif_logit:
+            node_logit = shift_logit
+        elif gate_mode == 'multiplicative':
+            delta = torch.tanh(shift_logit) if gate_tanh else shift_logit
+            if mult_scale is None:
+                s = motif_logit_node.new_tensor(0.5)
+            elif isinstance(mult_scale, torch.Tensor):
+                s = mult_scale
+            else:
+                s = motif_logit_node.new_tensor(float(mult_scale))
+            node_logit = motif_logit_node * (1.0 + s * delta)
+        else:
+            delta = torch.tanh(shift_logit) if gate_tanh else shift_logit
+            s = 0.1 if shift_scale is None else float(shift_scale)
+            node_logit = motif_logit_node + s * delta
+
     node_att = sampling_fn(node_logit, epoch, training)
     att = node_att
     raw_att_for_loss = node_logit.sigmoid() if use_raw_score_loss else None
@@ -363,12 +436,12 @@ def motif_pooling(emb, nodes_to_motifs, batch, reduce='mean'):
         emb: [N, hidden] node embeddings
         nodes_to_motifs: [N] global motif indices (can be non-consecutive)
         batch: [N] batch assignment for nodes
-        reduce: Aggregation method ('mean', 'sum', or 'multi' for
-                concatenated mean+max+sum giving 3× the embedding width).
+        reduce: Aggregation method ('mean', 'max', 'sum', 'max_mean' for concat mean+max,
+                or 'multi' for mean+max+sum giving 3× the embedding width).
                 ('intra_att' is handled by IntraMotifAttentionPool on GSAT, not here.)
     
     Returns:
-        motif_emb: [M, hidden] (or [M, 3*hidden] for 'multi')
+        motif_emb: [M, hidden] (or [M, 2*hidden] for 'max_mean', [M, 3*hidden] for 'multi')
         motif_batch: [M] batch assignment for motifs
         inverse_indices: [N] mapping from each node to its motif index (0..M-1)
         motif_ids: [M] original global motif index for each pooled motif
@@ -380,6 +453,10 @@ def motif_pooling(emb, nodes_to_motifs, batch, reduce='mean'):
         motif_max = scatter(emb, inverse_indices, dim=0, reduce='max')
         motif_sum = scatter(emb, inverse_indices, dim=0, reduce='sum')
         motif_emb = torch.cat([motif_mean, motif_max, motif_sum], dim=1)
+    elif reduce == 'max_mean':
+        motif_mean = scatter(emb, inverse_indices, dim=0, reduce='mean')
+        motif_max = scatter(emb, inverse_indices, dim=0, reduce='max')
+        motif_emb = torch.cat([motif_max, motif_mean], dim=1)
     else:
         motif_emb = scatter(emb, inverse_indices, dim=0, reduce=reduce)
     return motif_emb, motif_batch, inverse_indices, motif_ids
@@ -1104,12 +1181,16 @@ class GSAT(nn.Module):
 
     def __init__(self, clf, extractor, optimizer, scheduler, writer, device, model_dir, dataset_name, num_class, multi_label, random_state,
                  method_config, shared_config, fold, task_type='classification', datasets=None, masked_data=None, motif_clf=None,
-                 motif_list=None, intra_motif_pool=None, motif_prior_node_gate_module=None):
+                 motif_list=None, intra_motif_pool=None, motif_prior_node_gate_module=None,
+                 motif_interp_head=None, motif_logit_temperature=None, motif_gate_mult_scale=None):
         super().__init__()
         self.clf = clf
         self.extractor = extractor
         self.intra_motif_pool = intra_motif_pool  # Intra-motif attention pool (readout + intra_att only)
         self.motif_prior_node_gate_module = motif_prior_node_gate_module  # readout + motif_prior_node_gate only
+        self.motif_interp_head = motif_interp_head  # E5 interpretability-only head
+        self.motif_logit_temperature = motif_logit_temperature  # optional nn.Parameter (E2)
+        self.motif_gate_mult_scale = motif_gate_mult_scale  # optional nn.Parameter (E7)
         self.motif_clf = motif_clf  # Separate model for motif graph (optional)
         self.optimizer = optimizer
         self.scheduler = scheduler
@@ -1196,6 +1277,26 @@ class GSAT(nn.Module):
                 f"got {self.motif_prior_shift_schedule!r}"
             )
         self.motif_weight_diversity_coef = float(method_config.get('motif_weight_diversity_coef', 0.0))
+
+        # Motif readout ablations (E1–E10)
+        self.motif_logit_standardize_per_graph = bool(method_config.get('motif_logit_standardize_per_graph', False))
+        self.motif_readout_no_gate = bool(method_config.get('motif_readout_no_gate', False))
+        self.motif_gate_mode = str(method_config.get('motif_gate_mode', 'additive')).lower()
+        if self.motif_gate_mode not in ('additive', 'multiplicative', 'none'):
+            raise ValueError("motif_gate_mode must be 'additive', 'multiplicative', or 'none'")
+        self.motif_entropy_coef = float(method_config.get('motif_entropy_coef', 0.0))
+        self.motif_level_ib_coef = float(method_config.get('motif_level_ib_coef', 0.0))
+        self.motif_ib_final_r = method_config.get('motif_ib_final_r', None)
+        self.motif_ib_init_r = method_config.get('motif_ib_init_r', None)
+        self.motif_align_loss_coef = float(method_config.get('motif_align_loss_coef', 0.0))
+        self.motif_interp_distill_coef = float(method_config.get('motif_interp_distill_coef', 0.0))
+
+        if self.motif_readout_no_gate and self.motif_prior_node_gate:
+            raise ValueError('motif_readout_no_gate=True is incompatible with motif_prior_node_gate=True')
+        if self.motif_gate_mode == 'none' and self.motif_prior_node_gate:
+            raise ValueError("motif_gate_mode='none' implies no prior gate module; set motif_prior_node_gate=False")
+        if self.motif_gate_mode == 'multiplicative' and not self.motif_prior_node_gate:
+            raise ValueError("motif_gate_mode='multiplicative' requires motif_prior_node_gate=True")
         if self.motif_prior_node_gate:
             if self.motif_method != 'readout':
                 raise ValueError("motif_prior_node_gate=True requires motif_incorporation_method='readout'")
@@ -1535,7 +1636,61 @@ class GSAT(nn.Module):
             div_raw = motif_readout_weight_diversity_loss(motif_att_soft, motif_batch)
             diversity_term = self.motif_weight_diversity_coef * div_raw
 
-        loss = pred_loss + info_loss + within_term + between_term + diversity_term
+        entropy_term = att.new_tensor(0.0)
+        motif_ib_term = att.new_tensor(0.0)
+        align_term = att.new_tensor(0.0)
+        interp_distill_term = att.new_tensor(0.0)
+        ctx = getattr(self, '_loss_ctx', None) or {}
+
+        if self.motif_entropy_coef > 0 and self.motif_method == 'readout' and ctx.get('node_att') is not None:
+            na = ctx['node_att'].squeeze(-1)
+            nb = ctx['node_batch']
+            H = within_graph_node_attention_entropy(na, nb)
+            entropy_term = -self.motif_entropy_coef * H
+
+        if (
+            self.motif_level_ib_coef > 0
+            and self.motif_method == 'readout'
+            and motif_att_soft is not None
+        ):
+            fr = self.motif_ib_final_r if self.motif_ib_final_r is not None else self.final_r
+            ir = self.motif_ib_init_r if self.motif_ib_init_r is not None else self.init_r
+            r_m = self.fix_r if self.fix_r else self.get_r(
+                self.decay_interval, self.decay_r, epoch, final_r=fr, init_r=ir,
+            )
+            am = motif_att_soft.view(-1)
+            if am.numel() > 0:
+                motif_ib_term = self.motif_level_ib_coef * (
+                    am * torch.log(am / r_m + 1e-6) + (1.0 - am) * torch.log((1.0 - am) / (1.0 - r_m + 1e-6) + 1e-6)
+                ).mean()
+
+        if self.motif_align_loss_coef > 0 and ctx.get('inverse_indices') is not None and ctx.get('motif_att_soft') is not None:
+            na = ctx['node_att'].squeeze(-1)
+            inv = ctx['inverse_indices']
+            dim_m = int(ctx['dim_m'])
+            alpha_m_pred = scatter(na, inv, dim=0, dim_size=dim_m, reduce='mean')
+            alpha_m_motif = ctx['motif_att_soft']
+            align_term = self.motif_align_loss_coef * F.mse_loss(alpha_m_motif, alpha_m_pred.detach())
+
+        if (
+            self.motif_interp_distill_coef > 0
+            and ctx.get('motif_interp_logits') is not None
+            and ctx.get('motif_logit') is not None
+        ):
+            li = ctx['motif_interp_logits']
+            lm = ctx['motif_logit']
+            interp_distill_term = self.motif_interp_distill_coef * F.mse_loss(torch.sigmoid(li), torch.sigmoid(lm.detach()))
+
+        if epoch < self.info_warmup_epochs:
+            entropy_term = att.new_tensor(0.0)
+            motif_ib_term = att.new_tensor(0.0)
+            align_term = att.new_tensor(0.0)
+            interp_distill_term = att.new_tensor(0.0)
+
+        loss = (
+            pred_loss + info_loss + within_term + between_term + diversity_term
+            + entropy_term + motif_ib_term + align_term + interp_distill_term
+        )
 
         loss_dict = {
             'loss': loss.item(),
@@ -1545,6 +1700,10 @@ class GSAT(nn.Module):
             'motif_between': between_term.item(),
             'motif_consistency': motif_loss.item(),
             'motif_weight_diversity': diversity_term.item(),
+            'motif_entropy': entropy_term.item(),
+            'motif_ib': motif_ib_term.item(),
+            'motif_align': align_term.item(),
+            'motif_interp_distill': interp_distill_term.item(),
         }
 
         # # Auxiliary motif graph loss (commented out for simplification)
@@ -1610,6 +1769,7 @@ class GSAT(nn.Module):
         motif_ids = None      # Original motif IDs per pooled motif (used for score-based r)
         raw_att_for_loss = None  # sigmoid(logits) before sampling, used when use_raw_score_loss=True
         motif_att_soft = None  # σ(motif extractor logits); used for readout diversity loss
+        self._loss_ctx = {}
 
         if self.motif_method in [None, 'loss']:
             # =================================================================
@@ -1652,11 +1812,38 @@ class GSAT(nn.Module):
             motif_emb, motif_batch, inverse_indices, motif_ids = self._motif_level_pool(
                 emb, nodes_to_motifs, data.batch,
             )
+            dim_m = motif_emb.size(0)
+            motif_emb_mean = None
+            if self.motif_interp_head is not None:
+                motif_emb_mean = scatter(emb, inverse_indices, dim=0, dim_size=dim_m, reduce='mean')
 
             motif_att_log_logits = self.extractor(motif_emb, None, motif_batch)
+
+            if self.motif_logit_standardize_per_graph:
+                ell = motif_att_log_logits.view(-1)
+                ell = standardize_motif_logits_per_graph(ell, motif_batch)
+                motif_att_log_logits = ell.view_as(motif_att_log_logits)
+
+            if self.motif_logit_temperature is not None:
+                t = self.motif_logit_temperature.clamp(min=0.1)
+                motif_att_log_logits = motif_att_log_logits / t
+
             motif_att_soft = motif_att_log_logits.sigmoid()
 
-            if self.motif_prior_node_gate:
+            if self.motif_readout_no_gate:
+                node_att, att, raw_att_for_loss = sample_motif_readout_branch(
+                    self.sampling,
+                    motif_att_log_logits,
+                    inverse_indices,
+                    self.motif_level_sampling,
+                    self.motif_level_info_loss,
+                    epoch,
+                    training,
+                    self.use_raw_score_loss,
+                )
+            elif self.motif_prior_node_gate:
+                gm = self.motif_gate_mode
+                ms = self.motif_gate_mult_scale if gm == 'multiplicative' else None
                 node_att, att, raw_att_for_loss = sample_motif_readout_with_prior_node_gate(
                     self.sampling,
                     motif_att_log_logits,
@@ -1673,6 +1860,8 @@ class GSAT(nn.Module):
                     residual_motif_logit=self.motif_prior_residual_logit,
                     shift_scale=self._effective_motif_prior_shift_scale(epoch),
                     gate_tanh=self.motif_prior_gate_tanh,
+                    gate_mode=gm,
+                    mult_scale=ms,
                 )
             else:
                 node_att, att, raw_att_for_loss = sample_motif_readout_branch(
@@ -1685,6 +1874,25 @@ class GSAT(nn.Module):
                     training,
                     self.use_raw_score_loss,
                 )
+
+            motif_interp_logits = None
+            if self.motif_interp_head is not None and motif_emb_mean is not None:
+                alpha_i = node_att.squeeze(-1)
+                if self.motif_interp_distill_coef <= 0:
+                    alpha_i = alpha_i.detach()
+                stats_m = motif_node_attention_stats(alpha_i, inverse_indices, dim_m)
+                motif_interp_logits = self.motif_interp_head(motif_emb_mean, stats_m, motif_batch)
+
+            self._loss_ctx = {
+                'node_att': node_att,
+                'node_batch': data.batch,
+                'motif_batch': motif_batch,
+                'inverse_indices': inverse_indices,
+                'dim_m': dim_m,
+                'motif_logit': motif_att_log_logits.squeeze(-1),
+                'motif_att_soft': motif_att_soft.squeeze(-1),
+                'motif_interp_logits': motif_interp_logits.squeeze(-1) if motif_interp_logits is not None else None,
+            }
 
             edge_att = self.lift_node_att_to_edge_att(node_att, data.edge_index)
 
@@ -1800,7 +2008,27 @@ class GSAT(nn.Module):
                 emb, nodes_to_motifs, data.batch,
             )
             motif_att_log_logits = self.extractor(motif_emb, None, motif_batch_vec)
-            if self.motif_prior_node_gate:
+            if self.motif_logit_standardize_per_graph:
+                ell = motif_att_log_logits.view(-1)
+                ell = standardize_motif_logits_per_graph(ell, motif_batch_vec)
+                motif_att_log_logits = ell.view_as(motif_att_log_logits)
+            if self.motif_logit_temperature is not None:
+                t = self.motif_logit_temperature.clamp(min=0.1)
+                motif_att_log_logits = motif_att_log_logits / t
+            if self.motif_readout_no_gate:
+                node_att, _, _ = sample_motif_readout_branch(
+                    self.sampling,
+                    motif_att_log_logits,
+                    inverse_indices,
+                    self.motif_level_sampling,
+                    self.motif_level_info_loss,
+                    epoch,
+                    False,
+                    self.use_raw_score_loss,
+                )
+            elif self.motif_prior_node_gate:
+                gm = self.motif_gate_mode
+                ms = self.motif_gate_mult_scale if gm == 'multiplicative' else None
                 node_att, _, _ = sample_motif_readout_with_prior_node_gate(
                     self.sampling,
                     motif_att_log_logits,
@@ -1817,6 +2045,8 @@ class GSAT(nn.Module):
                     residual_motif_logit=self.motif_prior_residual_logit,
                     shift_scale=self._effective_motif_prior_shift_scale(epoch),
                     gate_tanh=self.motif_prior_gate_tanh,
+                    gate_mode=gm,
+                    mult_scale=ms,
                 )
             else:
                 node_att, _, _ = sample_motif_readout_branch(
@@ -2062,11 +2292,115 @@ class GSAT(nn.Module):
             torch.cuda.empty_cache()
 
     @torch.no_grad()
+    def compute_motif_readout_correlation_metrics(self, valid_loader, epoch, use_edge_attr, max_batches=6):
+        """
+        Motif readout: Pearson / Spearman between σ(ℓ_m) (and optional interp head) vs motif-level impact,
+        plus histogram of σ(ℓ_m). Impact = |p - p_masked| when zeroing intra-motif edges (same construction
+        as calculate_explainer_performance motif block). Scores and impacts are aligned per motif row m.
+        """
+        if self.motif_method != 'readout':
+            return {}
+        motif_scores = []
+        motif_impacts = []
+        interp_scores = []
+        sigma_m_vals = []
+        for bi, data in enumerate(valid_loader):
+            if bi >= max_batches:
+                break
+            data = process_data(data, use_edge_attr).to(self.device)
+            _, _, _, _ = self.forward_pass(data, epoch, training=False)
+            ctx = getattr(self, '_loss_ctx', None) or {}
+            ms = ctx.get('motif_att_soft')
+            if ms is None:
+                continue
+            sigma_m_vals.append(ms.detach().cpu().numpy())
+            mi = ctx.get('motif_interp_logits')
+            has_interp = mi is not None
+
+            node_att = ctx['node_att'].squeeze(-1)
+            src, dst = data.edge_index
+            edge_att = node_att[src] * node_att[dst]
+
+            nodes_to_motifs = data.nodes_to_motifs
+            graph_batch = data.batch
+            max_motif_id = nodes_to_motifs.max().item() + 1
+            graph_motif_id = graph_batch * max_motif_id + nodes_to_motifs
+            unique_graph_motifs = graph_motif_id.unique()
+
+            orig_output = self.clf(data.x, data.edge_index, graph_batch, edge_attr=data.edge_attr, edge_atten=None)
+            orig_probs = torch.sigmoid(orig_output).squeeze()
+
+            ms_np = ms.detach().cpu().numpy().reshape(-1)
+            dim_m = int(ms_np.shape[0])
+            for m in range(int(unique_graph_motifs.size(0))):
+                if m >= dim_m:
+                    break
+                gm_id = unique_graph_motifs[m]
+                node_mask = graph_motif_id == gm_id
+                if node_mask.sum() < 1:
+                    continue
+                graph_id = graph_batch[node_mask][0].item()
+                src_in = node_mask[src]
+                dst_in = node_mask[dst]
+                motif_edge_mask = src_in & dst_in
+                if motif_edge_mask.sum() == 0:
+                    continue
+                masked_edge_att = edge_att.clone()
+                masked_edge_att[motif_edge_mask] = 0.0
+                masked_output = self.clf(
+                    data.x, data.edge_index, graph_batch,
+                    edge_attr=data.edge_attr, edge_atten=masked_edge_att.unsqueeze(-1),
+                )
+                masked_prob = torch.sigmoid(masked_output[graph_id]).item()
+                impact = abs(orig_probs[graph_id].item() - masked_prob)
+                motif_scores.append(float(ms_np[m]))
+                motif_impacts.append(impact)
+                if has_interp and mi is not None and m < mi.numel():
+                    interp_scores.append(float(torch.sigmoid(mi.view(-1)[m]).item()))
+
+        out = {}
+        xs = np.asarray(motif_scores, dtype=np.float64)
+        ys = np.asarray(motif_impacts, dtype=np.float64)
+        if xs.size >= 5 and ys.size >= 5:
+            try:
+                c = np.corrcoef(xs, ys)[0, 1]
+                if not np.isnan(c):
+                    out['motif_readout/pearson_sigma_m_impact'] = float(c)
+                from scipy.stats import spearmanr
+                r_s, _ = spearmanr(xs, ys)
+                if not np.isnan(r_s):
+                    out['motif_readout/spearman_sigma_m_impact'] = float(r_s)
+            except Exception:
+                pass
+        if interp_scores and len(interp_scores) == len(motif_impacts):
+            xi = np.asarray(interp_scores, dtype=np.float64)
+            yi = np.asarray(motif_impacts, dtype=np.float64)
+            if xi.size >= 5:
+                try:
+                    from scipy.stats import spearmanr
+                    c2 = np.corrcoef(xi, yi)[0, 1]
+                    if not np.isnan(c2):
+                        out['motif_readout/pearson_sigma_interp_impact'] = float(c2)
+                    r_s2, _ = spearmanr(xi, yi)
+                    if not np.isnan(r_s2):
+                        out['motif_readout/spearman_sigma_interp_impact'] = float(r_s2)
+                except Exception:
+                    pass
+        if sigma_m_vals:
+            sigma_cat = np.concatenate(sigma_m_vals)
+            h = _wandb_histogram_safe(sigma_cat, num_bins=50)
+            if h is not None:
+                out['motif_readout/sigma_m_histogram'] = h
+        return out
+
+    @torch.no_grad()
     def eval_one_batch(self, data, epoch):
         self.extractor.eval()
         self.clf.eval()
         if self.motif_clf is not None:
             self.motif_clf.eval()
+        if self.motif_interp_head is not None:
+            self.motif_interp_head.eval()
 
         att, loss, loss_dict, clf_logits = self.forward_pass(data, epoch, training=False)
         return att.data.cpu().reshape(-1), loss_dict, clf_logits.data.cpu()
@@ -2076,6 +2410,8 @@ class GSAT(nn.Module):
         self.clf.train()
         if self.motif_clf is not None:
             self.motif_clf.train()
+        if self.motif_interp_head is not None:
+            self.motif_interp_head.train()
 
         att, loss, loss_dict, clf_logits = self.forward_pass(data, epoch, training=True)
         self.optimizer.zero_grad()
@@ -2169,6 +2505,11 @@ class GSAT(nn.Module):
                         self.motif_prior_node_gate_module, Path(self.seed_dir),
                         model_name='gsat_motif_prior_node_gate_epoch_' + str(epoch),
                     )
+                if self.motif_interp_head is not None:
+                    save_checkpoint(
+                        self.motif_interp_head, Path(self.seed_dir),
+                        model_name='gsat_motif_interp_head_epoch_' + str(epoch),
+                    )
                 epochs_without_improvement = 0
             elif (r == self.final_r or self.fix_r) and epoch > 10:
                 epochs_without_improvement += 1
@@ -2220,6 +2561,22 @@ class GSAT(nn.Module):
                 except Exception as e:
                     print(f"[WARNING] Failed to calculate explainer performance: {e}")
 
+            if epoch % 10 == 0 and epoch > 0 and self.motif_method == 'readout':
+                try:
+                    mrm = self.compute_motif_readout_correlation_metrics(
+                        loaders['valid'], epoch, use_edge_attr,
+                    )
+                    if mrm:
+                        wandb.log(mrm, step=epoch)
+                        metric_dict.update({k: v for k, v in mrm.items() if isinstance(v, (int, float))})
+                        if 'motif_readout/pearson_sigma_m_impact' in mrm:
+                            print(
+                                f"[INFO] Motif readout σ(ℓ_m) vs impact: Pearson={mrm.get('motif_readout/pearson_sigma_m_impact', float('nan')):.4f} "
+                                f"Spearman={mrm.get('motif_readout/spearman_sigma_m_impact', float('nan')):.4f}"
+                            )
+                except Exception as e:
+                    print(f"[WARNING] Failed motif readout correlation metrics: {e}")
+
             # if self.num_viz_samples != 0 and (epoch % self.viz_interval == 0 or epoch == self.epochs - 1):
             #     if self.multi_label:
             #         raise NotImplementedError
@@ -2235,6 +2592,11 @@ class GSAT(nn.Module):
                     save_checkpoint(
                         self.motif_prior_node_gate_module, Path(self.seed_dir),
                         model_name='gsat_motif_prior_node_gate_epoch_' + str(epoch),
+                    )
+                if self.motif_interp_head is not None:
+                    save_checkpoint(
+                        self.motif_interp_head, Path(self.seed_dir),
+                        model_name='gsat_motif_interp_head_epoch_' + str(epoch),
                     )
 
             # ===== Save edge and node scores for the last epoch using small batches =====
@@ -3597,6 +3959,8 @@ def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_nam
     motif_pool = method_config.get('motif_pooling_method', 'mean')
     if motif_pool == 'multi':
         extractor_input_dim = hidden_size * 3
+    elif motif_pool == 'max_mean':
+        extractor_input_dim = hidden_size * 2
     elif motif_pool == 'intra_att':
         extractor_input_dim = hidden_size * 3 + 1
     else:
@@ -3616,12 +3980,32 @@ def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_nam
             hidden_size, extractor_input_dim, shared_config,
         ).to(device)
 
+    motif_interp_head = None
+    if method_config.get('motif_readout_interp_head', False):
+        if method_config.get('motif_incorporation_method') != 'readout':
+            raise ValueError('motif_readout_interp_head requires motif_incorporation_method=readout')
+        motif_interp_head = MotifInterpScoreHead(hidden_size, shared_config).to(device)
+
+    motif_logit_temperature = None
+    if method_config.get('motif_logit_temperature_learned', False):
+        motif_logit_temperature = nn.Parameter(torch.tensor(1.5, device=device))
+
+    motif_gate_mult_scale = None
+    if str(method_config.get('motif_gate_mode', 'additive')).lower() == 'multiplicative':
+        motif_gate_mult_scale = nn.Parameter(torch.tensor(0.5, device=device))
+
     # Build parameter list for optimizer
     params_to_optimize = list(extractor.parameters()) + list(model.parameters())
     if intra_motif_pool is not None:
         params_to_optimize += list(intra_motif_pool.parameters())
     if motif_prior_node_gate_module is not None:
         params_to_optimize += list(motif_prior_node_gate_module.parameters())
+    if motif_interp_head is not None:
+        params_to_optimize += list(motif_interp_head.parameters())
+    if motif_logit_temperature is not None:
+        params_to_optimize.append(motif_logit_temperature)
+    if motif_gate_mult_scale is not None:
+        params_to_optimize.append(motif_gate_mult_scale)
         if method_config.get('motif_level_sampling'):
             print('[WARNING] motif_prior_node_gate: motif_level_sampling is ignored (always node-level gate).')
     # if motif_clf is not None:
@@ -3645,6 +4029,9 @@ def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_nam
         aux_info['multi_label'], random_state, method_config, shared_config, fold, task_type,
         datasets, masked_data_features, motif_clf=motif_clf, motif_list=motif_list,
         intra_motif_pool=intra_motif_pool, motif_prior_node_gate_module=motif_prior_node_gate_module,
+        motif_interp_head=motif_interp_head,
+        motif_logit_temperature=motif_logit_temperature,
+        motif_gate_mult_scale=motif_gate_mult_scale,
     )
 
     # Save model_config to seed_dir for post-hoc analysis (hidden_size, n_layers, etc.)
@@ -3702,7 +4089,7 @@ def main():
                         help='For motif_method=readout: sample at motif level then broadcast to nodes. '
                              'Default (False): lift motif logits to nodes, sample per-node like base GSAT.')
     parser.add_argument('--motif_pooling_method', type=str, default=None,
-                        choices=['mean', 'sum', 'multi', 'intra_att'],
+                        choices=['mean', 'max', 'sum', 'max_mean', 'multi', 'intra_att'],
                         help='Pool node embeddings to motif rows for readout (overrides config if set).')
     parser.add_argument('--motif_prior_node_gate', action='store_true', default=False,
                         help='Readout: node logit = motif_logit + shift_scale * f([h||z||α]) (default shift_scale=0.1); '

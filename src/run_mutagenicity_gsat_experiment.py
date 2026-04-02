@@ -14,6 +14,8 @@ Active groups (EXPERIMENT_GROUPS):
   motif_readout_prior_node_gate — readout prior-gate; shift_scale sweep {0, 0.1, 0.5, 1.0} (see variant_id *_s*)
   motif_readout_prior_node_gate_tanh_sched — tanh-bounded gate shift + warmup_linear s schedule; same s sweep
   motif_readout_weight_diversity — readout + motif_weight_diversity_coef (penalize identical motif scores within a graph)
+  motif_readout_baseline_f07 — decay final_r=0.7, motif-level sampling, prior node gate (fixed baseline for E1–E10)
+  motif_readout_e1_logit_standardize … motif_readout_e10_align_sweep — single-factor ablations (see EXPERIMENT_GROUPS)
   base_gsat_decay_r_minority_global — same as base_gsat_decay_r but motif pickles from FOLDS/minority_global/...
 
 Injection codes map to GSAT flags (w_node ≡ w_feat): 100=w_feat only, 010=w_message only, 001=w_readout only.
@@ -321,6 +323,311 @@ EXPERIMENT_GROUPS = {
             },
         ],
     },
+    # -------------------------------------------------------------------------
+    # Motif readout ablations (E1–E10): decay to final_r=0.7, motif-level sampling,
+    # mean pool + MLP + sigmoid baseline with prior node gate (additive s=0.1).
+    # Run with: --models GCN SAGE GAT GIN --experiments <group_name>
+    # -------------------------------------------------------------------------
+    'motif_readout_baseline_f07': {
+        'experiment_name': 'motif_readout_baseline_f07',
+        'variants': [
+            {
+                'variant_id': 'baseline_decay_f0.7_w010_motif_samp_prior_gate',
+                'gsat_overrides': {
+                    'tuning_id': 'baseline_decay_f0.7_w010_motif_samp_prior_gate',
+                    'fix_r': False,
+                    'init_r': 0.9,
+                    'decay_r': 0.1,
+                    'final_r': 0.7,
+                    'motif_incorporation_method': 'readout',
+                    'motif_pooling_method': 'mean',
+                    'motif_level_sampling': True,
+                    'motif_loss_coef': 0,
+                    'between_motif_coef': 0,
+                    'pred_loss_coef': 1.0,
+                    'info_loss_coef': 1.0,
+                    'motif_prior_node_gate': True,
+                    'motif_prior_shift_scale': 0.1,
+                    **INJECTION_PRESETS['010'],
+                },
+                'learn_edge_att': False,
+            },
+        ],
+    },
+    'motif_readout_e1_logit_standardize': {
+        'experiment_name': 'motif_readout_e1_logit_standardize',
+        'variants': [
+            {
+                'variant_id': 'e1_std_decay_f0.7',
+                'gsat_overrides': {
+                    'tuning_id': 'e1_std_decay_f0.7',
+                    'fix_r': False,
+                    'init_r': 0.9,
+                    'decay_r': 0.1,
+                    'final_r': 0.7,
+                    'motif_incorporation_method': 'readout',
+                    'motif_pooling_method': 'mean',
+                    'motif_level_sampling': True,
+                    'motif_loss_coef': 0,
+                    'between_motif_coef': 0,
+                    'pred_loss_coef': 1.0,
+                    'info_loss_coef': 1.0,
+                    'motif_prior_node_gate': True,
+                    'motif_prior_shift_scale': 0.1,
+                    'motif_logit_standardize_per_graph': True,
+                    **INJECTION_PRESETS['010'],
+                },
+                'learn_edge_att': False,
+            },
+        ],
+    },
+    'motif_readout_e2_temperature': {
+        'experiment_name': 'motif_readout_e2_temperature',
+        'variants': [
+            {
+                'variant_id': 'e2_temp_decay_f0.7',
+                'gsat_overrides': {
+                    'tuning_id': 'e2_temp_decay_f0.7',
+                    'fix_r': False,
+                    'init_r': 0.9,
+                    'decay_r': 0.1,
+                    'final_r': 0.7,
+                    'motif_incorporation_method': 'readout',
+                    'motif_pooling_method': 'mean',
+                    'motif_level_sampling': True,
+                    'motif_loss_coef': 0,
+                    'between_motif_coef': 0,
+                    'pred_loss_coef': 1.0,
+                    'info_loss_coef': 1.0,
+                    'motif_prior_node_gate': True,
+                    'motif_prior_shift_scale': 0.1,
+                    'motif_logit_temperature_learned': True,
+                    **INJECTION_PRESETS['010'],
+                },
+                'learn_edge_att': False,
+            },
+        ],
+    },
+    'motif_readout_e3_max_pool': {
+        'experiment_name': 'motif_readout_e3_max_pool',
+        'variants': [
+            {
+                'variant_id': 'e3_max_decay_f0.7',
+                'gsat_overrides': {
+                    'tuning_id': 'e3_max_decay_f0.7',
+                    'fix_r': False,
+                    'init_r': 0.9,
+                    'decay_r': 0.1,
+                    'final_r': 0.7,
+                    'motif_incorporation_method': 'readout',
+                    'motif_pooling_method': 'max',
+                    'motif_level_sampling': True,
+                    'motif_loss_coef': 0,
+                    'between_motif_coef': 0,
+                    'pred_loss_coef': 1.0,
+                    'info_loss_coef': 1.0,
+                    'motif_prior_node_gate': True,
+                    'motif_prior_shift_scale': 0.1,
+                    **INJECTION_PRESETS['010'],
+                },
+                'learn_edge_att': False,
+            },
+        ],
+    },
+    'motif_readout_e4_max_mean_pool': {
+        'experiment_name': 'motif_readout_e4_max_mean_pool',
+        'variants': [
+            {
+                'variant_id': 'e4_maxmean_decay_f0.7',
+                'gsat_overrides': {
+                    'tuning_id': 'e4_maxmean_decay_f0.7',
+                    'fix_r': False,
+                    'init_r': 0.9,
+                    'decay_r': 0.1,
+                    'final_r': 0.7,
+                    'motif_incorporation_method': 'readout',
+                    'motif_pooling_method': 'max_mean',
+                    'motif_level_sampling': True,
+                    'motif_loss_coef': 0,
+                    'between_motif_coef': 0,
+                    'pred_loss_coef': 1.0,
+                    'info_loss_coef': 1.0,
+                    'motif_prior_node_gate': True,
+                    'motif_prior_shift_scale': 0.1,
+                    **INJECTION_PRESETS['010'],
+                },
+                'learn_edge_att': False,
+            },
+        ],
+    },
+    'motif_readout_e5_interp_head': {
+        'experiment_name': 'motif_readout_e5_interp_head',
+        'variants': [
+            {
+                'variant_id': 'e5_interp_decay_f0.7',
+                'gsat_overrides': {
+                    'tuning_id': 'e5_interp_decay_f0.7',
+                    'fix_r': False,
+                    'init_r': 0.9,
+                    'decay_r': 0.1,
+                    'final_r': 0.7,
+                    'motif_incorporation_method': 'readout',
+                    'motif_pooling_method': 'mean',
+                    'motif_level_sampling': True,
+                    'motif_loss_coef': 0,
+                    'between_motif_coef': 0,
+                    'pred_loss_coef': 1.0,
+                    'info_loss_coef': 1.0,
+                    'motif_prior_node_gate': True,
+                    'motif_prior_shift_scale': 0.1,
+                    'motif_readout_interp_head': True,
+                    'motif_interp_distill_coef': 0.1,
+                    **INJECTION_PRESETS['010'],
+                },
+                'learn_edge_att': False,
+            },
+        ],
+    },
+    'motif_readout_e6_no_gate': {
+        'experiment_name': 'motif_readout_e6_no_gate',
+        'variants': [
+            {
+                'variant_id': 'e6_nogate_decay_f0.7',
+                'gsat_overrides': {
+                    'tuning_id': 'e6_nogate_decay_f0.7',
+                    'fix_r': False,
+                    'init_r': 0.9,
+                    'decay_r': 0.1,
+                    'final_r': 0.7,
+                    'motif_incorporation_method': 'readout',
+                    'motif_pooling_method': 'mean',
+                    'motif_level_sampling': True,
+                    'motif_loss_coef': 0,
+                    'between_motif_coef': 0,
+                    'pred_loss_coef': 1.0,
+                    'info_loss_coef': 1.0,
+                    'motif_prior_node_gate': False,
+                    'motif_readout_no_gate': True,
+                    **INJECTION_PRESETS['010'],
+                },
+                'learn_edge_att': False,
+            },
+        ],
+    },
+    'motif_readout_e7_multiplicative_gate': {
+        'experiment_name': 'motif_readout_e7_multiplicative_gate',
+        'variants': [
+            {
+                'variant_id': 'e7_multgate_decay_f0.7',
+                'gsat_overrides': {
+                    'tuning_id': 'e7_multgate_decay_f0.7',
+                    'fix_r': False,
+                    'init_r': 0.9,
+                    'decay_r': 0.1,
+                    'final_r': 0.7,
+                    'motif_incorporation_method': 'readout',
+                    'motif_pooling_method': 'mean',
+                    'motif_level_sampling': True,
+                    'motif_loss_coef': 0,
+                    'between_motif_coef': 0,
+                    'pred_loss_coef': 1.0,
+                    'info_loss_coef': 1.0,
+                    'motif_prior_node_gate': True,
+                    'motif_prior_shift_scale': 0.1,
+                    'motif_gate_mode': 'multiplicative',
+                    **INJECTION_PRESETS['010'],
+                },
+                'learn_edge_att': False,
+            },
+        ],
+    },
+    'motif_readout_e8_entropy_sweep': {
+        'experiment_name': 'motif_readout_e8_entropy_sweep',
+        'variants': [
+            {
+                'variant_id': f'e8_entropy_g{gamma:g}',
+                'gsat_overrides': {
+                    'tuning_id': f'e8_entropy_g{gamma:g}',
+                    'fix_r': False,
+                    'init_r': 0.9,
+                    'decay_r': 0.1,
+                    'final_r': 0.7,
+                    'motif_incorporation_method': 'readout',
+                    'motif_pooling_method': 'mean',
+                    'motif_level_sampling': True,
+                    'motif_loss_coef': 0,
+                    'between_motif_coef': 0,
+                    'pred_loss_coef': 1.0,
+                    'info_loss_coef': 1.0,
+                    'motif_prior_node_gate': True,
+                    'motif_prior_shift_scale': 0.1,
+                    'motif_entropy_coef': gamma,
+                    **INJECTION_PRESETS['010'],
+                },
+                'learn_edge_att': False,
+            }
+            for gamma in (0.05, 0.1, 0.5)
+        ],
+    },
+    'motif_readout_e9_motif_ib_sweep': {
+        'experiment_name': 'motif_readout_e9_motif_ib_sweep',
+        'variants': [
+            {
+                'variant_id': f'e9_motifib_bm{bm:g}_rfr{fr:g}',
+                'gsat_overrides': {
+                    'tuning_id': f'e9_motifib_bm{bm:g}_rfr{fr:g}',
+                    'fix_r': False,
+                    'init_r': 0.9,
+                    'decay_r': 0.1,
+                    'final_r': 0.7,
+                    'motif_incorporation_method': 'readout',
+                    'motif_pooling_method': 'mean',
+                    'motif_level_sampling': True,
+                    'motif_loss_coef': 0,
+                    'between_motif_coef': 0,
+                    'pred_loss_coef': 1.0,
+                    'info_loss_coef': 1.0,
+                    'motif_prior_node_gate': True,
+                    'motif_prior_shift_scale': 0.1,
+                    'motif_level_ib_coef': bm,
+                    'motif_ib_final_r': fr,
+                    'motif_ib_init_r': 0.9,
+                    **INJECTION_PRESETS['010'],
+                },
+                'learn_edge_att': False,
+            }
+            for bm in (0.1, 0.5, 1.0)
+            for fr in (0.3, 0.5, 0.7)
+        ],
+    },
+    'motif_readout_e10_align_sweep': {
+        'experiment_name': 'motif_readout_e10_align_sweep',
+        'variants': [
+            {
+                'variant_id': f'e10_align_lam{lam:g}',
+                'gsat_overrides': {
+                    'tuning_id': f'e10_align_lam{lam:g}',
+                    'fix_r': False,
+                    'init_r': 0.9,
+                    'decay_r': 0.1,
+                    'final_r': 0.7,
+                    'motif_incorporation_method': 'readout',
+                    'motif_pooling_method': 'mean',
+                    'motif_level_sampling': True,
+                    'motif_loss_coef': 0,
+                    'between_motif_coef': 0,
+                    'pred_loss_coef': 1.0,
+                    'info_loss_coef': 1.0,
+                    'motif_prior_node_gate': True,
+                    'motif_prior_shift_scale': 0.1,
+                    'motif_align_loss_coef': lam,
+                    **INJECTION_PRESETS['010'],
+                },
+                'learn_edge_att': False,
+            }
+            for lam in (0.1, 0.5, 1.0)
+        ],
+    },
 }
 
 # Same hyperparameter grid as base_gsat_decay_r, but loads motif dictionaries from
@@ -415,6 +722,17 @@ def main():
         'motif_readout_prior_node_gate',
         'motif_readout_prior_node_gate_tanh_sched',
         'motif_readout_weight_diversity',
+        'motif_readout_baseline_f07',
+        'motif_readout_e1_logit_standardize',
+        'motif_readout_e2_temperature',
+        'motif_readout_e3_max_pool',
+        'motif_readout_e4_max_mean_pool',
+        'motif_readout_e5_interp_head',
+        'motif_readout_e6_no_gate',
+        'motif_readout_e7_multiplicative_gate',
+        'motif_readout_e8_entropy_sweep',
+        'motif_readout_e9_motif_ib_sweep',
+        'motif_readout_e10_align_sweep',
     }
     if dataset_name not in DATASETS_WITH_MOTIFS:
         skipped = [e for e in args.experiments if e in motif_experiments]
