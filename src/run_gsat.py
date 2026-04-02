@@ -2617,6 +2617,23 @@ class GSAT(nn.Module):
             except Exception:
                 pass
 
+            try:
+                _wl = {}
+                if self.motif_logit_temperature is not None:
+                    _t = self.motif_logit_temperature.clamp(min=0.1)
+                    _wl['learned/motif_logit_temperature'] = float(_t.detach().cpu().item())
+                    _wl['learned/motif_logit_temperature_param'] = float(
+                        self.motif_logit_temperature.detach().cpu().item()
+                    )
+                if self.motif_gate_mult_scale is not None:
+                    _wl['learned/motif_gate_mult_scale'] = float(
+                        self.motif_gate_mult_scale.detach().cpu().item()
+                    )
+                if _wl:
+                    wandb.log(_wl, step=epoch)
+            except Exception:
+                pass
+
             # Early stopping: stop when validation has not improved for patience epochs
             if (self.early_stopping_patience is not None and epoch >= self.early_stopping_min_epochs
                     and epochs_without_improvement >= self.early_stopping_patience):
