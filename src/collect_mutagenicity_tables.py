@@ -308,6 +308,16 @@ EXPERIMENT_ROW_CONFIG = {
         'row_label_prefix': 'align_lambda',
         'path_extract': 'final_r',
     },
+    'motif_readout_entropy_pool_sweep': {
+        'summary_path': ('motif_incorporation', 'motif_pooling_method'),
+        'row_label_prefix': 'pool',
+        'path_extract': 'final_r',
+    },
+    'motif_readout_maxmean_node_vs_edge_att': {
+        'summary_path': None,
+        'row_label_prefix': 'usage',
+        'path_extract': 'maxmean_score_usage',
+    },
 }
 
 
@@ -428,6 +438,14 @@ def _extract_value_from_parts(parts, mode):
                 r'readout_prior_gate_s[0-9.]', p
             ):
                 return 0.1
+        return None
+
+    elif mode == 'maxmean_score_usage':
+        joined = '/'.join(parts)
+        if 'maxmean_node_inj' in joined:
+            return 'node_inj'
+        if 'maxmean_edge_att' in joined:
+            return 'edge_att'
         return None
 
     return None

@@ -16,6 +16,8 @@ Active groups (EXPERIMENT_GROUPS):
   motif_readout_weight_diversity — readout + motif_weight_diversity_coef (penalize identical motif scores within a graph)
   motif_readout_baseline_f07 — decay final_r=0.7, motif-level sampling, prior node gate (fixed baseline for E1–E10)
   motif_readout_e1_logit_standardize … motif_readout_e10_align_sweep — single-factor ablations (see EXPERIMENT_GROUPS)
+  motif_readout_entropy_pool_sweep — no node gate; entropy bonus; pooling sweep mean | max | max_mean | intra_att
+  motif_readout_maxmean_node_vs_edge_att — max_mean + entropy; node-injection vs edge_atten downstream usage
   base_gsat_decay_r_minority_global — same as base_gsat_decay_r but motif pickles from FOLDS/minority_global/...
 
 Injection codes map to GSAT flags (w_node ≡ w_feat): 100=w_feat only, 010=w_message only, 001=w_readout only.
@@ -628,6 +630,92 @@ EXPERIMENT_GROUPS = {
             for lam in (0.1, 0.5, 1.0)
         ],
     },
+    # No prior node gate; entropy bonus for spread; motif-level sampling → downstream GNN (w_message 010).
+    # Pooling sweep: mean | max | max_mean | intra_att (attention pooling within motif).
+    'motif_readout_entropy_pool_sweep': {
+        'experiment_name': 'motif_readout_entropy_pool_sweep',
+        'variants': [
+            {
+                'variant_id': f'entropypool_{pool}_w010',
+                'gsat_overrides': {
+                    'tuning_id': f'entropypool_{pool}_w010',
+                    'fix_r': False,
+                    'init_r': 0.9,
+                    'decay_r': 0.1,
+                    'final_r': 0.7,
+                    'motif_incorporation_method': 'readout',
+                    'motif_pooling_method': pool,
+                    'motif_level_sampling': True,
+                    'motif_loss_coef': 0,
+                    'between_motif_coef': 0,
+                    'pred_loss_coef': 1.0,
+                    'info_loss_coef': 1.0,
+                    'motif_prior_node_gate': False,
+                    'motif_readout_no_gate': True,
+                    'motif_logit_temperature_learned': False,
+                    'motif_logit_standardize_per_graph': False,
+                    'motif_entropy_coef': 0.1,
+                    **INJECTION_PRESETS['010'],
+                },
+                'learn_edge_att': False,
+            }
+            for pool in ('mean', 'max', 'max_mean', 'intra_att')
+        ],
+    },
+    # max_mean readout fixed; compare node-injection vs full forward with edge attention from lifted motif scores.
+    'motif_readout_maxmean_node_vs_edge_att': {
+        'experiment_name': 'motif_readout_maxmean_node_vs_edge_att',
+        'variants': [
+            {
+                'variant_id': 'maxmean_node_inj_w010',
+                'gsat_overrides': {
+                    'tuning_id': 'maxmean_node_inj_w010',
+                    'fix_r': False,
+                    'init_r': 0.9,
+                    'decay_r': 0.1,
+                    'final_r': 0.7,
+                    'motif_incorporation_method': 'readout',
+                    'motif_pooling_method': 'max_mean',
+                    'motif_level_sampling': True,
+                    'motif_loss_coef': 0,
+                    'between_motif_coef': 0,
+                    'pred_loss_coef': 1.0,
+                    'info_loss_coef': 1.0,
+                    'motif_prior_node_gate': False,
+                    'motif_readout_no_gate': True,
+                    'motif_logit_temperature_learned': False,
+                    'motif_logit_standardize_per_graph': False,
+                    'motif_entropy_coef': 0.1,
+                    **INJECTION_PRESETS['010'],
+                },
+                'learn_edge_att': False,
+            },
+            {
+                'variant_id': 'maxmean_edge_att_w010',
+                'gsat_overrides': {
+                    'tuning_id': 'maxmean_edge_att_w010',
+                    'fix_r': False,
+                    'init_r': 0.9,
+                    'decay_r': 0.1,
+                    'final_r': 0.7,
+                    'motif_incorporation_method': 'readout',
+                    'motif_pooling_method': 'max_mean',
+                    'motif_level_sampling': True,
+                    'motif_loss_coef': 0,
+                    'between_motif_coef': 0,
+                    'pred_loss_coef': 1.0,
+                    'info_loss_coef': 1.0,
+                    'motif_prior_node_gate': False,
+                    'motif_readout_no_gate': True,
+                    'motif_logit_temperature_learned': False,
+                    'motif_logit_standardize_per_graph': False,
+                    'motif_entropy_coef': 0.1,
+                    **INJECTION_PRESETS['010'],
+                },
+                'learn_edge_att': True,
+            },
+        ],
+    },
 }
 
 # Same hyperparameter grid as base_gsat_decay_r, but loads motif dictionaries from
@@ -735,6 +823,8 @@ def main():
         'motif_readout_e8_entropy_sweep',
         'motif_readout_e9_motif_ib_sweep',
         'motif_readout_e10_align_sweep',
+        'motif_readout_entropy_pool_sweep',
+        'motif_readout_maxmean_node_vs_edge_att',
     }
     if dataset_name not in DATASETS_WITH_MOTIFS:
         skipped = [e for e in args.experiments if e in motif_experiments]

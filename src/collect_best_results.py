@@ -59,6 +59,8 @@ DEFAULT_EXPERIMENT_LABELS = {
     'motif_readout_e8_entropy_sweep': 'E8 node-attention entropy sweep',
     'motif_readout_e9_motif_ib_sweep': 'E9 motif-level IB sweep',
     'motif_readout_e10_align_sweep': 'E10 motif–node alignment sweep',
+    'motif_readout_entropy_pool_sweep': 'Entropy bonus; pooling sweep (mean/max/max_mean/intra_att)',
+    'motif_readout_maxmean_node_vs_edge_att': 'max_mean readout: node inj vs edge attention',
 }
 
 
@@ -544,6 +546,8 @@ def main():
             'motif_readout_e8_entropy_sweep',
             'motif_readout_e9_motif_ib_sweep',
             'motif_readout_e10_align_sweep',
+            'motif_readout_entropy_pool_sweep',
+            'motif_readout_maxmean_node_vs_edge_att',
         ]
 
     run(

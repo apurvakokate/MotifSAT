@@ -490,7 +490,7 @@ def forward_clf_with_node_attention_injection(
     <USAGE> Shared GSAT classifier forward: W_FEAT / W_MESSAGE / W_READOUT when using node-level attention.
 
     Matches the node-attention branch in forward_pass (previously duplicated at ~1266–1273 and ~1311–1318).
-    When learn_edge_att is True, falls back to full-graph forward with edge_atten (legacy; disabled in streamlined configs).
+    When learn_edge_att is True, uses full-graph forward with edge_atten (motif readout lifts node att to edges).
     """
     if learn_edge_att:
         return clf(data.x, data.edge_index, data.batch, edge_attr=edge_attr, edge_atten=edge_att)
@@ -1914,13 +1914,6 @@ class GSAT(nn.Module):
 
             edge_att = self.lift_node_att_to_edge_att(node_att, data.edge_index)
 
-            if self.learn_edge_att:
-                # clf_logits = self.clf(data.x, data.edge_index, data.batch,
-                #                       edge_attr=data.edge_attr, edge_atten=edge_att)
-                raise ValueError(
-                    "learn_edge_att=True is disabled in the streamlined training path; "
-                    "set shared_config['learn_edge_att'] to False."
-                )
             clf_logits = forward_clf_with_node_attention_injection(
                 self.clf, data, node_att, edge_att, self.learn_edge_att,
                 self.w_feat, self.w_message, self.w_readout, edge_attr=data.edge_attr,
