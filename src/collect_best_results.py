@@ -2,7 +2,8 @@
 """
 Pick anchor (experiment × model) for plots, write best_results CSVs.
 
-Selection (--selection-by) only chooses which hyperparam row label to use per model; ROC and explainer
+Selection (--selection-by) chooses which hyperparam row label to use per model; use encoder_branch to fix
+emb_stop=encoder (motif_readout_pred_info_only). ROC and explainer
 cells are the same numbers as collect_mutagenicity_tables for that row (build_table / build_posthoc_table).
 
 Plots use the anchor run's seed_dir. Optional SET_R filters runs before building pivots.
@@ -277,6 +278,37 @@ def _best_run_motif_corr_valid(records: list, model: str) -> tuple[dict | None, 
     return best, float(best_key[0])
 
 
+def _record_is_encoder_emb_stop(r: dict) -> bool:
+    """motif_readout_pred_info_only (and similar): row label emb_stop=encoder from collect tables."""
+    if str(r.get('row', '')) == 'emb_stop=encoder':
+        return True
+    rv = r.get('row_val')
+    if rv is not None and str(rv).strip().lower() == 'encoder':
+        return True
+    return False
+
+
+def _best_run_encoder_branch(records: list, model: str) -> tuple[dict | None, float]:
+    """Anchor: only runs with motif GNN emb_stop=encoder; tie-break max valid ROC. Stored as composite_valid."""
+    best = None
+    best_rv = -1.0
+    for r in records:
+        if r['model'] != model:
+            continue
+        if not _record_is_encoder_emb_stop(r):
+            continue
+        rv = r['metrics'].get('metric/best_clf_roc_valid', np.nan)
+        if not np.isfinite(rv):
+            continue
+        rv = float(rv)
+        if rv > best_rv:
+            best_rv = rv
+            best = r
+    if best is None:
+        return None, float('nan')
+    return best, best_rv
+
+
 def _unpack_mean_std_count(t):
     """build_table / build_posthoc_table return (mean_df, std_df, count_df) or (None, None, None)."""
     if t is None or t[0] is None:
@@ -300,10 +332,15 @@ def run(
     (best_results_dir / dataset).mkdir(parents=True, exist_ok=True)
     fixed_r_mode = set_r is not None
     use_motif_sel = selection_by == 'motif_corr_valid'
-    if selection_by not in ('composite', 'motif_corr_valid'):
-        raise ValueError(f"selection_by must be 'composite' or 'motif_corr_valid', got {selection_by!r}")
+    use_encoder_branch = selection_by == 'encoder_branch'
+    if selection_by not in ('composite', 'motif_corr_valid', 'encoder_branch'):
+        raise ValueError(
+            f"selection_by must be 'composite', 'motif_corr_valid', or 'encoder_branch', got {selection_by!r}"
+        )
 
-    if use_motif_sel:
+    if use_encoder_branch:
+        sel_label = 'encoder_emb_stop_tie_valid_roc'
+    elif use_motif_sel:
         sel_label = 'motif_corr_valid_tie_roc'
     elif fixed_r_mode:
         sel_label = 'fixed_r_max_valid_roc'
@@ -323,6 +360,11 @@ def run(
             'Table values match collect_mutagenicity_tables pivots at the anchor row per model; '
             'selection only picks that row for plots. '
             + (f'SET_R={set_r} filters runs before pivots. ' if fixed_r_mode else '')
+            + (
+                'encoder_branch: anchor row is emb_stop=encoder only (no composite/motif-argmax). '
+                if use_encoder_branch
+                else ''
+            )
         ),
     }
     with open(best_results_dir / dataset / 'selection_weights.json', 'w') as f:
@@ -389,7 +431,9 @@ def run(
         node_te_m, node_te_s, node_te_c = _unpack_mean_std_count(_build_node_posthoc_table(records, split='test'))
 
         for model in MODEL_ORDER:
-            if use_motif_sel:
+            if use_encoder_branch:
+                br, comp = _best_run_encoder_branch(records, model)
+            elif use_motif_sel:
                 br, comp = _best_run_motif_corr_valid(records, model)
             elif fixed_r_mode:
                 br, comp = _best_run_max_valid_roc(records, model)
@@ -509,15 +553,16 @@ def main():
     p.add_argument(
         '--selection-by',
         type=str,
-        choices=['composite', 'motif_corr_valid'],
+        choices=['composite', 'motif_corr_valid', 'encoder_branch'],
         default=None,
-        help='Anchor hyperparam row + per-fold seed: composite vs motif-level r on valid (default: env SELECTION_BY or composite).',
+        help='Anchor row: composite | motif_corr_valid | encoder_branch (emb_stop=encoder; tie valid ROC). '
+        'Default: env SELECTION_BY or composite.',
     )
     p.add_argument('-v', '--verbose', action='store_true')
     args = p.parse_args()
     set_r = args.set_r if args.set_r is not None else _parse_set_r_env()
     sel = (args.selection_by or os.environ.get('SELECTION_BY') or 'composite').strip().lower()
-    if sel not in ('composite', 'motif_corr_valid'):
+    if sel not in ('composite', 'motif_corr_valid', 'encoder_branch'):
         print(f'[WARN] Invalid SELECTION_BY={sel!r}, using composite')
         sel = 'composite'
 
