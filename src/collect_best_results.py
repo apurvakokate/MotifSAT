@@ -64,6 +64,7 @@ DEFAULT_EXPERIMENT_LABELS = {
     'motif_readout_entropy_pool_sweep': 'Entropy bonus; pooling sweep (mean/max/max_mean/intra_att)',
     'motif_readout_maxmean_node_vs_edge_att': 'max_mean readout: node inj vs edge attention',
     'motif_readout_pred_info_only': 'L_pred+L_info; max_mean; sweep GNN layer for motif emb (α discriminability)',
+    'factored_motif_attention_grid': 'Factored motif attention (M1–M4 × N1–N3; multi-z_k + factored logits + mean-α IB)',
 }
 
 
@@ -596,6 +597,7 @@ def main():
             'motif_readout_entropy_pool_sweep',
             'motif_readout_maxmean_node_vs_edge_att',
             'motif_readout_pred_info_only',
+            'factored_motif_attention_grid',
         ]
 
     run(

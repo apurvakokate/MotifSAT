@@ -323,6 +323,12 @@ EXPERIMENT_ROW_CONFIG = {
         'row_label_prefix': 'emb_stop',
         'path_extract': 'final_r',
     },
+    'factored_motif_attention_grid': {
+        # Row = M{1-4}_N{1-3}; prefer experiment_summary.json; else parse tuning_factored_M*_N* from path
+        'summary_path': None,
+        'row_label_prefix': 'cell',
+        'path_extract': 'factored_motif_cell',
+    },
 }
 
 
@@ -486,6 +492,13 @@ def _extract_value_from_parts(parts, mode):
             return 'edge_att'
         return None
 
+    elif mode == 'factored_motif_variant':
+        joined = '/'.join(parts)
+        m = re.search(r'factored_([A-Z][0-9])_([A-Z][0-9])', joined)
+        if m:
+            return f'{m.group(1)}_{m.group(2)}'
+        return None
+
     return None
 
 
@@ -529,6 +542,17 @@ def _get_row_value(summary: dict, experiment_name: str, parts=None):
                 return val
         if final_val is not None:
             return f'ext=?x, r={_coerce_number(final_val)}'
+        return 'unknown'
+
+    if extract_mode == 'factored_motif_cell':
+        zk = _get_nested(summary, ('motif_readout_ablation', 'factored_motif_zk_axis'))
+        nd = _get_nested(summary, ('motif_readout_ablation', 'factored_node_logit_axis'))
+        if zk is not None and nd is not None:
+            return f'{zk}_{nd}'
+        if parts is not None:
+            val_fb = _extract_value_from_parts(parts, 'factored_motif_variant')
+            if val_fb is not None:
+                return val_fb
         return 'unknown'
 
     val = None

@@ -65,6 +65,7 @@ EXPERIMENTS=(
   motif_readout_entropy_pool_sweep
   motif_readout_maxmean_node_vs_edge_att
   motif_readout_pred_info_only
+  factored_motif_attention_grid
 )
 
 # Subset or reorder for load balancing. Full SUPPORTED_DATASETS order in driver: molecular + OGB + PAPER_DATASETS (deduped).

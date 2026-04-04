@@ -21,6 +21,7 @@ Active groups (EXPERIMENT_GROUPS):
   motif_readout_pred_info_only — L_pred + L_info only; max_mean + motif-level sampling; sweep motif_readout_emb_stop
     (encoder | layer 0..2 | final) to find discriminative motif α without extra losses
   base_gsat_decay_r_minority_global — same as base_gsat_decay_r but motif pickles from FOLDS/minority_global/...
+  factored_motif_attention_grid — 12 variants (M1–M4 × N1–N3): multi-granularity z_k, factored node logits, motif IB on mean node α (see experiment_factored_motif.py)
 
 Injection codes map to GSAT flags (w_node ≡ w_feat): 100=w_feat only, 010=w_message only, 001=w_readout only.
 
@@ -777,6 +778,52 @@ EXPERIMENT_GROUPS['base_gsat_decay_r_minority_global'] = {
     ],
 }
 
+# Factored Motif Attention Pipeline: multi-granularity z_k × factored node logits (12 cells: M1–M4 × N1–N3).
+# See run_gsat.GSAT._factored_motif_prepare and experiment docstring in experiment_factored_motif.py
+_FACTORED_MOTIF_BASE_GSAT = {
+    'motif_incorporation_method': 'readout',
+    'factored_motif_attention': True,
+    'motif_pooling_method': 'intra_att',
+    'motif_gate_mode': 'none',
+    'motif_readout_no_gate': True,
+    'motif_prior_node_gate': False,
+    'info_loss_coef': 0.0,
+    'use_raw_score_loss': False,
+    'use_motif_ib_mean_node_alpha': True,
+    'motif_level_ib_coef': 1.0,
+    'motif_ib_init_r': 0.9,
+    'motif_ib_final_r': 0.2,
+    'fix_r': False,
+    'init_r': 0.9,
+    'decay_r': 0.1,
+    'final_r': 0.7,
+    'pred_loss_coef': 1.0,
+    'motif_loss_coef': 0.0,
+    'between_motif_coef': 0.0,
+    'w_feat': True,
+    'w_message': True,
+    'w_readout': True,
+}
+
+EXPERIMENT_GROUPS['factored_motif_attention_grid'] = {
+    'experiment_name': 'factored_motif_attention_grid',
+    'variants': [
+        {
+            'variant_id': f'factored_{zk}_{n}',
+            'gsat_overrides': {
+                'tuning_id': f'factored_{zk}_{n}',
+                **_DECAY_R_BASE,
+                **_FACTORED_MOTIF_BASE_GSAT,
+                'factored_motif_zk_axis': zk,
+                'factored_node_logit_axis': n,
+            },
+            'learn_edge_att': False,
+        }
+        for zk in ('M1', 'M2', 'M3', 'M4')
+        for n in ('N1', 'N2', 'N3')
+    ],
+}
+
 ALL_EXPERIMENT_NAMES = list(EXPERIMENT_GROUPS.keys())
 
 
@@ -874,6 +921,7 @@ def main():
         'motif_readout_entropy_pool_sweep',
         'motif_readout_maxmean_node_vs_edge_att',
         'motif_readout_pred_info_only',
+        'factored_motif_attention_grid',
     }
     if dataset_name not in DATASETS_WITH_MOTIFS:
         skipped = [e for e in args.experiments if e in motif_experiments]
