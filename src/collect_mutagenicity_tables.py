@@ -335,6 +335,39 @@ def _coerce_number(x):
         return x
 
 
+def _normalize_motif_emb_stop_row_val(val):
+    """
+    experiment_summary may store motif_readout_emb_stop as int (layer) or str (encoder/final).
+    Mixed types break pandas sort_values('row_val'); canonicalize to str.
+    """
+    if val is None:
+        return 'unknown'
+    if isinstance(val, bool):
+        return str(val).lower()
+    if isinstance(val, (int, np.integer)) and not isinstance(val, bool):
+        return str(int(val))
+    if isinstance(val, float):
+        if not math.isfinite(val):
+            return 'unknown'
+        return str(int(val)) if val == int(val) else str(val)
+    s = str(val).strip().lower()
+    if s in ('final', 'none', ''):
+        return 'final'
+    if s == 'encoder':
+        return 'encoder'
+    if s.isdigit():
+        return str(int(s))
+    return s
+
+
+def _sort_agg_by_row_val(agg: pd.DataFrame) -> pd.DataFrame:
+    """Sort by row_val without TypeError when JSON mixes int and str (e.g. emb_stop sweep)."""
+    out = agg.copy()
+    out['_row_val_sort'] = out['row_val'].map(lambda v: str(v) if v is not None else '')
+    out = out.sort_values('_row_val_sort')
+    return out.drop(columns=['_row_val_sort'])
+
+
 def _get_nested(summary: dict, path_tuple):
     if not path_tuple:
         return None
@@ -507,6 +540,8 @@ def _get_row_value(summary: dict, experiment_name: str, parts=None):
 
     if val is None:
         return 'unknown'
+    if cfg.get('summary_path') == ('motif_readout_ablation', 'motif_readout_emb_stop'):
+        val = _normalize_motif_emb_stop_row_val(val)
     return val
 
 
@@ -794,13 +829,13 @@ def build_posthoc_table(records, split='test'):
 
     df = pd.DataFrame(rows)
     agg = df.groupby(['row', 'row_val', 'model'])['pearson_r'].agg(['mean', 'std', 'count']).reset_index()
-    agg = agg.sort_values('row_val')
+    agg = _sort_agg_by_row_val(agg)
 
     pivot_mean = agg.pivot(index='row', columns='model', values='mean')
     pivot_std = agg.pivot(index='row', columns='model', values='std')
     pivot_count = agg.pivot(index='row', columns='model', values='count')
 
-    row_order = agg.drop_duplicates('row').sort_values('row_val')['row'].tolist()
+    row_order = agg.drop_duplicates('row')['row'].tolist()
     pivot_mean = pivot_mean.reindex(row_order).dropna(how='all')
     pivot_std = pivot_std.reindex(row_order).dropna(how='all')
     pivot_count = pivot_count.reindex(row_order).dropna(how='all')
@@ -826,13 +861,13 @@ def build_table(records, metric_key, verbose=False):
                 print(f'    {row} / {model}: {int(r["has_metric"])}/{int(r["total_runs"])} runs have the key')
 
     agg = df.groupby(['row', 'row_val', 'model'])['value'].agg(['mean', 'std', 'count']).reset_index()
-    agg = agg.sort_values('row_val')
+    agg = _sort_agg_by_row_val(agg)
 
     pivot_mean = agg.pivot(index='row', columns='model', values='mean')
     pivot_std = agg.pivot(index='row', columns='model', values='std')
     pivot_count = agg.pivot(index='row', columns='model', values='count')
 
-    row_order = agg.drop_duplicates('row').sort_values('row_val')['row'].tolist()
+    row_order = agg.drop_duplicates('row')['row'].tolist()
     pivot_mean = pivot_mean.reindex(row_order).dropna(how='all')
     pivot_std = pivot_std.reindex(row_order).dropna(how='all')
     pivot_count = pivot_count.reindex(row_order).dropna(how='all')

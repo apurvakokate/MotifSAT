@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from collect_mutagenicity_tables import (
     EXPERIMENT_ROW_CONFIG,
+    _sort_agg_by_row_val,
     build_posthoc_table,
     build_table,
     compute_node_score_impact_correlation,
@@ -184,11 +185,11 @@ def _build_node_posthoc_table(records: list, split: str = 'test'):
         return None, None, None
     df = pd.DataFrame(rows)
     agg = df.groupby(['row', 'row_val', 'model'])['pearson_r'].agg(['mean', 'std', 'count']).reset_index()
-    agg = agg.sort_values('row_val')
+    agg = _sort_agg_by_row_val(agg)
     pivot_mean = agg.pivot(index='row', columns='model', values='mean')
     pivot_std = agg.pivot(index='row', columns='model', values='std')
     pivot_count = agg.pivot(index='row', columns='model', values='count')
-    row_order = agg.drop_duplicates('row').sort_values('row_val')['row'].tolist()
+    row_order = agg.drop_duplicates('row')['row'].tolist()
     pivot_mean = pivot_mean.reindex(row_order).dropna(how='all')
     pivot_std = pivot_std.reindex(row_order).dropna(how='all')
     pivot_count = pivot_count.reindex(row_order).dropna(how='all')
