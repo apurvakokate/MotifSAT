@@ -65,17 +65,25 @@ class PNA(torch.nn.Module):
         x = self.pool(x, batch)
         return self.fc_out(x)
 
-    def get_emb(self, x, edge_index, batch, edge_attr, edge_atten=None):
+    def get_emb(self, x, edge_index, batch, edge_attr, edge_atten=None, emb_stop=None):
+        """
+        emb_stop: None — all conv layers; 'encoder' — after node_encoder only;
+        int k in [0, n_layers-1] — after conv k (inclusive).
+        """
         x = self.node_encoder(x)
         if edge_attr is not None and self.use_edge_attr:
             edge_attr = self.edge_encoder(edge_attr)
         else:
             edge_attr = None
+        if emb_stop == 'encoder':
+            return x
 
         for i, (conv, batch_norm) in enumerate(zip(self.convs, self.batch_norms)):
             h = F.relu(batch_norm(conv(x, edge_index, edge_attr, edge_atten=edge_atten)))
             x = h + x  # residual#
             x = F.dropout(x, self.dropout_p, training=self.training)
+            if emb_stop is not None and isinstance(emb_stop, int) and i == emb_stop:
+                return x
 
         return x
 

@@ -53,13 +53,20 @@ class GAT(nn.Module):
             Linear(out_channels, out_channels),
         )
 
-    def get_emb(self, x, edge_index, batch, edge_attr=None, edge_atten=None):
+    def get_emb(self, x, edge_index, batch, edge_attr=None, edge_atten=None, emb_stop=None):
+        """
+        emb_stop: None — all conv layers; 'encoder' — after node_encoder only;
+        int k in [0, n_layers-1] — after conv k (inclusive).
+        """
         x = self.node_encoder(x)
-
+        if emb_stop == 'encoder':
+            return x
         for i in range(self.n_layers):
             x = self.convs[i](x, edge_index, edge_atten=edge_atten)
             x = self.relu(x)
             x = F.dropout(x, p=self.dropout_p, training=self.training)
+            if emb_stop is not None and isinstance(emb_stop, int) and i == emb_stop:
+                return x
         return x
 
     def get_pred_from_emb(self, emb, batch):

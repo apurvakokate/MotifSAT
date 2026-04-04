@@ -18,6 +18,8 @@ Active groups (EXPERIMENT_GROUPS):
   motif_readout_e1_logit_standardize … motif_readout_e10_align_sweep — single-factor ablations (see EXPERIMENT_GROUPS)
   motif_readout_entropy_pool_sweep — no node gate; entropy bonus; pooling sweep mean | max | max_mean | intra_att
   motif_readout_maxmean_node_vs_edge_att — max_mean + entropy; node-injection vs edge_atten downstream usage
+  motif_readout_pred_info_only — L_pred + L_info only; max_mean + motif-level sampling; sweep motif_readout_emb_stop
+    (encoder | layer 0..2 | final) to find discriminative motif α without extra losses
   base_gsat_decay_r_minority_global — same as base_gsat_decay_r but motif pickles from FOLDS/minority_global/...
 
 Injection codes map to GSAT flags (w_node ≡ w_feat): 100=w_feat only, 010=w_message only, 001=w_readout only.
@@ -58,6 +60,15 @@ INJECTION_PRESETS = {
     '101': {'w_feat': True, 'w_message': False, 'w_readout': True},
     '011': {'w_feat': False, 'w_message': True, 'w_readout': True},
 }
+
+# motif_readout_pred_info_only: which backbone depth feeds motif pooling (see run_gsat motif_readout_emb_stop).
+_PRED_INFO_LAYER_VARIANTS = (
+    ('enc', 'encoder'),
+    ('l0', 0),
+    ('l1', 1),
+    ('l2', 2),
+    ('final', 'final'),
+)
 
 # Shared decay kwargs (decay_interval left to get_base_config: 10 for most backbones, 5 for PNA)
 _DECAY_R_BASE = {
@@ -716,6 +727,43 @@ EXPERIMENT_GROUPS = {
             },
         ],
     },
+    # Only prediction + GSAT info (motif-level att_for_loss); all other readout auxiliaries off.
+    'motif_readout_pred_info_only': {
+        'experiment_name': 'motif_readout_pred_info_only',
+        'variants': [
+            {
+                'variant_id': f'predinfo_maxmean_{tag}_w010',
+                'gsat_overrides': {
+                    'tuning_id': f'predinfo_maxmean_{tag}_w010',
+                    'fix_r': False,
+                    'init_r': 0.9,
+                    'decay_r': 0.1,
+                    'final_r': 0.7,
+                    'motif_incorporation_method': 'readout',
+                    'motif_pooling_method': 'max_mean',
+                    'motif_level_sampling': True,
+                    'motif_level_info_loss': True,
+                    'motif_prior_node_gate': False,
+                    'motif_readout_no_gate': True,
+                    'motif_logit_temperature_learned': False,
+                    'motif_logit_standardize_per_graph': False,
+                    'motif_readout_emb_stop': stop,
+                    'pred_loss_coef': 1.0,
+                    'info_loss_coef': 1.0,
+                    'motif_loss_coef': 0,
+                    'between_motif_coef': 0,
+                    'motif_weight_diversity_coef': 0.0,
+                    'motif_entropy_coef': 0.0,
+                    'motif_level_ib_coef': 0.0,
+                    'motif_align_loss_coef': 0.0,
+                    'motif_interp_distill_coef': 0.0,
+                    **INJECTION_PRESETS['010'],
+                },
+                'learn_edge_att': False,
+            }
+            for tag, stop in _PRED_INFO_LAYER_VARIANTS
+        ],
+    },
 }
 
 # Same hyperparameter grid as base_gsat_decay_r, but loads motif dictionaries from
@@ -825,6 +873,7 @@ def main():
         'motif_readout_e10_align_sweep',
         'motif_readout_entropy_pool_sweep',
         'motif_readout_maxmean_node_vs_edge_att',
+        'motif_readout_pred_info_only',
     }
     if dataset_name not in DATASETS_WITH_MOTIFS:
         skipped = [e for e in args.experiments if e in motif_experiments]

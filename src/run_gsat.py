@@ -1290,6 +1290,8 @@ class GSAT(nn.Module):
         self.motif_ib_init_r = method_config.get('motif_ib_init_r', None)
         self.motif_align_loss_coef = float(method_config.get('motif_align_loss_coef', 0.0))
         self.motif_interp_distill_coef = float(method_config.get('motif_interp_distill_coef', 0.0))
+        self.motif_readout_emb_stop_raw = method_config.get('motif_readout_emb_stop', None)
+        self.motif_readout_emb_stop = self._resolve_motif_readout_emb_stop(self.motif_readout_emb_stop_raw)
 
         if self.motif_readout_no_gate and self.motif_prior_node_gate:
             raise ValueError('motif_readout_no_gate=True is incompatible with motif_prior_node_gate=True')
@@ -1356,6 +1358,11 @@ class GSAT(nn.Module):
         print(f'[INFO] Motif-level info loss: {self.motif_level_info_loss}')
         print(f'[INFO] Motif-level sampling: {self.motif_level_sampling}')
         print(f'[INFO] Motif pooling method: {self.motif_pooling_method}')
+        if self.motif_method == 'readout':
+            print(
+                f'[INFO] Motif readout GNN emb_stop: raw={self.motif_readout_emb_stop_raw!r} '
+                f'-> resolved={self.motif_readout_emb_stop!r}'
+            )
         if self.motif_prior_node_gate:
             print(
                 f'[INFO] Motif prior node gate: ON (residual_logit={self.motif_prior_residual_logit}, '
@@ -1476,6 +1483,8 @@ class GSAT(nn.Module):
                 'motif_readout_interp_head': self.motif_interp_head is not None,
                 'motif_ib_final_r': self.motif_ib_final_r,
                 'motif_ib_init_r': self.motif_ib_init_r,
+                'motif_readout_emb_stop': self.motif_readout_emb_stop_raw,
+                'motif_readout_emb_stop_resolved': self.motif_readout_emb_stop,
             },
             'weight_distribution_params': {
                 'init_r': self.init_r,
@@ -1560,6 +1569,34 @@ class GSAT(nn.Module):
             motif_emb = self.intra_motif_pool(emb, inverse_indices)
             return motif_emb, motif_batch, inverse_indices, motif_ids
         return motif_pooling(emb, nodes_to_motifs, batch, reduce=self.motif_pooling_method)
+
+    def _resolve_motif_readout_emb_stop(self, raw):
+        """
+        Map config to clf.get_emb(emb_stop=...): None = full depth; 'encoder' = after node encoder only;
+        int k = after conv layer k (clamped to [0, n_layers-1]).
+        """
+        if raw is None or raw == '' or str(raw).lower() == 'final':
+            return None
+        if str(raw).lower() == 'encoder':
+            return 'encoder'
+        try:
+            k = int(raw)
+        except (TypeError, ValueError):
+            return None
+        n = int(getattr(self.clf, 'n_layers', 0))
+        if n <= 0:
+            return k
+        return max(0, min(int(k), n - 1))
+
+    def _get_emb_for_motif_readout(self, data):
+        """Node representations for motif pooling (layer chosen by motif_readout_emb_stop)."""
+        return self.clf.get_emb(
+            data.x,
+            data.edge_index,
+            batch=data.batch,
+            edge_attr=data.edge_attr,
+            emb_stop=self.motif_readout_emb_stop,
+        )
             
     @staticmethod
     def _calculate_entropy(weights, num_bins=20):
@@ -1822,7 +1859,7 @@ class GSAT(nn.Module):
             # =================================================================
             # READOUT METHOD: Pool node embeddings to motif level, score motifs
             # =================================================================
-            emb = self.clf.get_emb(data.x, data.edge_index, batch=data.batch, edge_attr=data.edge_attr)
+            emb = self._get_emb_for_motif_readout(data)
             
             nodes_to_motifs = getattr(data, 'nodes_to_motifs', None)
             if nodes_to_motifs is None:
@@ -2011,7 +2048,7 @@ class GSAT(nn.Module):
             )
 
         if self.motif_method == 'readout':
-            emb = self.clf.get_emb(data.x, data.edge_index, batch=data.batch, edge_attr=data.edge_attr)
+            emb = self._get_emb_for_motif_readout(data)
             nodes_to_motifs = getattr(data, 'nodes_to_motifs', None)
             if nodes_to_motifs is None:
                 return None
@@ -2718,7 +2755,7 @@ class GSAT(nn.Module):
 
                             data = data.to(self.device)
                             batch = torch.zeros(data.x.size(0), dtype=torch.long, device=data.x.device)
-                            emb = self.clf.get_emb(data.x, data.edge_index, batch, edge_attr=data.edge_attr)
+                            emb = self._get_emb_for_motif_readout(data)
 
                             # Use the correct attention extraction path based on method
                             if self.motif_method == 'readout':
@@ -4293,6 +4330,8 @@ def main():
     parser.add_argument('--motif_pooling_method', type=str, default=None,
                         choices=['mean', 'max', 'sum', 'max_mean', 'multi', 'intra_att'],
                         help='Pool node embeddings to motif rows for readout (overrides config if set).')
+    parser.add_argument('--motif_readout_emb_stop', type=str, default=None,
+                        help='Readout: which GNN depth feeds motif pooling — final (default), encoder, or layer index 0..n-1.')
     parser.add_argument('--motif_prior_node_gate', action='store_true', default=False,
                         help='Readout: node logit = motif_logit + shift_scale * f([h||z||α]) (default shift_scale=0.1); '
                              'then GSAT sampling. Use --motif_prior_gate_full_mlp for legacy gate-only logits.')
@@ -4405,6 +4444,17 @@ def main():
 
     if args.motif_pooling_method is not None:
         local_config['GSAT_config']['motif_pooling_method'] = args.motif_pooling_method
+    if args.motif_readout_emb_stop is not None:
+        raw = args.motif_readout_emb_stop.strip().lower()
+        if raw in ('final', 'none', ''):
+            local_config['GSAT_config']['motif_readout_emb_stop'] = 'final'
+        elif raw == 'encoder':
+            local_config['GSAT_config']['motif_readout_emb_stop'] = 'encoder'
+        else:
+            try:
+                local_config['GSAT_config']['motif_readout_emb_stop'] = int(raw)
+            except ValueError:
+                local_config['GSAT_config']['motif_readout_emb_stop'] = args.motif_readout_emb_stop
 
     if args.motif_prior_node_gate:
         local_config['GSAT_config']['motif_prior_node_gate'] = True

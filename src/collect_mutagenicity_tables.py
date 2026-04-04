@@ -318,6 +318,11 @@ EXPERIMENT_ROW_CONFIG = {
         'row_label_prefix': 'usage',
         'path_extract': 'maxmean_score_usage',
     },
+    'motif_readout_pred_info_only': {
+        'summary_path': ('motif_readout_ablation', 'motif_readout_emb_stop'),
+        'row_label_prefix': 'emb_stop',
+        'path_extract': 'final_r',
+    },
 }
 
 

@@ -47,6 +47,7 @@ EXPERIMENTS=(
   motif_readout_e10_align_sweep
   motif_readout_entropy_pool_sweep
   motif_readout_maxmean_node_vs_edge_att
+  motif_readout_pred_info_only
 )
 
 MODELS=(GIN PNA GAT SAGE GCN)

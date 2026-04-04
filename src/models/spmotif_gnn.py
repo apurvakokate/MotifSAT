@@ -47,7 +47,8 @@ class SPMotifNet(torch.nn.Module):
         graph_x = self.pool(node_x, batch)
         return self.get_causal_pred(graph_x)
 
-    def get_emb(self, x, edge_index, batch, edge_attr, edge_atten=None):
+    def get_emb(self, x, edge_index, batch, edge_attr, edge_atten=None, emb_stop=None):
+        # emb_stop ignored for SPMotifNet (single-tower reps); API parity with other backbones.
         node_x = self.get_node_reps(x, edge_index, edge_attr, batch, edge_atten=edge_atten)
         return node_x
 
