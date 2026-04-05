@@ -1774,7 +1774,7 @@ class GSAT(nn.Module):
             alpha_intra,
         )
 
-    def _factored_motif_regularized_prepare(self, data):
+    def _factored_motif_regularized_prepare(self, data, epoch):
         """
         z_k = Dropout([mean(X) || mean(h^(1)) || sum_i a_i h^(L)]), linear intra-motif a,
         ℓ_k = MLP_motif(z_k). Node logit = ℓ_k · |m_k| · sg(a_i); IB uses σ(ℓ_k/|m_k|).
@@ -1797,6 +1797,44 @@ class GSAT(nn.Module):
         z_k = F.dropout(z_k, p=self.factored_motif_zk_dropout_p, training=self.training)
         motif_att_log_logits = self.motif_scoring_mlp(z_k)
         motif_att_soft = motif_att_log_logits.sigmoid()
+        ell_k = motif_att_log_logits.squeeze(-1)
+        alpha_k = motif_att_soft.squeeze(-1)
+        if epoch in (0, 14) and getattr(self, '_factored_reg_diag_logged_epoch', -1) != epoch:
+            self._factored_reg_diag_logged_epoch = int(epoch)
+            with torch.no_grad():
+                def _vm(t):
+                    if t.size(0) <= 1:
+                        return 0.0
+                    return float(t.var(dim=0, unbiased=False).mean().item())
+
+                z0_var = _vm(z0)
+                z1_var = _vm(z1)
+                zatt_var = _vm(r_m)
+                if ell_k.numel() <= 1:
+                    ell_k_var = 0.0
+                    alpha_k_var = 0.0
+                else:
+                    ell_k_var = float(ell_k.var(unbiased=False).item())
+                    alpha_k_var = float(alpha_k.var(unbiased=False).item())
+            ep1 = epoch + 1
+            print(
+                f'[factored_motif_reg diag] end of epoch {ep1} (0-based idx {epoch}) '
+                f'z0_var: {z0_var:.4f} z1_var: {z1_var:.4f} zatt_var: {zatt_var:.4f} '
+                f'ell_k_var: {ell_k_var:.4f} alpha_k_var: {alpha_k_var:.4f}'
+            )
+            try:
+                wandb.log(
+                    {
+                        'factored_reg_diag/z0_var': z0_var,
+                        'factored_reg_diag/z1_var': z1_var,
+                        'factored_reg_diag/zatt_var': zatt_var,
+                        'factored_reg_diag/ell_k_var': ell_k_var,
+                        'factored_reg_diag/alpha_k_var': alpha_k_var,
+                    },
+                    step=epoch,
+                )
+            except Exception:
+                pass
         ones = torch.ones(data.x.size(0), device=data.x.device, dtype=data.x.dtype)
         counts = scatter(ones, inverse_indices, dim=0, dim_size=dim_m, reduce='sum')
         return (
@@ -2111,7 +2149,7 @@ class GSAT(nn.Module):
                     motif_att_soft,
                     alpha_intra,
                     counts,
-                ) = self._factored_motif_regularized_prepare(data)
+                ) = self._factored_motif_regularized_prepare(data, epoch)
                 ell_k_node = motif_att_log_logits[inverse_indices]
                 cnt_node = counts[inverse_indices].unsqueeze(-1).float()
                 node_logit = ell_k_node * cnt_node * alpha_intra.detach().unsqueeze(-1)
@@ -2384,7 +2422,7 @@ class GSAT(nn.Module):
                     _motif_att_soft,
                     alpha_intra,
                     counts,
-                ) = self._factored_motif_regularized_prepare(data)
+                ) = self._factored_motif_regularized_prepare(data, epoch)
                 ell_k_node = motif_att_log_logits[inverse_indices]
                 cnt_node = counts[inverse_indices].unsqueeze(-1).float()
                 node_logit = ell_k_node * cnt_node * alpha_intra.detach().unsqueeze(-1)
@@ -3166,7 +3204,7 @@ class GSAT(nn.Module):
                                             _motif_att_soft,
                                             alpha_intra,
                                             counts,
-                                        ) = self._factored_motif_regularized_prepare(data)
+                                        ) = self._factored_motif_regularized_prepare(data, epoch)
                                         ell_k_node = motif_att_log_logits[inverse_indices]
                                         cnt_node = counts[inverse_indices].unsqueeze(-1).float()
                                         node_logit = ell_k_node * cnt_node * alpha_intra.detach().unsqueeze(-1)
