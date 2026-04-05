@@ -49,6 +49,7 @@ EXPERIMENTS=(
   motif_readout_maxmean_node_vs_edge_att
   motif_readout_pred_info_only
   factored_motif_attention_grid
+  factored_motif_regularized
 )
 
 MODELS=(GIN PNA GAT SAGE GCN)
