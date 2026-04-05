@@ -36,7 +36,9 @@ import pandas as pd
 
 # 0-based training epochs: log z_k variance stats + pred / motif IB (first batch of epoch).
 FACTORED_MOTIF_REG_DIAG_EPOCHS = (1, 15, 20, 21, 22, 25, 30, 40, 45, 50)
-FACTORED_MOTIF_LOGIT_CLAMP = 4.0  # clamp |ℓ_k| before σ(ℓ_k) and node scaling
+FACTORED_MOTIF_LOGIT_CLAMP = 3.0  # clamp |ℓ_k| before σ(ℓ_k); MLP_motif output
+# δ_i = s · (log a_i - mean_{j∈m_k} log a_j); sum_{i∈m_k} δ_i = 0
+FACTORED_MOTIF_NODE_LOGIT_DELTA_SCALE = 0.5
 
 
 # =============================================================================
@@ -305,7 +307,7 @@ class IntraMotifAttentionLinear(nn.Module):
 
 class RegularizedMotifScoringMLP(nn.Module):
     """
-    Motif logit head: Linear -> LayerNorm -> ReLU -> Dropout -> Linear.
+    Motif logit head: Linear(2H, H) → LayerNorm → ReLU → Dropout → Linear(H, 1).
     Input z_k is motif-level [M, in_dim] (no graph batch norm on motifs).
     """
 
@@ -1357,9 +1359,6 @@ class GSAT(nn.Module):
         self.motif_level_ib_coef = float(method_config.get('motif_level_ib_coef', 0.0))
         self.motif_ib_final_r = method_config.get('motif_ib_final_r', None)
         self.motif_ib_init_r = method_config.get('motif_ib_init_r', None)
-        # Optional IB prior on σ(ℓ_k) (factored_motif_regularized); defaults to motif_ib_* when unset
-        self.motif_ib_alpha_init_r = method_config.get('motif_ib_alpha_init_r', None)
-        self.motif_ib_alpha_final_r = method_config.get('motif_ib_alpha_final_r', None)
         self.motif_align_loss_coef = float(method_config.get('motif_align_loss_coef', 0.0))
         self.motif_interp_distill_coef = float(method_config.get('motif_interp_distill_coef', 0.0))
         self.motif_readout_emb_stop_raw = method_config.get('motif_readout_emb_stop', None)
@@ -1481,7 +1480,9 @@ class GSAT(nn.Module):
             print(
                 f'[INFO] Factored motif regularized: zk_dropout_p={self.factored_motif_zk_dropout_p}, '
                 f'node_logit_clamp={self.factored_motif_node_logit_clamp}, '
-                f'|ℓ_k|≤{FACTORED_MOTIF_LOGIT_CLAMP}, IB on σ(ℓ_k^IB) (z_att detached in ℓ_k^IB path)'
+                f'|ℓ_k|≤{FACTORED_MOTIF_LOGIT_CLAMP}, '
+                f'node_ℓ=ℓ_k+δ(intra), δ scale={FACTORED_MOTIF_NODE_LOGIT_DELTA_SCALE}, '
+                f'IB on σ(ℓ_k) vs get_r; β_IB ramp (ib_ramp_epochs={self.ib_ramp_epochs})'
             )
         if self.factored_motif_attention:
             print(
@@ -1615,8 +1616,6 @@ class GSAT(nn.Module):
                 'motif_readout_interp_head': self.motif_interp_head is not None,
                 'motif_ib_final_r': self.motif_ib_final_r,
                 'motif_ib_init_r': self.motif_ib_init_r,
-                'motif_ib_alpha_final_r': self.motif_ib_alpha_final_r,
-                'motif_ib_alpha_init_r': self.motif_ib_alpha_init_r,
                 'motif_readout_emb_stop': self.motif_readout_emb_stop_raw,
                 'motif_readout_emb_stop_resolved': self.motif_readout_emb_stop,
                 'factored_motif_attention': self.factored_motif_attention,
@@ -1792,21 +1791,17 @@ class GSAT(nn.Module):
         )
 
     def _motif_ib_r_value(self, epoch, ir, fr):
-        """Bernoulli prior r for motif IB (same schedule as motif_ib_init/final when ib_ramp_epochs > 0)."""
+        """Bernoulli prior r(t) = max(r_final, r_init - floor(t/Δ)·decay_r) (standard GSAT get_r schedule)."""
         if self.fix_r:
             return self.fix_r
-        if self.ib_ramp_epochs > 0:
-            progress = 0.0 if epoch < self.info_warmup_epochs else min(
-                1.0, (epoch - self.info_warmup_epochs + 1) / float(self.ib_ramp_epochs)
-            )
-            return ir + (fr - ir) * progress
         return self.get_r(self.decay_interval, self.decay_r, epoch, final_r=fr, init_r=ir)
 
     def _factored_motif_regularized_prepare(self, data, epoch):
         """
-        z_k = Dropout([LayerNorm(mean h^(1)) || LayerNorm(r_m)]); ℓ_k = clamp(MLP(z_k)).
-        α_k = σ(ℓ_k) (reported); α_k^eff = σ(ℓ_k/|m_k|) scales node logits with sg(a_i).
-        IB on α_k^IB = σ(ℓ_k^IB) with ℓ_k^IB from MLP([z1 || sg(r_m)]); optional motif_ib_alpha_* prior.
+        z_k^(1), z_k^att from backbone; z_k = [LN(z^(1)) || LN(z^att)]; Dropout; ℓ_k = clamp(MLP_motif(z_k)).
+        α_k = σ(ℓ_k) (interpretability score). Node logits: ℓ_i^node = ℓ_k + δ_i with
+        δ_i = s·(log a_i - mean_j log a_j), a = intra-motif softmax, s = FACTORED_MOTIF_NODE_LOGIT_DELTA_SCALE.
+        IB on α_k vs r(t) from get_r; β_IB ramp is separate (ib_ramp_epochs).
         """
         nodes_to_motifs = getattr(data, 'nodes_to_motifs', None)
         if nodes_to_motifs is None:
@@ -1826,19 +1821,17 @@ class GSAT(nn.Module):
         z_k = torch.cat([z1_norm, zatt_norm], dim=-1)
         z_k = F.dropout(z_k, p=self.factored_motif_zk_dropout_p, training=self.training)
         motif_att_log_logits = self.motif_scoring_mlp(z_k)
-        zatt_norm_ib = F.layer_norm(r_m.detach(), (r_m.shape[-1],))
-        z_k_ib = torch.cat([z1_norm, zatt_norm_ib], dim=-1)
-        z_k_ib = F.dropout(z_k_ib, p=self.factored_motif_zk_dropout_p, training=self.training)
-        motif_att_log_logits_ib = self.motif_scoring_mlp(z_k_ib)
         ell_k = torch.clamp(motif_att_log_logits.squeeze(-1), -FACTORED_MOTIF_LOGIT_CLAMP, FACTORED_MOTIF_LOGIT_CLAMP)
-        ell_k_ib = torch.clamp(motif_att_log_logits_ib.squeeze(-1), -FACTORED_MOTIF_LOGIT_CLAMP, FACTORED_MOTIF_LOGIT_CLAMP)
         motif_att_log_logits = ell_k.unsqueeze(-1)
-        motif_att_log_logits_ib = ell_k_ib.unsqueeze(-1)
         ones_m = torch.ones(data.x.size(0), device=data.x.device, dtype=data.x.dtype)
         counts = scatter(ones_m, inverse_indices, dim=0, dim_size=dim_m, reduce='sum')
         alpha_k = torch.sigmoid(ell_k)
-        alpha_k_eff = torch.sigmoid(ell_k / counts.float().clamp(min=1.0))
         motif_att_soft = alpha_k.unsqueeze(-1)
+        a_safe = alpha_intra.clamp(min=1e-8, max=1.0 - 1e-8)
+        log_ai = torch.log(a_safe)
+        mean_log_m = scatter(log_ai, inverse_indices, dim=0, dim_size=dim_m, reduce='mean')
+        mean_log_node = mean_log_m[inverse_indices]
+        delta_node = FACTORED_MOTIF_NODE_LOGIT_DELTA_SCALE * (log_ai - mean_log_node)
         if epoch in FACTORED_MOTIF_REG_DIAG_EPOCHS and getattr(self, '_factored_reg_diag_logged_epoch', -1) != epoch:
             self._factored_reg_diag_logged_epoch = int(epoch)
             with torch.no_grad():
@@ -1871,8 +1864,7 @@ class GSAT(nn.Module):
             motif_att_soft,
             alpha_intra,
             counts,
-            motif_att_log_logits_ib,
-            alpha_k_eff,
+            delta_node,
         )
 
     @staticmethod
@@ -1988,21 +1980,14 @@ class GSAT(nn.Module):
             fr = self.motif_ib_final_r if self.motif_ib_final_r is not None else self.final_r
             ir = self.motif_ib_init_r if self.motif_ib_init_r is not None else self.init_r
             r_ib = self._motif_ib_r_value(epoch, ir, fr)
-            if self.factored_motif_regularized and ctx.get('motif_sizes') is not None:
-                ell_src = ctx.get('motif_logit_ib')
-                if ell_src is None:
-                    ell_src = ctx.get('motif_logit')
-                if ell_src is not None:
-                    ell_ib = torch.clamp(ell_src.view(-1), -FACTORED_MOTIF_LOGIT_CLAMP, FACTORED_MOTIF_LOGIT_CLAMP)
-                    alpha_k_ib = torch.sigmoid(ell_ib)
-                    air = self.motif_ib_alpha_init_r if self.motif_ib_alpha_init_r is not None else ir
-                    afr = self.motif_ib_alpha_final_r if self.motif_ib_alpha_final_r is not None else fr
-                    r_ib_alpha = self._motif_ib_r_value(epoch, air, afr)
-                    if alpha_k_ib.numel() > 0:
-                        motif_ib_term = self.motif_level_ib_coef * (
-                            alpha_k_ib * torch.log(alpha_k_ib / r_ib_alpha + 1e-6)
-                            + (1.0 - alpha_k_ib) * torch.log((1.0 - alpha_k_ib) / (1.0 - r_ib_alpha + 1e-6) + 1e-6)
-                        ).mean()
+            if self.factored_motif_regularized and ctx.get('motif_logit') is not None:
+                ell = ctx['motif_logit'].view(-1)
+                alpha_k = torch.sigmoid(ell)
+                if alpha_k.numel() > 0:
+                    motif_ib_term = self.motif_level_ib_coef * (
+                        alpha_k * torch.log(alpha_k / r_ib + 1e-6)
+                        + (1.0 - alpha_k) * torch.log((1.0 - alpha_k) / (1.0 - r_ib + 1e-6) + 1e-6)
+                    ).mean()
             else:
                 use_mean_node = (
                     self.use_motif_ib_mean_node_alpha
@@ -2032,7 +2017,8 @@ class GSAT(nn.Module):
                     ib_ramp_scale = 0.0
                 else:
                     ib_ramp_scale = min(
-                        1.0, (epoch - self.info_warmup_epochs + 1) / float(self.ib_ramp_epochs)
+                        1.0,
+                        max(0.0, (epoch - self.info_warmup_epochs) / float(self.ib_ramp_epochs)),
                     )
                 motif_ib_term = motif_ib_term * ib_ramp_scale
 
@@ -2217,12 +2203,10 @@ class GSAT(nn.Module):
                     motif_att_soft,
                     alpha_intra,
                     counts,
-                    motif_att_log_logits_ib,
-                    alpha_k_eff,
+                    delta_node,
                 ) = self._factored_motif_regularized_prepare(data, epoch)
-                alpha_k_eff_node = alpha_k_eff[inverse_indices].unsqueeze(-1)
-                cnt_node = counts[inverse_indices].unsqueeze(-1).float()
-                node_logit = alpha_k_eff_node * cnt_node * alpha_intra.detach().unsqueeze(-1)
+                ell_k_node = motif_att_log_logits[inverse_indices]
+                node_logit = ell_k_node + delta_node.unsqueeze(-1)
                 if self.factored_motif_node_logit_clamp is not None:
                     c = self.factored_motif_node_logit_clamp
                     node_logit = node_logit.clamp(-c, c)
@@ -2237,7 +2221,6 @@ class GSAT(nn.Module):
                     'inverse_indices': inverse_indices,
                     'dim_m': dim_m,
                     'motif_logit': motif_att_log_logits.squeeze(-1),
-                    'motif_logit_ib': motif_att_log_logits_ib.squeeze(-1),
                     'motif_sizes': counts,
                     'motif_att_soft': motif_att_soft.squeeze(-1),
                     'motif_interp_logits': None,
@@ -2493,12 +2476,10 @@ class GSAT(nn.Module):
                     _motif_att_soft,
                     alpha_intra,
                     counts,
-                    _motif_att_log_logits_ib,
-                    alpha_k_eff,
+                    delta_node,
                 ) = self._factored_motif_regularized_prepare(data, epoch)
-                alpha_k_eff_node = alpha_k_eff[inverse_indices].unsqueeze(-1)
-                cnt_node = counts[inverse_indices].unsqueeze(-1).float()
-                node_logit = alpha_k_eff_node * cnt_node * alpha_intra.detach().unsqueeze(-1)
+                ell_k_node = motif_att_log_logits[inverse_indices]
+                node_logit = ell_k_node + delta_node.unsqueeze(-1)
                 if self.factored_motif_node_logit_clamp is not None:
                     c = self.factored_motif_node_logit_clamp
                     node_logit = node_logit.clamp(-c, c)
@@ -3277,12 +3258,10 @@ class GSAT(nn.Module):
                                             _motif_att_soft,
                                             alpha_intra,
                                             counts,
-                                            _motif_att_log_logits_ib,
-                                            alpha_k_eff,
+                                            delta_node,
                                         ) = self._factored_motif_regularized_prepare(data, epoch)
-                                        alpha_k_eff_node = alpha_k_eff[inverse_indices].unsqueeze(-1)
-                                        cnt_node = counts[inverse_indices].unsqueeze(-1).float()
-                                        node_logit = alpha_k_eff_node * cnt_node * alpha_intra.detach().unsqueeze(-1)
+                                        ell_k_node = motif_att_log_logits[inverse_indices]
+                                        node_logit = ell_k_node + delta_node.unsqueeze(-1)
                                         if self.factored_motif_node_logit_clamp is not None:
                                             c = self.factored_motif_node_logit_clamp
                                             node_logit = node_logit.clamp(-c, c)

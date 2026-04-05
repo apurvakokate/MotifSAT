@@ -22,7 +22,7 @@ Active groups (EXPERIMENT_GROUPS):
     (encoder | layer 0..2 | final) to find discriminative motif α without extra losses
   base_gsat_decay_r_minority_global — same as base_gsat_decay_r but motif pickles from FOLDS/minority_global/...
   factored_motif_attention_grid — 12 variants (M1–M4 × N1–N3): multi-granularity z_k, factored node logits, motif IB on mean node α (see experiment_factored_motif.py)
-  factored_motif_regularized — raw X||h^(1)||att-sum h^(L), dropout z_k, linear intra-att, LayerNorm motif MLP, IB on σ(ℓ_k/|m_k|)
+  factored_motif_regularized — LN(z^(1)||z^att), MLP motif ℓ_k, node ℓ=ℓ_k+δ(intra), IB on σ(ℓ_k); sweep motif_ib_final_r ∈ {0.7,0.5,0.3}
 
 Injection codes map to GSAT flags (w_node ≡ w_feat): 100=w_feat only, 010=w_message only, 001=w_readout only.
 
@@ -822,10 +822,9 @@ _FACTORED_MOTIF_REG_BASE_GSAT = {
     'use_motif_ib_mean_node_alpha': False,
     'motif_level_ib_coef': 0.01,
     'motif_ib_init_r': 0.9,
-    'motif_ib_final_r': 0.25,
-    'motif_ib_alpha_init_r': 0.9,
-    'motif_ib_alpha_final_r': 0.15,
+    'decay_interval': 10,
     'factored_motif_zk_dropout_p': 0.3,
+    'factored_motif_node_logit_clamp': 4.0,
     'fix_r': False,
     'init_r': 0.9,
     'decay_r': 0.1,
@@ -838,18 +837,26 @@ _FACTORED_MOTIF_REG_BASE_GSAT = {
     'w_readout': True,
 }
 
+# IB prior r(t) uses motif_ib_final_r with get_r(decay_interval=10, decay_r=0.1)
+FACTORED_MOTIF_IB_FINAL_R_VARIANTS = (
+    ('factored_reg_ibf070', 0.7),
+    ('factored_reg_ibf050', 0.5),
+    ('factored_reg_ibf030', 0.3),
+)
+
 EXPERIMENT_GROUPS['factored_motif_regularized'] = {
     'experiment_name': 'factored_motif_regularized',
     'variants': [
         {
-            'variant_id': 'factored_reg_v1',
+            'variant_id': vid,
             'gsat_overrides': {
-                'tuning_id': 'factored_reg_v1',
+                'tuning_id': vid,
                 **_DECAY_R_BASE,
-                **_FACTORED_MOTIF_REG_BASE_GSAT,
+                **{**_FACTORED_MOTIF_REG_BASE_GSAT, 'motif_ib_final_r': ibf},
             },
             'learn_edge_att': False,
-        },
+        }
+        for vid, ibf in FACTORED_MOTIF_IB_FINAL_R_VARIANTS
     ],
 }
 
