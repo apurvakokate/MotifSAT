@@ -34,6 +34,9 @@ from utils import get_local_config_name, get_model, get_data_loaders, write_stat
 from torch_geometric.utils import scatter, softmax  # or from torch_scatter import scatter
 import pandas as pd
 
+# 0-based training epochs: log z_k variance stats + pred / motif IB (first batch of epoch).
+FACTORED_MOTIF_REG_DIAG_EPOCHS = (1, 15, 20, 21, 22, 25)
+
 
 # =============================================================================
 # MOTIF INCORPORATION HELPER FUNCTIONS
@@ -1800,7 +1803,7 @@ class GSAT(nn.Module):
         motif_att_soft = motif_att_log_logits.sigmoid()
         ell_k = motif_att_log_logits.squeeze(-1)
         alpha_k = motif_att_soft.squeeze(-1)
-        if epoch in (0, 14) and getattr(self, '_factored_reg_diag_logged_epoch', -1) != epoch:
+        if epoch in FACTORED_MOTIF_REG_DIAG_EPOCHS and getattr(self, '_factored_reg_diag_logged_epoch', -1) != epoch:
             self._factored_reg_diag_logged_epoch = int(epoch)
             with torch.no_grad():
                 def _vm(t):
@@ -1816,24 +1819,12 @@ class GSAT(nn.Module):
                 else:
                     ell_k_var = float(ell_k.var(unbiased=False).item())
                     alpha_k_var = float(alpha_k.var(unbiased=False).item())
-            ep1 = epoch + 1
-            print(
-                f'[factored_motif_reg diag] end of epoch {ep1} (0-based idx {epoch}) '
-                f'z1_var: {z1_var:.4f} zatt_var: {zatt_var:.4f} '
-                f'ell_k_var: {ell_k_var:.4f} alpha_k_var: {alpha_k_var:.4f}'
-            )
-            try:
-                wandb.log(
-                    {
-                        'factored_reg_diag/z1_var': z1_var,
-                        'factored_reg_diag/zatt_var': zatt_var,
-                        'factored_reg_diag/ell_k_var': ell_k_var,
-                        'factored_reg_diag/alpha_k_var': alpha_k_var,
-                    },
-                    step=epoch,
-                )
-            except Exception:
-                pass
+            self._factored_reg_diag_snapshot = {
+                'z1_var': z1_var,
+                'zatt_var': zatt_var,
+                'ell_k_var': ell_k_var,
+                'alpha_k_var': alpha_k_var,
+            }
         ones = torch.ones(data.x.size(0), device=data.x.device, dtype=data.x.dtype)
         counts = scatter(ones, inverse_indices, dim=0, dim_size=dim_m, reduce='sum')
         return (
@@ -2038,6 +2029,35 @@ class GSAT(nn.Module):
             'motif_align': align_term.item(),
             'motif_interp_distill': interp_distill_term.item(),
         }
+
+        snap = getattr(self, '_factored_reg_diag_snapshot', None)
+        if self.factored_motif_regularized and snap is not None:
+            z1_var = snap['z1_var']
+            zatt_var = snap['zatt_var']
+            ell_k_var = snap['ell_k_var']
+            alpha_k_var = snap['alpha_k_var']
+            ib_loss = loss_dict['motif_ib']
+            pred_loss_item = loss_dict['pred']
+            print(
+                f'epoch {epoch}: z1={z1_var:.4f} zatt={zatt_var:.4f} '
+                f'ell_k={ell_k_var:.4f} alpha={alpha_k_var:.4f} '
+                f'ib_loss={ib_loss:.4f} pred_loss={pred_loss_item:.4f}'
+            )
+            try:
+                wandb.log(
+                    {
+                        'factored_reg_diag/z1_var': z1_var,
+                        'factored_reg_diag/zatt_var': zatt_var,
+                        'factored_reg_diag/ell_k_var': ell_k_var,
+                        'factored_reg_diag/alpha_k_var': alpha_k_var,
+                        'factored_reg_diag/ib_loss': ib_loss,
+                        'factored_reg_diag/pred_loss': pred_loss_item,
+                    },
+                    step=epoch,
+                )
+            except Exception:
+                pass
+            self._factored_reg_diag_snapshot = None
 
         # # Auxiliary motif graph loss (commented out for simplification)
         # if self.motif_method == 'graph' and self.train_motif_graph and aux_clf_logits is not None:
