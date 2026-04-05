@@ -65,7 +65,7 @@ DEFAULT_EXPERIMENT_LABELS = {
     'motif_readout_maxmean_node_vs_edge_att': 'max_mean readout: node inj vs edge attention',
     'motif_readout_pred_info_only': 'L_pred+L_info; max_mean; sweep GNN layer for motif emb (α discriminability)',
     'factored_motif_attention_grid': 'Factored motif attention (M1–M4 × N1–N3; multi-z_k + factored logits + mean-α IB)',
-    'factored_motif_regularized': 'Factored motif regularized (raw X||h^(1)||att-sum; LayerNorm MLP; IB σ(ℓ_k/|m_k|))',
+    'factored_motif_additive': 'Factored motif additive (LN z^(1)||z^att; ℓ_k+δ intra; IB on σ(ℓ_k); r_f sweep)',
 }
 
 
@@ -599,7 +599,7 @@ def main():
             'motif_readout_maxmean_node_vs_edge_att',
             'motif_readout_pred_info_only',
             'factored_motif_attention_grid',
-            'factored_motif_regularized',
+            'factored_motif_additive',
         ]
 
     run(

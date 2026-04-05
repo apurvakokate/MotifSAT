@@ -22,7 +22,7 @@ Active groups (EXPERIMENT_GROUPS):
     (encoder | layer 0..2 | final) to find discriminative motif α without extra losses
   base_gsat_decay_r_minority_global — same as base_gsat_decay_r but motif pickles from FOLDS/minority_global/...
   factored_motif_attention_grid — 12 variants (M1–M4 × N1–N3): multi-granularity z_k, factored node logits, motif IB on mean node α (see experiment_factored_motif.py)
-  factored_motif_regularized — LN(z^(1)||z^att), MLP motif ℓ_k, node ℓ=ℓ_k+δ(intra), IB on σ(ℓ_k); sweep motif_ib_final_r ∈ {0.7,0.5,0.3}
+  factored_motif_additive — LN(z^(1)||z^att), MLP motif ℓ_k, node ℓ=ℓ_k+δ(intra), IB on σ(ℓ_k); sweep motif_ib_final_r ∈ {0.7,0.5,0.3}
 
 Injection codes map to GSAT flags (w_node ≡ w_feat): 100=w_feat only, 010=w_message only, 001=w_readout only.
 
@@ -844,8 +844,8 @@ FACTORED_MOTIF_IB_FINAL_R_VARIANTS = (
     ('factored_reg_ibf030', 0.3),
 )
 
-EXPERIMENT_GROUPS['factored_motif_regularized'] = {
-    'experiment_name': 'factored_motif_regularized',
+EXPERIMENT_GROUPS['factored_motif_additive'] = {
+    'experiment_name': 'factored_motif_additive',
     'variants': [
         {
             'variant_id': vid,
@@ -977,7 +977,7 @@ def main():
         'motif_readout_maxmean_node_vs_edge_att',
         'motif_readout_pred_info_only',
         'factored_motif_attention_grid',
-        'factored_motif_regularized',
+        'factored_motif_additive',
     }
     if dataset_name not in DATASETS_WITH_MOTIFS:
         skipped = [e for e in args.experiments if e in motif_experiments]
