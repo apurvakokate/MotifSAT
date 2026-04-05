@@ -792,7 +792,7 @@ _FACTORED_MOTIF_BASE_GSAT = {
     'use_motif_ib_mean_node_alpha': True,
     'motif_level_ib_coef': 1.0,
     'motif_ib_init_r': 0.9,
-    'motif_ib_final_r': 0.2,
+    'motif_ib_final_r': 0.7,
     'fix_r': False,
     'init_r': 0.9,
     'decay_r': 0.1,
