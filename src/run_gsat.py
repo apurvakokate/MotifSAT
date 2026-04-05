@@ -1776,8 +1776,8 @@ class GSAT(nn.Module):
 
     def _factored_motif_regularized_prepare(self, data, epoch):
         """
-        z_k = Dropout([mean(X) || mean(h^(1)) || sum_i a_i h^(L)]), linear intra-motif a,
-        ℓ_k = MLP_motif(z_k). Node logit = ℓ_k · |m_k| · sg(a_i); IB uses σ(ℓ_k/|m_k|).
+        z_k = Dropout([LayerNorm(mean h^(1)) || LayerNorm(sum_i a_i h^(L))]); raw X omitted (low signal).
+        Linear intra-motif a; ℓ_k = MLP_motif(z_k). Node logit = ℓ_k · |m_k| · sg(a_i); IB uses σ(ℓ_k/|m_k|).
         """
         nodes_to_motifs = getattr(data, 'nodes_to_motifs', None)
         if nodes_to_motifs is None:
@@ -1791,9 +1791,10 @@ class GSAT(nn.Module):
             data.x, data.edge_index, batch=data.batch, edge_attr=data.edge_attr, emb_stop=None,
         )
         alpha_intra, r_m = self.intra_motif_pool.forward_alpha_and_weighted(hL, inverse_indices)
-        z0 = scatter(data.x, inverse_indices, dim=0, dim_size=dim_m, reduce='mean')
         z1 = scatter(h1, inverse_indices, dim=0, dim_size=dim_m, reduce='mean')
-        z_k = torch.cat([z0, z1, r_m], dim=-1)
+        z1_norm = F.layer_norm(z1, (z1.shape[-1],))
+        zatt_norm = F.layer_norm(r_m, (r_m.shape[-1],))
+        z_k = torch.cat([z1_norm, zatt_norm], dim=-1)
         z_k = F.dropout(z_k, p=self.factored_motif_zk_dropout_p, training=self.training)
         motif_att_log_logits = self.motif_scoring_mlp(z_k)
         motif_att_soft = motif_att_log_logits.sigmoid()
@@ -1807,7 +1808,6 @@ class GSAT(nn.Module):
                         return 0.0
                     return float(t.var(dim=0, unbiased=False).mean().item())
 
-                z0_var = _vm(z0)
                 z1_var = _vm(z1)
                 zatt_var = _vm(r_m)
                 if ell_k.numel() <= 1:
@@ -1819,13 +1819,12 @@ class GSAT(nn.Module):
             ep1 = epoch + 1
             print(
                 f'[factored_motif_reg diag] end of epoch {ep1} (0-based idx {epoch}) '
-                f'z0_var: {z0_var:.4f} z1_var: {z1_var:.4f} zatt_var: {zatt_var:.4f} '
+                f'z1_var: {z1_var:.4f} zatt_var: {zatt_var:.4f} '
                 f'ell_k_var: {ell_k_var:.4f} alpha_k_var: {alpha_k_var:.4f}'
             )
             try:
                 wandb.log(
                     {
-                        'factored_reg_diag/z0_var': z0_var,
                         'factored_reg_diag/z1_var': z1_var,
                         'factored_reg_diag/zatt_var': zatt_var,
                         'factored_reg_diag/ell_k_var': ell_k_var,
@@ -4686,7 +4685,7 @@ def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_nam
     intra_motif_pool = None
     if method_config.get('factored_motif_regularized', False):
         z_dp = float(method_config.get('factored_motif_zk_dropout_p', 0.3))
-        in_dim = int(x_dim) + 2 * int(hidden_size)
+        in_dim = 2 * int(hidden_size)
         motif_scoring_mlp = RegularizedMotifScoringMLP(in_dim, hidden_size, dropout_p=z_dp).to(device)
         intra_motif_pool = IntraMotifAttentionLinear(hidden_size).to(device)
     elif motif_pool == 'intra_att':

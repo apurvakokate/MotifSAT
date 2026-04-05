@@ -816,6 +816,7 @@ _FACTORED_MOTIF_REG_BASE_GSAT = {
     'motif_readout_no_gate': True,
     'motif_prior_node_gate': False,
     'info_loss_coef': 0.0,
+    'info_warmup_epochs': 20,
     'use_raw_score_loss': False,
     'use_motif_ib_mean_node_alpha': False,
     'motif_level_ib_coef': 1.0,
