@@ -182,8 +182,15 @@ def compute_motif_inverse_indices(nodes_to_motifs, batch):
         motif_batch: [M]
         motif_ids: [M] global motif id within vocabulary
     """
+    if batch is None:
+        # Single-graph Data in PyG often has batch=None; treat as one graph (id 0).
+        batch = torch.zeros(
+            nodes_to_motifs.size(0), dtype=torch.long, device=nodes_to_motifs.device,
+        )
+    else:
+        batch = batch.long()
     max_motif_id = int(nodes_to_motifs.max().item()) + 1
-    graph_motif_id = batch.long() * max_motif_id + nodes_to_motifs.long()
+    graph_motif_id = batch * max_motif_id + nodes_to_motifs.long()
     unique_graph_motifs, inverse_indices = graph_motif_id.unique(return_inverse=True)
     motif_batch = unique_graph_motifs // max_motif_id
     motif_ids = unique_graph_motifs % max_motif_id
