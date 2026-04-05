@@ -1684,6 +1684,7 @@ class GSAT(nn.Module):
         motif_att_log_logits = self.extractor(motif_emb, None, motif_batch)
         motif_att_soft = motif_att_log_logits.sigmoid()
         return (
+            motif_emb,
             inverse_indices,
             motif_batch,
             motif_ids,
@@ -1970,6 +1971,7 @@ class GSAT(nn.Module):
             if self.factored_motif_attention:
                 # Factored Motif Attention: multi-granularity z_k, motif MLP, factored node logits, mean-α IB
                 (
+                    _motif_emb_zk,
                     inverse_indices,
                     motif_batch,
                     motif_ids,
@@ -2201,6 +2203,42 @@ class GSAT(nn.Module):
             nodes_to_motifs = getattr(data, 'nodes_to_motifs', None)
             if nodes_to_motifs is None:
                 return None
+            if self.factored_motif_attention:
+                (
+                    motif_emb,
+                    inverse_indices,
+                    motif_batch_vec,
+                    motif_ids,
+                    _dim_m,
+                    motif_att_log_logits,
+                    _motif_att_soft,
+                    alpha_intra,
+                ) = self._factored_motif_prepare(data)
+                ell_k_node = motif_att_log_logits[inverse_indices]
+                nax = self.factored_node_logit_axis
+                if nax == 'N1':
+                    node_logit = ell_k_node
+                elif nax == 'N2':
+                    node_logit = ell_k_node * alpha_intra.unsqueeze(-1)
+                elif nax == 'N3':
+                    node_logit = ell_k_node * alpha_intra.detach().unsqueeze(-1)
+                else:
+                    raise ValueError(f'Unknown factored_node_logit_axis: {nax!r}')
+                node_att = self.sampling(node_logit, epoch, False)
+                na = node_att.squeeze(-1)
+                motif_imp = scatter(na, inverse_indices, dim=0, reduce='mean', dim_size=motif_emb.size(0))
+                emb_viz = self.clf.get_emb(
+                    data.x, data.edge_index, batch=data.batch, edge_attr=data.edge_attr, emb_stop=None,
+                )
+                return (
+                    emb_viz.detach().cpu(),
+                    node_att.detach().cpu(),
+                    motif_emb.detach().cpu(),
+                    motif_imp.detach().cpu(),
+                    data.batch.detach().cpu(),
+                    motif_batch_vec.detach().cpu(),
+                    motif_ids.detach().cpu(),
+                )
             motif_emb, motif_batch_vec, inverse_indices, motif_global_ids = self._motif_level_pool(
                 emb, nodes_to_motifs, data.batch,
             )
@@ -2910,33 +2948,58 @@ class GSAT(nn.Module):
                             if self.motif_method == 'readout':
                                 n2m = getattr(data, 'nodes_to_motifs', None)
                                 if n2m is not None:
-                                    motif_emb, motif_batch, inv_idx, _ = self._motif_level_pool(
-                                        emb, n2m, batch)
-                                    motif_logits = self.extractor(motif_emb, None, motif_batch)
-                                    if self.motif_prior_node_gate:
-                                        att, _, _ = sample_motif_readout_with_prior_node_gate(
-                                            self.sampling,
-                                            motif_logits,
-                                            motif_emb,
-                                            emb,
-                                            inv_idx,
-                                            batch,
-                                            epoch,
-                                            False,
-                                            self.use_raw_score_loss,
-                                            self.motif_prior_node_gate_module,
-                                            self.motif_prior_detach_alpha,
-                                            self.motif_prior_detach_z,
-                                            residual_motif_logit=self.motif_prior_residual_logit,
-                                            shift_scale=self._effective_motif_prior_shift_scale(epoch),
-                                            gate_tanh=self.motif_prior_gate_tanh,
-                                        )
-                                    elif self.motif_level_sampling:
-                                        motif_att = self.sampling(motif_logits, epoch, training=False)
-                                        att = lift_motif_att_to_node_att(motif_att, inv_idx)
+                                    if self.factored_motif_attention:
+                                        (
+                                            _motif_emb_zk,
+                                            inverse_indices,
+                                            motif_batch,
+                                            _motif_ids,
+                                            _dim_m,
+                                            motif_att_log_logits,
+                                            _motif_att_soft,
+                                            alpha_intra,
+                                        ) = self._factored_motif_prepare(data)
+                                        ell_k_node = motif_att_log_logits[inverse_indices]
+                                        nax = self.factored_node_logit_axis
+                                        if nax == 'N1':
+                                            node_logit = ell_k_node
+                                        elif nax == 'N2':
+                                            node_logit = ell_k_node * alpha_intra.unsqueeze(-1)
+                                        elif nax == 'N3':
+                                            node_logit = ell_k_node * alpha_intra.detach().unsqueeze(-1)
+                                        else:
+                                            raise ValueError(
+                                                f'Unknown factored_node_logit_axis: {nax!r}',
+                                            )
+                                        att = self.sampling(node_logit, epoch, training=False)
                                     else:
-                                        node_logits = lift_motif_att_to_node_att(motif_logits, inv_idx)
-                                        att = self.sampling(node_logits, epoch, training=False)
+                                        motif_emb, motif_batch, inv_idx, _ = self._motif_level_pool(
+                                            emb, n2m, batch)
+                                        motif_logits = self.extractor(motif_emb, None, motif_batch)
+                                        if self.motif_prior_node_gate:
+                                            att, _, _ = sample_motif_readout_with_prior_node_gate(
+                                                self.sampling,
+                                                motif_logits,
+                                                motif_emb,
+                                                emb,
+                                                inv_idx,
+                                                batch,
+                                                epoch,
+                                                False,
+                                                self.use_raw_score_loss,
+                                                self.motif_prior_node_gate_module,
+                                                self.motif_prior_detach_alpha,
+                                                self.motif_prior_detach_z,
+                                                residual_motif_logit=self.motif_prior_residual_logit,
+                                                shift_scale=self._effective_motif_prior_shift_scale(epoch),
+                                                gate_tanh=self.motif_prior_gate_tanh,
+                                            )
+                                        elif self.motif_level_sampling:
+                                            motif_att = self.sampling(motif_logits, epoch, training=False)
+                                            att = lift_motif_att_to_node_att(motif_att, inv_idx)
+                                        else:
+                                            node_logits = lift_motif_att_to_node_att(motif_logits, inv_idx)
+                                            att = self.sampling(node_logits, epoch, training=False)
                                 else:
                                     att_log_logits = self.extractor(emb, data.edge_index, batch)
                                     att = self.sampling(att_log_logits, epoch, training=False)
