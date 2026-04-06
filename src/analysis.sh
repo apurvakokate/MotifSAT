@@ -55,6 +55,7 @@ EXPERIMENTS=(
   simplified_factored_motif_additive
   simplified_motif_readout
   simplified_motif_readout_maxmean
+  simplified_motif_readout_maxmean_z1
 )
 
 MODELS=(GIN PNA GAT SAGE GCN)

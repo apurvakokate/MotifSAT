@@ -70,6 +70,7 @@ EXPERIMENTS=(
   simplified_factored_motif_additive
   simplified_motif_readout
   simplified_motif_readout_maxmean
+  simplified_motif_readout_maxmean_z1
 )
 
 # Subset or reorder for load balancing. Full SUPPORTED_DATASETS order in driver: molecular + OGB + PAPER_DATASETS (deduped).

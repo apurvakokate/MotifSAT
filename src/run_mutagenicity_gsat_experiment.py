@@ -26,6 +26,7 @@ Active groups (EXPERIMENT_GROUPS):
   simplified_factored_motif_additive — MLP(LN(z^att)) only; 010; L_pred + motif-level L_info on σ(ℓ_k) (use_raw_score_loss); info_loss_coef≈motif_ib scale; info_warmup 20; final_r=0.8
   simplified_motif_readout — same as simplified_factored_motif_additive but node logit = ℓ_k only (no intra-motif δ); motif score broadcast to all nodes in motif
   simplified_motif_readout_maxmean — same as simplified_motif_readout but motif embedding = concat(max, mean) over nodes per motif (no intra-attention pool for z_k)
+  simplified_motif_readout_maxmean_z1 — same as simplified_motif_readout_maxmean but motif MLP input z_k = LN(z^(1)) || LN(max||mean) (emb_stop=0 mean-pool per motif + max_mean)
 
 Injection codes map to GSAT flags (w_node ≡ w_feat): 100=w_feat only, 010=w_message only, 001=w_readout only.
 
@@ -933,6 +934,27 @@ EXPERIMENT_GROUPS['simplified_motif_readout_maxmean'] = {
     ],
 }
 
+# max_mean z^att + layer-0 mean-pooled z^(1) before motif MLP (RegularizedMotifScoringMLP in_dim = 3H)
+_SIMPLIFIED_MOTIF_READOUT_MAXMEAN_Z1_GSAT = {
+    **_SIMPLIFIED_MOTIF_READOUT_MAXMEAN_GSAT,
+    'factored_motif_zk_zatt_only': False,
+}
+
+EXPERIMENT_GROUPS['simplified_motif_readout_maxmean_z1'] = {
+    'experiment_name': 'simplified_motif_readout_maxmean_z1',
+    'variants': [
+        {
+            'variant_id': 'simplified_motif_readout_maxmean_z1',
+            'gsat_overrides': {
+                'tuning_id': 'simplified_motif_readout_maxmean_z1',
+                **_DECAY_R_BASE,
+                **_SIMPLIFIED_MOTIF_READOUT_MAXMEAN_Z1_GSAT,
+            },
+            'learn_edge_att': False,
+        },
+    ],
+}
+
 EXPERIMENT_GROUPS['factored_motif_attention_grid'] = {
     'experiment_name': 'factored_motif_attention_grid',
     'variants': [
@@ -1054,6 +1076,7 @@ def main():
         'simplified_factored_motif_additive',
         'simplified_motif_readout',
         'simplified_motif_readout_maxmean',
+        'simplified_motif_readout_maxmean_z1',
     }
     if dataset_name not in DATASETS_WITH_MOTIFS:
         skipped = [e for e in args.experiments if e in motif_experiments]
