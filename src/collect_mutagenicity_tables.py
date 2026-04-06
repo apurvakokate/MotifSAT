@@ -335,6 +335,11 @@ EXPERIMENT_ROW_CONFIG = {
         'row_label_prefix': 'motif_ib_final_r',
         'path_extract': 'factored_additive_ibf',
     },
+    'simplified_factored_motif_additive': {
+        'summary_path': None,
+        'row_label_prefix': 'variant',
+        'path_extract': 'simplified_factored_additive',
+    },
 }
 
 
@@ -511,6 +516,12 @@ def _extract_value_from_parts(parts, mode):
         m = re.search(r'factored_reg_ibf(\d{3})', joined)
         if m:
             return int(m.group(1)) / 100.0
+        return None
+
+    elif mode == 'simplified_factored_additive':
+        for p in parts:
+            if 'simplified_factored_additive' in p:
+                return 'simplified_factored_additive'
         return None
 
     return None

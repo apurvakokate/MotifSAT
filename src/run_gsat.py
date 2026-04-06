@@ -1366,6 +1366,10 @@ class GSAT(nn.Module):
 
         # Factored Motif Attention Pipeline (multi-granularity z_k + factored node logits + mean-α motif IB)
         self.factored_motif_regularized = bool(method_config.get('factored_motif_regularized', False))
+        # z_k = LN(z^att) only (no layer-0 mean) for motif MLP input
+        self.factored_motif_zk_zatt_only = bool(method_config.get('factored_motif_zk_zatt_only', False))
+        # When True with factored_motif_regularized: use standard node-level L_info (else info_loss=0)
+        self.factored_motif_node_info_loss = bool(method_config.get('factored_motif_node_info_loss', False))
         self.factored_motif_zk_dropout_p = float(method_config.get('factored_motif_zk_dropout_p', 0.3))
         _clamp = method_config.get('factored_motif_node_logit_clamp', None)
         self.factored_motif_node_logit_clamp = None if _clamp is None else float(_clamp)
@@ -1482,6 +1486,8 @@ class GSAT(nn.Module):
                 f'node_logit_clamp={self.factored_motif_node_logit_clamp}, '
                 f'|ℓ_k|≤{FACTORED_MOTIF_LOGIT_CLAMP}, '
                 f'node_ℓ=ℓ_k+δ(intra), δ scale={FACTORED_MOTIF_NODE_LOGIT_DELTA_SCALE}, '
+                f'zk_zatt_only={self.factored_motif_zk_zatt_only}, '
+                f'node_info_loss={self.factored_motif_node_info_loss}, '
                 f'IB on σ(ℓ_k) vs get_r; β_IB ramp (ib_ramp_epochs={self.ib_ramp_epochs})'
             )
         if self.factored_motif_attention:
@@ -1622,6 +1628,12 @@ class GSAT(nn.Module):
                 'factored_motif_zk_axis': self.factored_motif_zk_axis if self.factored_motif_attention else None,
                 'factored_node_logit_axis': self.factored_node_logit_axis if self.factored_motif_attention else None,
                 'factored_motif_regularized': self.factored_motif_regularized,
+                'factored_motif_zk_zatt_only': (
+                    self.factored_motif_zk_zatt_only if self.factored_motif_regularized else None
+                ),
+                'factored_motif_node_info_loss': (
+                    self.factored_motif_node_info_loss if self.factored_motif_regularized else None
+                ),
                 'factored_motif_zk_dropout_p': (
                     self.factored_motif_zk_dropout_p if self.factored_motif_regularized else None
                 ),
@@ -1798,27 +1810,31 @@ class GSAT(nn.Module):
 
     def _factored_motif_regularized_prepare(self, data, epoch):
         """
-        z_k^(1), z_k^att from backbone; z_k = [LN(z^(1)) || LN(z^att)]; Dropout; ℓ_k = clamp(MLP_motif(z_k)).
-        α_k = σ(ℓ_k) (interpretability score). Node logits: ℓ_i^node = ℓ_k + δ_i with
-        δ_i = s·(log a_i - mean_j log a_j), a = intra-motif softmax, s = FACTORED_MOTIF_NODE_LOGIT_DELTA_SCALE.
-        IB on α_k vs r(t) from get_r; β_IB ramp is separate (ib_ramp_epochs).
+        z_k^att from backbone; optionally z_k = [LN(z^(1)) || LN(z^att)] or z_k = LN(z^att) only
+        (factored_motif_zk_zatt_only). Dropout; ℓ_k = clamp(MLP_motif(z_k)).
+        α_k = σ(ℓ_k). Node logits: ℓ_i^node = ℓ_k + δ_i (δ from intra-motif softmax).
+        Motif IB when motif_level_ib_coef > 0; node L_info when factored_motif_node_info_loss.
         """
         nodes_to_motifs = getattr(data, 'nodes_to_motifs', None)
         if nodes_to_motifs is None:
             raise ValueError('factored_motif_regularized requires nodes_to_motifs on data')
         inverse_indices, motif_batch, motif_ids = compute_motif_inverse_indices(nodes_to_motifs, data.batch)
         dim_m = int(inverse_indices.max().item()) + 1
-        h1 = self.clf.get_emb(
-            data.x, data.edge_index, batch=data.batch, edge_attr=data.edge_attr, emb_stop=0,
-        )
         hL = self.clf.get_emb(
             data.x, data.edge_index, batch=data.batch, edge_attr=data.edge_attr, emb_stop=None,
         )
         alpha_intra, r_m = self.intra_motif_pool.forward_alpha_and_weighted(hL, inverse_indices)
-        z1 = scatter(h1, inverse_indices, dim=0, dim_size=dim_m, reduce='mean')
-        z1_norm = F.layer_norm(z1, (z1.shape[-1],))
         zatt_norm = F.layer_norm(r_m, (r_m.shape[-1],))
-        z_k = torch.cat([z1_norm, zatt_norm], dim=-1)
+        if self.factored_motif_zk_zatt_only:
+            z_k = zatt_norm
+            z1 = None
+        else:
+            h1 = self.clf.get_emb(
+                data.x, data.edge_index, batch=data.batch, edge_attr=data.edge_attr, emb_stop=0,
+            )
+            z1 = scatter(h1, inverse_indices, dim=0, dim_size=dim_m, reduce='mean')
+            z1_norm = F.layer_norm(z1, (z1.shape[-1],))
+            z_k = torch.cat([z1_norm, zatt_norm], dim=-1)
         z_k = F.dropout(z_k, p=self.factored_motif_zk_dropout_p, training=self.training)
         motif_att_log_logits = self.motif_scoring_mlp(z_k)
         ell_k = torch.clamp(motif_att_log_logits.squeeze(-1), -FACTORED_MOTIF_LOGIT_CLAMP, FACTORED_MOTIF_LOGIT_CLAMP)
@@ -1840,7 +1856,7 @@ class GSAT(nn.Module):
                         return 0.0
                     return float(t.var(dim=0, unbiased=False).mean().item())
 
-                z1_var = _vm(z1)
+                z1_var = _vm(z1) if z1 is not None else 0.0
                 zatt_var = _vm(r_m)
                 if ell_k.numel() <= 1:
                     ell_k_var = 0.0
@@ -1923,8 +1939,10 @@ class GSAT(nn.Module):
         #     r = r_per_motif.clamp(min=0.01, max=0.99).unsqueeze(-1)
         # else:
         r = self.fix_r if self.fix_r else self.get_r(self.decay_interval, self.decay_r, epoch, final_r=self.final_r, init_r=self.init_r)
-        # Factored / regularized pipeline: no node-level GSAT info term; IB is motif-level (see motif_ib branch)
-        if self.factored_motif_attention or self.factored_motif_regularized:
+        # Factored / regularized: default no node-level L_info; optional factored_motif_node_info_loss
+        if self.factored_motif_attention or (
+            self.factored_motif_regularized and not self.factored_motif_node_info_loss
+        ):
             info_loss = att.new_tensor(0.0)
         else:
             att_for_loss = raw_att_for_loss if raw_att_for_loss is not None else att
@@ -4740,7 +4758,10 @@ def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_nam
     intra_motif_pool = None
     if method_config.get('factored_motif_regularized', False):
         z_dp = float(method_config.get('factored_motif_zk_dropout_p', 0.3))
-        in_dim = 2 * int(hidden_size)
+        if method_config.get('factored_motif_zk_zatt_only', False):
+            in_dim = int(hidden_size)
+        else:
+            in_dim = 2 * int(hidden_size)
         motif_scoring_mlp = RegularizedMotifScoringMLP(in_dim, hidden_size, dropout_p=z_dp).to(device)
         nn.init.xavier_uniform_(motif_scoring_mlp.final_layer.weight, gain=0.01)
         nn.init.zeros_(motif_scoring_mlp.final_layer.bias)

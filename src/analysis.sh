@@ -52,6 +52,7 @@ EXPERIMENTS=(
   # factored_motif_additive: one table per experiment name; rows split by motif_ib_final_r
   # (variants tuning_factored_reg_ibf070|050|030 → 0.7, 0.5, 0.3). See EXPERIMENT_ROW_CONFIG in collect_mutagenicity_tables.py
   factored_motif_additive
+  simplified_factored_motif_additive
 )
 
 MODELS=(GIN PNA GAT SAGE GCN)

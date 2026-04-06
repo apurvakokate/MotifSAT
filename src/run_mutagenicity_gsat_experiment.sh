@@ -67,6 +67,7 @@ EXPERIMENTS=(
   motif_readout_pred_info_only
   factored_motif_attention_grid
   factored_motif_additive
+  simplified_factored_motif_additive
 )
 
 # Subset or reorder for load balancing. Full SUPPORTED_DATASETS order in driver: molecular + OGB + PAPER_DATASETS (deduped).
