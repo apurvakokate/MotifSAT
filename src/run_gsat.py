@@ -1485,7 +1485,8 @@ class GSAT(nn.Module):
                 f'|ℓ_k|≤{FACTORED_MOTIF_LOGIT_CLAMP}, '
                 f'node_ℓ=ℓ_k+δ(intra), δ scale={FACTORED_MOTIF_NODE_LOGIT_DELTA_SCALE}, '
                 f'zk_zatt_only={self.factored_motif_zk_zatt_only}, '
-                f'node_info_loss=False (off); IB on σ(ℓ_k) vs get_r; β_IB ramp (ib_ramp_epochs={self.ib_ramp_epochs})'
+                f'motif_level_info_loss={self.motif_level_info_loss}; IB on σ(ℓ_k) vs get_r when motif_level_ib_coef>0; '
+                f'β_IB ramp (ib_ramp_epochs={self.ib_ramp_epochs})'
             )
         if self.factored_motif_attention:
             print(
@@ -1807,7 +1808,8 @@ class GSAT(nn.Module):
         z_k^att from backbone; optionally z_k = [LN(z^(1)) || LN(z^att)] or z_k = LN(z^att) only
         (factored_motif_zk_zatt_only). Dropout; ℓ_k = clamp(MLP_motif(z_k)).
         α_k = σ(ℓ_k). Node logits: ℓ_i^node = ℓ_k + δ_i (δ from intra-motif softmax).
-        Motif IB when motif_level_ib_coef > 0; node L_info is off (handled in __loss__).
+        Motif IB when motif_level_ib_coef > 0. Optional motif-level L_info when motif_level_info_loss
+        (forward still uses node-level sampled att from ℓ_k+δ).
         """
         nodes_to_motifs = getattr(data, 'nodes_to_motifs', None)
         if nodes_to_motifs is None:
@@ -1933,8 +1935,11 @@ class GSAT(nn.Module):
         #     r = r_per_motif.clamp(min=0.01, max=0.99).unsqueeze(-1)
         # else:
         r = self.fix_r if self.fix_r else self.get_r(self.decay_interval, self.decay_r, epoch, final_r=self.final_r, init_r=self.init_r)
-        # Factored / regularized: no node-level L_info (use motif IB on σ(ℓ_k) when coef>0)
-        if self.factored_motif_attention or self.factored_motif_regularized:
+        # Factored attention: no L_info here. Factored regularized: L_info only if motif_level_info_loss
+        # (forward_pass passes motif-level att / raw for that case).
+        if self.factored_motif_attention:
+            info_loss = att.new_tensor(0.0)
+        elif self.factored_motif_regularized and not self.motif_level_info_loss:
             info_loss = att.new_tensor(0.0)
         else:
             att_for_loss = raw_att_for_loss if raw_att_for_loss is not None else att
@@ -2221,8 +2226,16 @@ class GSAT(nn.Module):
                     c = self.factored_motif_node_logit_clamp
                     node_logit = node_logit.clamp(-c, c)
                 node_att = self.sampling(node_logit, epoch, training)
-                att = node_att
-                raw_att_for_loss = node_logit.sigmoid() if self.use_raw_score_loss else None
+                # Motif-level L_info: KL on sampled motif att vs r(t); classifier still uses node_att (ℓ_k+δ path).
+                if self.motif_level_info_loss:
+                    motif_att = self.sampling(motif_att_log_logits, epoch, training)
+                    att = motif_att
+                    raw_att_for_loss = (
+                        motif_att_log_logits.sigmoid() if self.use_raw_score_loss else None
+                    )
+                else:
+                    att = node_att
+                    raw_att_for_loss = node_logit.sigmoid() if self.use_raw_score_loss else None
                 motif_interp_logits = None
                 self._loss_ctx = {
                     'node_att': node_att,
