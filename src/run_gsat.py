@@ -2226,13 +2226,16 @@ class GSAT(nn.Module):
                     c = self.factored_motif_node_logit_clamp
                     node_logit = node_logit.clamp(-c, c)
                 node_att = self.sampling(node_logit, epoch, training)
-                # Motif-level L_info: KL on sampled motif att vs r(t); classifier still uses node_att (ℓ_k+δ path).
+                # Motif-level L_info vs r(t): σ(ℓ_k) when use_raw_score_loss; else sampled motif att.
+                # Classifier always uses node_att (ℓ_k+δ path).
                 if self.motif_level_info_loss:
-                    motif_att = self.sampling(motif_att_log_logits, epoch, training)
-                    att = motif_att
-                    raw_att_for_loss = (
-                        motif_att_log_logits.sigmoid() if self.use_raw_score_loss else None
-                    )
+                    if self.use_raw_score_loss:
+                        att = motif_att_log_logits.sigmoid()
+                        raw_att_for_loss = att
+                    else:
+                        motif_att = self.sampling(motif_att_log_logits, epoch, training)
+                        att = motif_att
+                        raw_att_for_loss = None
                 else:
                     att = node_att
                     raw_att_for_loss = node_logit.sigmoid() if self.use_raw_score_loss else None

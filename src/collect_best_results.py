@@ -66,7 +66,7 @@ DEFAULT_EXPERIMENT_LABELS = {
     'motif_readout_pred_info_only': 'L_pred+L_info; max_mean; sweep GNN layer for motif emb (α discriminability)',
     'factored_motif_attention_grid': 'Factored motif attention (M1–M4 × N1–N3; multi-z_k + factored logits + mean-α IB)',
     'factored_motif_additive': 'Factored motif additive (LN z^(1)||z^att; ℓ_k+δ intra; IB on σ(ℓ_k); r_f sweep)',
-    'simplified_factored_motif_additive': 'Simplified factored additive (MLP(LN z^att)); 010; L_pred + motif-level L_info; motif_ib off; info_warmup 20; final_r=0.8',
+    'simplified_factored_motif_additive': 'Simplified factored additive (MLP(LN z^att)); 010; L_pred + motif L_info on σ(ℓ_k) (raw score); info_coef 0.01; motif_ib off; info_warmup 20; final_r=0.8',
 }
 
 
