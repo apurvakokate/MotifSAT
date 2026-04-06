@@ -1368,8 +1368,6 @@ class GSAT(nn.Module):
         self.factored_motif_regularized = bool(method_config.get('factored_motif_regularized', False))
         # z_k = LN(z^att) only (no layer-0 mean) for motif MLP input
         self.factored_motif_zk_zatt_only = bool(method_config.get('factored_motif_zk_zatt_only', False))
-        # When True with factored_motif_regularized: use standard node-level L_info (else info_loss=0)
-        self.factored_motif_node_info_loss = bool(method_config.get('factored_motif_node_info_loss', False))
         self.factored_motif_zk_dropout_p = float(method_config.get('factored_motif_zk_dropout_p', 0.3))
         _clamp = method_config.get('factored_motif_node_logit_clamp', None)
         self.factored_motif_node_logit_clamp = None if _clamp is None else float(_clamp)
@@ -1487,8 +1485,7 @@ class GSAT(nn.Module):
                 f'|ℓ_k|≤{FACTORED_MOTIF_LOGIT_CLAMP}, '
                 f'node_ℓ=ℓ_k+δ(intra), δ scale={FACTORED_MOTIF_NODE_LOGIT_DELTA_SCALE}, '
                 f'zk_zatt_only={self.factored_motif_zk_zatt_only}, '
-                f'node_info_loss={self.factored_motif_node_info_loss}, '
-                f'IB on σ(ℓ_k) vs get_r; β_IB ramp (ib_ramp_epochs={self.ib_ramp_epochs})'
+                f'node_info_loss=False (off); IB on σ(ℓ_k) vs get_r; β_IB ramp (ib_ramp_epochs={self.ib_ramp_epochs})'
             )
         if self.factored_motif_attention:
             print(
@@ -1630,9 +1627,6 @@ class GSAT(nn.Module):
                 'factored_motif_regularized': self.factored_motif_regularized,
                 'factored_motif_zk_zatt_only': (
                     self.factored_motif_zk_zatt_only if self.factored_motif_regularized else None
-                ),
-                'factored_motif_node_info_loss': (
-                    self.factored_motif_node_info_loss if self.factored_motif_regularized else None
                 ),
                 'factored_motif_zk_dropout_p': (
                     self.factored_motif_zk_dropout_p if self.factored_motif_regularized else None
@@ -1813,7 +1807,7 @@ class GSAT(nn.Module):
         z_k^att from backbone; optionally z_k = [LN(z^(1)) || LN(z^att)] or z_k = LN(z^att) only
         (factored_motif_zk_zatt_only). Dropout; ℓ_k = clamp(MLP_motif(z_k)).
         α_k = σ(ℓ_k). Node logits: ℓ_i^node = ℓ_k + δ_i (δ from intra-motif softmax).
-        Motif IB when motif_level_ib_coef > 0; node L_info when factored_motif_node_info_loss.
+        Motif IB when motif_level_ib_coef > 0; node L_info is off (handled in __loss__).
         """
         nodes_to_motifs = getattr(data, 'nodes_to_motifs', None)
         if nodes_to_motifs is None:
@@ -1939,10 +1933,8 @@ class GSAT(nn.Module):
         #     r = r_per_motif.clamp(min=0.01, max=0.99).unsqueeze(-1)
         # else:
         r = self.fix_r if self.fix_r else self.get_r(self.decay_interval, self.decay_r, epoch, final_r=self.final_r, init_r=self.init_r)
-        # Factored / regularized: default no node-level L_info; optional factored_motif_node_info_loss
-        if self.factored_motif_attention or (
-            self.factored_motif_regularized and not self.factored_motif_node_info_loss
-        ):
+        # Factored / regularized: no node-level L_info (use motif IB on σ(ℓ_k) when coef>0)
+        if self.factored_motif_attention or self.factored_motif_regularized:
             info_loss = att.new_tensor(0.0)
         else:
             att_for_loss = raw_att_for_loss if raw_att_for_loss is not None else att

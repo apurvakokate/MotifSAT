@@ -23,7 +23,7 @@ Active groups (EXPERIMENT_GROUPS):
   base_gsat_decay_r_minority_global — same as base_gsat_decay_r but motif pickles from FOLDS/minority_global/...
   factored_motif_attention_grid — 12 variants (M1–M4 × N1–N3): multi-granularity z_k, factored node logits, motif IB on mean node α (see experiment_factored_motif.py)
   factored_motif_additive — LN(z^(1)||z^att), MLP motif ℓ_k, node ℓ=ℓ_k+δ(intra), IB on σ(ℓ_k); sweep motif_ib_final_r ∈ {0.7,0.5,0.3}
-  simplified_factored_motif_additive — MLP(LN(z^att)) only; 010; L_pred+L_info; motif IB off; final_r=0.8
+  simplified_factored_motif_additive — MLP(LN(z^att)) only; 010; L_pred + L_IB on σ(ℓ_k); node L_info=0; ib_ramp_epochs=0; final_r=0.8
 
 Injection codes map to GSAT flags (w_node ≡ w_feat): 100=w_feat only, 010=w_message only, 001=w_readout only.
 
@@ -861,15 +861,15 @@ EXPERIMENT_GROUPS['factored_motif_additive'] = {
     ],
 }
 
-# Like factored_motif_additive but: ℓ_k from MLP(LN(z^att)) only; 010 injection; L_pred+L_info; motif IB off; final_r=0.8
+# Like factored_motif_additive but: ℓ_k from MLP(LN(z^att)) only; 010; L_pred + L_IB on σ(ℓ_k); node L_info=0; no β ramp (ib_ramp_epochs=0); final_r=0.8
 _SIMPLIFIED_FACTORED_MOTIF_ADDITIVE_GSAT = {
     **_FACTORED_MOTIF_REG_BASE_GSAT,
     'factored_motif_zk_zatt_only': True,
-    'factored_motif_node_info_loss': True,
-    'info_loss_coef': 1.0,
+    'info_loss_coef': 0.0,
     'info_warmup_epochs': 0,
     'ib_ramp_epochs': 0,
-    'motif_level_ib_coef': 0.0,
+    'motif_level_ib_coef': 0.01,
+    'motif_ib_final_r': 0.8,
     'final_r': 0.8,
     **INJECTION_PRESETS['010'],
 }
