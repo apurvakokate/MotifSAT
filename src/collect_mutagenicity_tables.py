@@ -355,6 +355,16 @@ EXPERIMENT_ROW_CONFIG = {
         'row_label_prefix': 'variant',
         'path_extract': 'simplified_motif_readout_maxmean_z1',
     },
+    'simplified_motif_readout_maxmean_injection_ablation': {
+        'summary_path': None,
+        'row_label_prefix': 'injection',
+        'path_extract': 'maxmean_inj_code',
+    },
+    'simplified_motif_readout_maxmean_info_loss_ablation': {
+        'summary_path': ('loss_coefficients', 'info_loss_coef'),
+        'row_label_prefix': 'info_loss_coef',
+        'path_extract': 'info_loss_coef',
+    },
 }
 
 
@@ -557,6 +567,20 @@ def _extract_value_from_parts(parts, mode):
         for p in parts:
             if 'simplified_motif_readout_maxmean_z1' in p:
                 return 'simplified_motif_readout_maxmean_z1'
+        return None
+
+    elif mode == 'maxmean_inj_code':
+        joined = '/'.join(parts)
+        m = re.search(r'simplified_maxmean_inj(\d{3})', joined)
+        if m:
+            return m.group(1)
+        return None
+
+    elif mode == 'info_loss_coef':
+        for p in parts:
+            m = re.search(r'pred[0-9.]+_info([0-9.]+)_motif', p)
+            if m:
+                return _coerce_number(m.group(1))
         return None
 
     return None

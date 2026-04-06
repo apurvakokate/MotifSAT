@@ -56,6 +56,8 @@ EXPERIMENTS=(
   simplified_motif_readout
   simplified_motif_readout_maxmean
   simplified_motif_readout_maxmean_z1
+  simplified_motif_readout_maxmean_injection_ablation
+  simplified_motif_readout_maxmean_info_loss_ablation
 )
 
 MODELS=(GIN PNA GAT SAGE GCN)

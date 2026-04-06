@@ -70,6 +70,8 @@ DEFAULT_EXPERIMENT_LABELS = {
     'simplified_motif_readout': 'Simplified motif readout: same as simplified_factored_motif_additive but node ℓ = ℓ_k only (broadcast; no intra-motif δ)',
     'simplified_motif_readout_maxmean': 'Like simplified_motif_readout; motif emb = max||mean pool (not intra-att) before motif MLP',
     'simplified_motif_readout_maxmean_z1': 'Like maxmean readout; z_k = LN(z^(1))||LN(max||mean) (3H) before motif MLP',
+    'simplified_motif_readout_maxmean_injection_ablation': 'Maxmean + no L_info warmup; sweep injection 010/101/011/111',
+    'simplified_motif_readout_maxmean_info_loss_ablation': 'Maxmean + 010 + no warmup; sweep info_loss_coef 0.01/0.1/0.3',
 }
 
 
@@ -608,6 +610,8 @@ def main():
             'simplified_motif_readout',
             'simplified_motif_readout_maxmean',
             'simplified_motif_readout_maxmean_z1',
+            'simplified_motif_readout_maxmean_injection_ablation',
+            'simplified_motif_readout_maxmean_info_loss_ablation',
         ]
 
     run(

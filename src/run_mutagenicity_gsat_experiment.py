@@ -27,8 +27,10 @@ Active groups (EXPERIMENT_GROUPS):
   simplified_motif_readout — same as simplified_factored_motif_additive but node logit = ℓ_k only (no intra-motif δ); motif score broadcast to all nodes in motif
   simplified_motif_readout_maxmean — same as simplified_motif_readout but motif embedding = concat(max, mean) over nodes per motif (no intra-attention pool for z_k)
   simplified_motif_readout_maxmean_z1 — same as simplified_motif_readout_maxmean but motif MLP input z_k = LN(z^(1)) || LN(max||mean) (emb_stop=0 mean-pool per motif + max_mean)
+  simplified_motif_readout_maxmean_injection_ablation — maxmean + no info warmup; sweep injection 010 / 101 / 011 / 111
+  simplified_motif_readout_maxmean_info_loss_ablation — maxmean + 010 + no warmup; sweep info_loss_coef ∈ {0.01, 0.1, 0.3}
 
-Injection codes map to GSAT flags (w_node ≡ w_feat): 100=w_feat only, 010=w_message only, 001=w_readout only.
+Injection codes map to GSAT flags (w_node ≡ w_feat): 100=w_feat only, 010=w_message only, 001=w_readout only, 111=all three.
 
 Pre-streamlining registry: run_mutagenicity_gsat_experiment_legacy_experiment_groups.EXPERIMENT_GROUPS_LEGACY
 """
@@ -65,6 +67,7 @@ INJECTION_PRESETS = {
     '001': {'w_feat': False, 'w_message': False, 'w_readout': True},
     '101': {'w_feat': True, 'w_message': False, 'w_readout': True},
     '011': {'w_feat': False, 'w_message': True, 'w_readout': True},
+    '111': {'w_feat': True, 'w_message': True, 'w_readout': True},
 }
 
 # motif_readout_pred_info_only: which backbone depth feeds motif pooling (see run_gsat motif_readout_emb_stop).
@@ -919,6 +922,62 @@ _SIMPLIFIED_MOTIF_READOUT_MAXMEAN_GSAT = {
     'motif_pooling_method': 'max_mean',
 }
 
+# max_mean readout + motif L_info from epoch 0 (no prediction-only warmup)
+_SIMPLIFIED_MOTIF_READOUT_MAXMEAN_NO_WARMUP_GSAT = {
+    **_SIMPLIFIED_MOTIF_READOUT_MAXMEAN_GSAT,
+    'info_warmup_epochs': 0,
+}
+
+# 010=edge(message) only; 101=node+readout; 011=edge+readout; 111=node+edge+readout
+_SIMPLIFIED_MOTIF_READOUT_MAXMEAN_INJECTION_ABLATION_CODES = (
+    ('010', 'edge_only'),
+    ('101', 'node_readout'),
+    ('011', 'edge_readout'),
+    ('111', 'node_edge_readout'),
+)
+
+EXPERIMENT_GROUPS['simplified_motif_readout_maxmean_injection_ablation'] = {
+    'experiment_name': 'simplified_motif_readout_maxmean_injection_ablation',
+    'variants': [
+        {
+            'variant_id': f'maxmean_inj_{tag}',
+            'gsat_overrides': {
+                'tuning_id': f'simplified_maxmean_inj{code}',
+                **_DECAY_R_BASE,
+                **_SIMPLIFIED_MOTIF_READOUT_MAXMEAN_NO_WARMUP_GSAT,
+                **INJECTION_PRESETS[code],
+            },
+            'learn_edge_att': False,
+        }
+        for code, tag in _SIMPLIFIED_MOTIF_READOUT_MAXMEAN_INJECTION_ABLATION_CODES
+    ],
+}
+
+# Edge-only masking (010); sweep L_info strength
+_SIMPLIFIED_MOTIF_READOUT_MAXMEAN_INFO_LOSS_ABLATION_VARIANTS = (
+    ('info_coef_001', 0.01),
+    ('info_coef_010', 0.1),
+    ('info_coef_030', 0.3),
+)
+
+EXPERIMENT_GROUPS['simplified_motif_readout_maxmean_info_loss_ablation'] = {
+    'experiment_name': 'simplified_motif_readout_maxmean_info_loss_ablation',
+    'variants': [
+        {
+            'variant_id': f'maxmean_{vid}',
+            'gsat_overrides': {
+                'tuning_id': f'simplified_maxmean_{vid}',
+                **_DECAY_R_BASE,
+                **_SIMPLIFIED_MOTIF_READOUT_MAXMEAN_NO_WARMUP_GSAT,
+                **INJECTION_PRESETS['010'],
+                'info_loss_coef': coef,
+            },
+            'learn_edge_att': False,
+        }
+        for vid, coef in _SIMPLIFIED_MOTIF_READOUT_MAXMEAN_INFO_LOSS_ABLATION_VARIANTS
+    ],
+}
+
 EXPERIMENT_GROUPS['simplified_motif_readout_maxmean'] = {
     'experiment_name': 'simplified_motif_readout_maxmean',
     'variants': [
@@ -1077,6 +1136,8 @@ def main():
         'simplified_motif_readout',
         'simplified_motif_readout_maxmean',
         'simplified_motif_readout_maxmean_z1',
+        'simplified_motif_readout_maxmean_injection_ablation',
+        'simplified_motif_readout_maxmean_info_loss_ablation',
     }
     if dataset_name not in DATASETS_WITH_MOTIFS:
         skipped = [e for e in args.experiments if e in motif_experiments]
