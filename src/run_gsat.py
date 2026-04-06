@@ -1368,6 +1368,8 @@ class GSAT(nn.Module):
         self.factored_motif_regularized = bool(method_config.get('factored_motif_regularized', False))
         # z_k = LN(z^att) only (no layer-0 mean) for motif MLP input
         self.factored_motif_zk_zatt_only = bool(method_config.get('factored_motif_zk_zatt_only', False))
+        # If True: node logit = ℓ_k only (broadcast to all nodes in motif); no intra-motif δ correction
+        self.factored_motif_no_intra_delta = bool(method_config.get('factored_motif_no_intra_delta', False))
         self.factored_motif_zk_dropout_p = float(method_config.get('factored_motif_zk_dropout_p', 0.3))
         _clamp = method_config.get('factored_motif_node_logit_clamp', None)
         self.factored_motif_node_logit_clamp = None if _clamp is None else float(_clamp)
@@ -1483,8 +1485,9 @@ class GSAT(nn.Module):
                 f'[INFO] Factored motif regularized: zk_dropout_p={self.factored_motif_zk_dropout_p}, '
                 f'node_logit_clamp={self.factored_motif_node_logit_clamp}, '
                 f'|ℓ_k|≤{FACTORED_MOTIF_LOGIT_CLAMP}, '
-                f'node_ℓ=ℓ_k+δ(intra), δ scale={FACTORED_MOTIF_NODE_LOGIT_DELTA_SCALE}, '
+                f"node_ℓ={'ℓ_k only (broadcast)' if self.factored_motif_no_intra_delta else f'ℓ_k+δ(intra), δ scale={FACTORED_MOTIF_NODE_LOGIT_DELTA_SCALE}'}, "
                 f'zk_zatt_only={self.factored_motif_zk_zatt_only}, '
+                f'no_intra_delta={self.factored_motif_no_intra_delta}, '
                 f'motif_level_info_loss={self.motif_level_info_loss}; IB on σ(ℓ_k) vs get_r when motif_level_ib_coef>0; '
                 f'β_IB ramp (ib_ramp_epochs={self.ib_ramp_epochs})'
             )
@@ -1628,6 +1631,9 @@ class GSAT(nn.Module):
                 'factored_motif_regularized': self.factored_motif_regularized,
                 'factored_motif_zk_zatt_only': (
                     self.factored_motif_zk_zatt_only if self.factored_motif_regularized else None
+                ),
+                'factored_motif_no_intra_delta': (
+                    self.factored_motif_no_intra_delta if self.factored_motif_regularized else None
                 ),
                 'factored_motif_zk_dropout_p': (
                     self.factored_motif_zk_dropout_p if self.factored_motif_regularized else None
@@ -1807,9 +1813,8 @@ class GSAT(nn.Module):
         """
         z_k^att from backbone; optionally z_k = [LN(z^(1)) || LN(z^att)] or z_k = LN(z^att) only
         (factored_motif_zk_zatt_only). Dropout; ℓ_k = clamp(MLP_motif(z_k)).
-        α_k = σ(ℓ_k). Node logits: ℓ_i^node = ℓ_k + δ_i (δ from intra-motif softmax).
-        Motif IB when motif_level_ib_coef > 0. Optional motif-level L_info when motif_level_info_loss
-        (forward still uses node-level sampled att from ℓ_k+δ).
+        α_k = σ(ℓ_k). Node logits: ℓ_i^node = ℓ_k + δ_i (δ from intra-motif softmax), or ℓ_k only if
+        factored_motif_no_intra_delta. Motif IB when motif_level_ib_coef > 0; motif-level L_info when motif_level_info_loss.
         """
         nodes_to_motifs = getattr(data, 'nodes_to_motifs', None)
         if nodes_to_motifs is None:
@@ -1844,6 +1849,8 @@ class GSAT(nn.Module):
         mean_log_m = scatter(log_ai, inverse_indices, dim=0, dim_size=dim_m, reduce='mean')
         mean_log_node = mean_log_m[inverse_indices]
         delta_node = FACTORED_MOTIF_NODE_LOGIT_DELTA_SCALE * (log_ai - mean_log_node)
+        if self.factored_motif_no_intra_delta:
+            delta_node = torch.zeros_like(delta_node)
         if epoch in FACTORED_MOTIF_REG_DIAG_EPOCHS and getattr(self, '_factored_reg_diag_logged_epoch', -1) != epoch:
             self._factored_reg_diag_logged_epoch = int(epoch)
             with torch.no_grad():

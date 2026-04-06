@@ -340,6 +340,11 @@ EXPERIMENT_ROW_CONFIG = {
         'row_label_prefix': 'variant',
         'path_extract': 'simplified_factored_additive',
     },
+    'simplified_motif_readout': {
+        'summary_path': None,
+        'row_label_prefix': 'variant',
+        'path_extract': 'simplified_motif_readout',
+    },
 }
 
 
@@ -522,6 +527,12 @@ def _extract_value_from_parts(parts, mode):
         for p in parts:
             if 'simplified_factored_additive' in p:
                 return 'simplified_factored_additive'
+        return None
+
+    elif mode == 'simplified_motif_readout':
+        for p in parts:
+            if 'simplified_motif_readout' in p:
+                return 'simplified_motif_readout'
         return None
 
     return None
