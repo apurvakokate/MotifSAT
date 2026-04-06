@@ -329,6 +329,12 @@ EXPERIMENT_ROW_CONFIG = {
         'row_label_prefix': 'cell',
         'path_extract': 'factored_motif_cell',
     },
+    'factored_motif_additive': {
+        # Row = motif_ib_final_r sweep (0.7, 0.5, 0.3); paths tuning_factored_reg_ibf070 | ibf050 | ibf030
+        'summary_path': ('motif_readout_ablation', 'motif_ib_final_r'),
+        'row_label_prefix': 'motif_ib_final_r',
+        'path_extract': 'factored_additive_ibf',
+    },
 }
 
 
@@ -497,6 +503,14 @@ def _extract_value_from_parts(parts, mode):
         m = re.search(r'factored_([A-Z][0-9])_([A-Z][0-9])', joined)
         if m:
             return f'{m.group(1)}_{m.group(2)}'
+        return None
+
+    elif mode == 'factored_additive_ibf':
+        # tuning_factored_reg_ibf070 -> 0.7, ibf050 -> 0.5, ibf030 -> 0.3
+        joined = '/'.join(parts)
+        m = re.search(r'factored_reg_ibf(\d{3})', joined)
+        if m:
+            return int(m.group(1)) / 100.0
         return None
 
     return None
