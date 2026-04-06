@@ -1384,10 +1384,18 @@ class GSAT(nn.Module):
         if self.factored_motif_regularized:
             if self.motif_method != 'readout':
                 raise ValueError('factored_motif_regularized requires motif_incorporation_method=readout')
-            if self.motif_pooling_method != 'intra_att':
-                raise ValueError('factored_motif_regularized requires motif_pooling_method=intra_att')
-            if intra_motif_pool is None or motif_scoring_mlp is None:
-                raise ValueError('factored_motif_regularized requires intra_motif_pool and motif_scoring_mlp (train_gsat_one_seed)')
+            if self.motif_pooling_method not in ('intra_att', 'max_mean'):
+                raise ValueError(
+                    "factored_motif_regularized requires motif_pooling_method in ('intra_att', 'max_mean')"
+                )
+            if self.motif_pooling_method == 'intra_att':
+                if intra_motif_pool is None or motif_scoring_mlp is None:
+                    raise ValueError(
+                        'factored_motif_regularized (intra_att) requires intra_motif_pool and motif_scoring_mlp '
+                        '(train_gsat_one_seed)'
+                    )
+            elif motif_scoring_mlp is None:
+                raise ValueError('factored_motif_regularized (max_mean) requires motif_scoring_mlp (train_gsat_one_seed)')
             if self.motif_prior_node_gate:
                 raise ValueError('factored_motif_regularized is incompatible with motif_prior_node_gate=True')
 
@@ -1811,37 +1819,60 @@ class GSAT(nn.Module):
 
     def _factored_motif_regularized_prepare(self, data, epoch):
         """
-        z_k^att from backbone; optionally z_k = [LN(z^(1)) || LN(z^att)] or z_k = LN(z^att) only
-        (factored_motif_zk_zatt_only). Dropout; ℓ_k = clamp(MLP_motif(z_k)).
-        α_k = σ(ℓ_k). Node logits: ℓ_i^node = ℓ_k + δ_i (δ from intra-motif softmax), or ℓ_k only if
+        z_k from motif-level pooled features: intra-attention r_m (intra_att) or concat(max, mean) (max_mean).
+        Optionally z_k = [LN(z^(1)) || LN(z^att)] or z_k = LN(z^att) only (factored_motif_zk_zatt_only).
+        Dropout; ℓ_k = clamp(MLP_motif(z_k)). α_k = σ(ℓ_k). Node logits: ℓ_i^node = ℓ_k + δ_i, or ℓ_k only if
         factored_motif_no_intra_delta. Motif IB when motif_level_ib_coef > 0; motif-level L_info when motif_level_info_loss.
         """
         nodes_to_motifs = getattr(data, 'nodes_to_motifs', None)
         if nodes_to_motifs is None:
             raise ValueError('factored_motif_regularized requires nodes_to_motifs on data')
-        inverse_indices, motif_batch, motif_ids = compute_motif_inverse_indices(nodes_to_motifs, data.batch)
-        dim_m = int(inverse_indices.max().item()) + 1
         hL = self.clf.get_emb(
             data.x, data.edge_index, batch=data.batch, edge_attr=data.edge_attr, emb_stop=None,
         )
-        alpha_intra, r_m = self.intra_motif_pool.forward_alpha_and_weighted(hL, inverse_indices)
-        zatt_norm = F.layer_norm(r_m, (r_m.shape[-1],))
-        if self.factored_motif_zk_zatt_only:
-            z_k = zatt_norm
-            z1 = None
-        else:
-            h1 = self.clf.get_emb(
-                data.x, data.edge_index, batch=data.batch, edge_attr=data.edge_attr, emb_stop=0,
+        if self.motif_pooling_method == 'max_mean':
+            motif_emb_mm, motif_batch, inverse_indices, motif_ids = motif_pooling(
+                hL, nodes_to_motifs, data.batch, reduce='max_mean',
             )
-            z1 = scatter(h1, inverse_indices, dim=0, dim_size=dim_m, reduce='mean')
-            z1_norm = F.layer_norm(z1, (z1.shape[-1],))
-            z_k = torch.cat([z1_norm, zatt_norm], dim=-1)
+            dim_m = motif_emb_mm.size(0)
+            r_m = motif_emb_mm
+            zatt_norm = F.layer_norm(motif_emb_mm, (motif_emb_mm.shape[-1],))
+            if self.factored_motif_zk_zatt_only:
+                z_k = zatt_norm
+                z1 = None
+            else:
+                h1 = self.clf.get_emb(
+                    data.x, data.edge_index, batch=data.batch, edge_attr=data.edge_attr, emb_stop=0,
+                )
+                z1 = scatter(h1, inverse_indices, dim=0, dim_size=dim_m, reduce='mean')
+                z1_norm = F.layer_norm(z1, (z1.shape[-1],))
+                z_k = torch.cat([z1_norm, zatt_norm], dim=-1)
+            # Uniform weights over nodes in motif → δ term vanishes (same as intra with tied α)
+            ones_m = torch.ones(data.x.size(0), device=data.x.device, dtype=data.x.dtype)
+            counts = scatter(ones_m, inverse_indices, dim=0, dim_size=dim_m, reduce='sum')
+            c_per_node = counts[inverse_indices].clamp(min=1)
+            alpha_intra = torch.ones_like(ones_m) / c_per_node.to(dtype=hL.dtype)
+        else:
+            inverse_indices, motif_batch, motif_ids = compute_motif_inverse_indices(nodes_to_motifs, data.batch)
+            dim_m = int(inverse_indices.max().item()) + 1
+            alpha_intra, r_m = self.intra_motif_pool.forward_alpha_and_weighted(hL, inverse_indices)
+            zatt_norm = F.layer_norm(r_m, (r_m.shape[-1],))
+            if self.factored_motif_zk_zatt_only:
+                z_k = zatt_norm
+                z1 = None
+            else:
+                h1 = self.clf.get_emb(
+                    data.x, data.edge_index, batch=data.batch, edge_attr=data.edge_attr, emb_stop=0,
+                )
+                z1 = scatter(h1, inverse_indices, dim=0, dim_size=dim_m, reduce='mean')
+                z1_norm = F.layer_norm(z1, (z1.shape[-1],))
+                z_k = torch.cat([z1_norm, zatt_norm], dim=-1)
+            ones_m = torch.ones(data.x.size(0), device=data.x.device, dtype=data.x.dtype)
+            counts = scatter(ones_m, inverse_indices, dim=0, dim_size=dim_m, reduce='sum')
         z_k = F.dropout(z_k, p=self.factored_motif_zk_dropout_p, training=self.training)
         motif_att_log_logits = self.motif_scoring_mlp(z_k)
         ell_k = torch.clamp(motif_att_log_logits.squeeze(-1), -FACTORED_MOTIF_LOGIT_CLAMP, FACTORED_MOTIF_LOGIT_CLAMP)
         motif_att_log_logits = ell_k.unsqueeze(-1)
-        ones_m = torch.ones(data.x.size(0), device=data.x.device, dtype=data.x.dtype)
-        counts = scatter(ones_m, inverse_indices, dim=0, dim_size=dim_m, reduce='sum')
         alpha_k = torch.sigmoid(ell_k)
         motif_att_soft = alpha_k.unsqueeze(-1)
         a_safe = alpha_intra.clamp(min=1e-8, max=1.0 - 1e-8)
@@ -4746,8 +4777,11 @@ def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_nam
     if method_config.get('factored_motif_regularized', False):
         if method_config.get('factored_motif_attention', False):
             raise ValueError('factored_motif_regularized and factored_motif_attention are mutually exclusive')
-        motif_pool = 'intra_att'
-        extractor_input_dim = hidden_size
+        motif_pool = method_config.get('motif_pooling_method', 'intra_att')
+        if motif_pool == 'max_mean':
+            extractor_input_dim = hidden_size * 2
+        else:
+            extractor_input_dim = hidden_size
     elif method_config.get('factored_motif_attention', False):
         zk_axis = str(method_config.get('factored_motif_zk_axis', 'M4')).upper()
         if zk_axis == 'M1':
@@ -4773,14 +4807,19 @@ def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_nam
     intra_motif_pool = None
     if method_config.get('factored_motif_regularized', False):
         z_dp = float(method_config.get('factored_motif_zk_dropout_p', 0.3))
-        if method_config.get('factored_motif_zk_zatt_only', False):
+        fp = method_config.get('motif_pooling_method', 'intra_att')
+        if fp == 'max_mean':
+            zk_only = method_config.get('factored_motif_zk_zatt_only', False)
+            in_dim = (2 * int(hidden_size)) if zk_only else (3 * int(hidden_size))
+        elif method_config.get('factored_motif_zk_zatt_only', False):
             in_dim = int(hidden_size)
         else:
             in_dim = 2 * int(hidden_size)
         motif_scoring_mlp = RegularizedMotifScoringMLP(in_dim, hidden_size, dropout_p=z_dp).to(device)
         nn.init.xavier_uniform_(motif_scoring_mlp.final_layer.weight, gain=0.01)
         nn.init.zeros_(motif_scoring_mlp.final_layer.bias)
-        intra_motif_pool = IntraMotifAttentionLinear(hidden_size).to(device)
+        if fp == 'intra_att':
+            intra_motif_pool = IntraMotifAttentionLinear(hidden_size).to(device)
     elif motif_pool == 'intra_att':
         intra_motif_pool = IntraMotifAttentionPool(hidden_size).to(device)
 

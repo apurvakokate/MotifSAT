@@ -345,6 +345,11 @@ EXPERIMENT_ROW_CONFIG = {
         'row_label_prefix': 'variant',
         'path_extract': 'simplified_motif_readout',
     },
+    'simplified_motif_readout_maxmean': {
+        'summary_path': None,
+        'row_label_prefix': 'variant',
+        'path_extract': 'simplified_motif_readout_maxmean',
+    },
 }
 
 
@@ -531,8 +536,14 @@ def _extract_value_from_parts(parts, mode):
 
     elif mode == 'simplified_motif_readout':
         for p in parts:
-            if 'simplified_motif_readout' in p:
+            if 'simplified_motif_readout' in p and 'maxmean' not in p:
                 return 'simplified_motif_readout'
+        return None
+
+    elif mode == 'simplified_motif_readout_maxmean':
+        for p in parts:
+            if 'simplified_motif_readout_maxmean' in p:
+                return 'simplified_motif_readout_maxmean'
         return None
 
     return None

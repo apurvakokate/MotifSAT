@@ -68,6 +68,7 @@ DEFAULT_EXPERIMENT_LABELS = {
     'factored_motif_additive': 'Factored motif additive (LN z^(1)||z^att; ℓ_k+δ intra; IB on σ(ℓ_k); r_f sweep)',
     'simplified_factored_motif_additive': 'Simplified factored additive (MLP(LN z^att)); 010; L_pred + motif L_info on σ(ℓ_k) (raw score); info_coef 0.01; motif_ib off; info_warmup 20; final_r=0.8',
     'simplified_motif_readout': 'Simplified motif readout: same as simplified_factored_motif_additive but node ℓ = ℓ_k only (broadcast; no intra-motif δ)',
+    'simplified_motif_readout_maxmean': 'Like simplified_motif_readout; motif emb = max||mean pool (not intra-att) before motif MLP',
 }
 
 
@@ -604,6 +605,7 @@ def main():
             'factored_motif_additive',
             'simplified_factored_motif_additive',
             'simplified_motif_readout',
+            'simplified_motif_readout_maxmean',
         ]
 
     run(

@@ -25,6 +25,7 @@ Active groups (EXPERIMENT_GROUPS):
   factored_motif_additive — LN(z^(1)||z^att), MLP motif ℓ_k, node ℓ=ℓ_k+δ(intra), IB on σ(ℓ_k); sweep motif_ib_final_r ∈ {0.7,0.5,0.3}
   simplified_factored_motif_additive — MLP(LN(z^att)) only; 010; L_pred + motif-level L_info on σ(ℓ_k) (use_raw_score_loss); info_loss_coef≈motif_ib scale; info_warmup 20; final_r=0.8
   simplified_motif_readout — same as simplified_factored_motif_additive but node logit = ℓ_k only (no intra-motif δ); motif score broadcast to all nodes in motif
+  simplified_motif_readout_maxmean — same as simplified_motif_readout but motif embedding = concat(max, mean) over nodes per motif (no intra-attention pool for z_k)
 
 Injection codes map to GSAT flags (w_node ≡ w_feat): 100=w_feat only, 010=w_message only, 001=w_readout only.
 
@@ -912,6 +913,26 @@ EXPERIMENT_GROUPS['simplified_motif_readout'] = {
     ],
 }
 
+_SIMPLIFIED_MOTIF_READOUT_MAXMEAN_GSAT = {
+    **_SIMPLIFIED_MOTIF_READOUT_GSAT,
+    'motif_pooling_method': 'max_mean',
+}
+
+EXPERIMENT_GROUPS['simplified_motif_readout_maxmean'] = {
+    'experiment_name': 'simplified_motif_readout_maxmean',
+    'variants': [
+        {
+            'variant_id': 'simplified_motif_readout_maxmean',
+            'gsat_overrides': {
+                'tuning_id': 'simplified_motif_readout_maxmean',
+                **_DECAY_R_BASE,
+                **_SIMPLIFIED_MOTIF_READOUT_MAXMEAN_GSAT,
+            },
+            'learn_edge_att': False,
+        },
+    ],
+}
+
 EXPERIMENT_GROUPS['factored_motif_attention_grid'] = {
     'experiment_name': 'factored_motif_attention_grid',
     'variants': [
@@ -1032,6 +1053,7 @@ def main():
         'factored_motif_additive',
         'simplified_factored_motif_additive',
         'simplified_motif_readout',
+        'simplified_motif_readout_maxmean',
     }
     if dataset_name not in DATASETS_WITH_MOTIFS:
         skipped = [e for e in args.experiments if e in motif_experiments]
