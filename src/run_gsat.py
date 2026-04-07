@@ -2132,7 +2132,7 @@ class GSAT(nn.Module):
                 f'ib_loss={ib_loss:.4f} pred_loss={pred_loss_item:.4f}'
             )
             try:
-                wandb.log(
+                wandb_log_maybe(
                     {
                         'factored_reg_diag/z1_var': z1_var,
                         'factored_reg_diag/zatt_var': zatt_var,
@@ -2142,6 +2142,7 @@ class GSAT(nn.Module):
                         'factored_reg_diag/pred_loss': pred_loss_item,
                     },
                     step=epoch,
+                    force=True,
                 )
             except Exception:
                 pass
@@ -2870,7 +2871,7 @@ class GSAT(nn.Module):
                         data=motif_table_rows,
                     )
                 # One log per step avoids W&B merging quirks when image + table share the same step.
-                wandb.log(log_payload, step=epoch)
+                wandb_log_maybe(log_payload, step=epoch, force=True)
             except Exception as e:
                 print(f'[WARNING] wandb embedding viz log failed (epoch {epoch}, y={cls}): {e}')
             else:
@@ -3184,14 +3185,18 @@ class GSAT(nn.Module):
                 self.writer.add_scalar(f'gsat_best/{metric}', value, epoch)
             # Log best prediction performance to wandb for verification
             try:
-                wandb.log({
-                    'best/clf_roc_train': metric_dict['metric/best_clf_roc_train'],
-                    'best/clf_roc_valid': metric_dict['metric/best_clf_roc_valid'],
-                    'best/clf_roc_test': metric_dict['metric/best_clf_roc_test'],
-                    'best/clf_acc_test': metric_dict['metric/best_clf_acc_test'],
-                    'best/clf_valid_loss': metric_dict['metric/best_clf_valid_loss'],
-                    'best/epoch': metric_dict['metric/best_clf_epoch'],
-                }, step=epoch)
+                wandb_log_maybe(
+                    {
+                        'best/clf_roc_train': metric_dict['metric/best_clf_roc_train'],
+                        'best/clf_roc_valid': metric_dict['metric/best_clf_roc_valid'],
+                        'best/clf_roc_test': metric_dict['metric/best_clf_roc_test'],
+                        'best/clf_acc_test': metric_dict['metric/best_clf_acc_test'],
+                        'best/clf_valid_loss': metric_dict['metric/best_clf_valid_loss'],
+                        'best/epoch': metric_dict['metric/best_clf_epoch'],
+                    },
+                    step=epoch,
+                    force=(epoch == self.epochs - 1),
+                )
             except Exception:
                 pass
 
@@ -3208,7 +3213,7 @@ class GSAT(nn.Module):
                         self.motif_gate_mult_scale.detach().cpu().item()
                     )
                 if _wl:
-                    wandb.log(_wl, step=epoch)
+                    wandb_log_maybe(_wl, step=epoch, force=(epoch == self.epochs - 1))
             except Exception:
                 pass
 
@@ -3242,7 +3247,7 @@ class GSAT(nn.Module):
                             motif_incorporation_method=self.motif_method,
                         )
                         if explainer_metrics:
-                            wandb.log(explainer_metrics, step=epoch)
+                            wandb_log_maybe(explainer_metrics, step=epoch, force=True)
                             # Persist explainer metrics so they can be collected later without retraining
                             metric_dict.update(explainer_metrics)
                             print(f"[INFO] Fidelity-: {explainer_metrics['explainer/fidelity_minus']:.4f}, "
@@ -3264,7 +3269,7 @@ class GSAT(nn.Module):
                         loaders['valid'], epoch, use_edge_attr,
                     )
                     if mrm:
-                        wandb.log(mrm, step=epoch)
+                        wandb_log_maybe(mrm, step=epoch, force=True)
                         metric_dict.update({k: v for k, v in mrm.items() if isinstance(v, (int, float))})
                         if 'motif_readout/pearson_sigma_m_impact' in mrm:
                             print(
@@ -3683,7 +3688,11 @@ class GSAT(nn.Module):
                         if h is not None:
                             wandb_metrics[key] = h
                 
-                wandb.log(wandb_metrics, step=epoch)
+                wandb_log_maybe(
+                    wandb_metrics,
+                    step=epoch,
+                    force=(epoch == self.epochs - 1),
+                )
             except Exception:
                 pass  # Silently fail if wandb is not initialized
         
@@ -4118,38 +4127,105 @@ def _wandb_truthy_env(name):
     return os.environ.get(name, '').strip().lower() in ('1', 'true', 'yes', 'on')
 
 
+def _wandb_lite_active():
+    return _wandb_truthy_env('MOTIFSAT_WANDB_LITE') or _wandb_truthy_env('WANDB_LITE')
+
+
+def _apply_wandb_env_defaults_for_lite():
+    """
+    When lite mode is on, set low-write W&B env defaults only if not already set.
+    (Matches HPC minimal setup: silent console, no code/git/system hooks.)
+    """
+    if not _wandb_lite_active():
+        return
+    defaults = {
+        'WANDB_SILENT': 'true',
+        'WANDB_CONSOLE': 'off',
+        'WANDB_DISABLE_CODE': 'true',
+        'WANDB_DISABLE_GIT': 'true',
+        'WANDB_START_METHOD': 'thread',
+        'WANDB_DISABLE_SYSTEM': 'true',
+    }
+    for k, v in defaults.items():
+        if not os.environ.get(k, '').strip():
+            os.environ[k] = v
+
+
+def _wandb_log_interval():
+    """Steps between wandb.log when throttling (see wandb_log_maybe)."""
+    raw = os.environ.get('MOTIFSAT_WANDB_LOG_EVERY', '').strip()
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+    if _wandb_lite_active():
+        return 50
+    return 1
+
+
+def wandb_log_maybe(data, step=None, force=False):
+    """
+    Log to W&B, optionally throttled by step. When MOTIFSAT_WANDB_LITE is set, default interval is 50
+    unless MOTIFSAT_WANDB_LOG_EVERY overrides. Use force=True for sparse logs (explainer every 10 ep, etc.)
+    or call with force=True on the last epoch so runs still get a final point.
+    """
+    try:
+        if wandb.run is None:
+            return
+    except Exception:
+        return
+    try:
+        if not force and step is not None:
+            n = _wandb_log_interval()
+            if n > 1 and int(step) % n != 0:
+                return
+        wandb.log(data, step=step)
+    except Exception:
+        pass
+
+
 def _wandb_init_extras():
     """
     Extra kwargs for ``wandb.init`` to limit local run-directory growth (NFS / home quota).
 
     Environment (set before training starts):
 
-    - **MOTIFSAT_WANDB_LITE=1** or **WANDB_LITE=1** — disable code snapshot by default, turn off
-      system stats collection, and set console capture to ``off`` (smaller ``run-*.wandb`` / logs).
+    - **MOTIFSAT_WANDB_LITE=1** or **WANDB_LITE=1** — apply minimal env defaults (silent, no code/git/system),
+      ``save_code=False`` unless **WANDB_SAVE_CODE=1**, and ``Settings(_disable_stats=True, _disable_meta=True)``.
     - **WANDB_SAVE_CODE=1** — force ``save_code=True`` even when lite (debugging).
+    - **MOTIFSAT_WANDB_LOG_EVERY** — throttle ``wandb_log_maybe`` (default **50** when lite, **1** otherwise).
     - **WANDB_DIR** — put the whole ``wandb/`` tree on scratch or another large filesystem.
     - **WANDB_CACHE_DIR** — cache away from a full home volume (supported by recent wandb clients).
     - **WANDB_MODE=disabled** — no W&B I/O (``wandb.log`` becomes a no-op after init).
     """
     global _WANDB_LITE_HINT_PRINTED
-    lite = _wandb_truthy_env('MOTIFSAT_WANDB_LITE') or _wandb_truthy_env('WANDB_LITE')
-    force_save_code = _wandb_truthy_env('WANDB_SAVE_CODE')
-    extras = {}
+    lite = _wandb_lite_active()
     if not lite:
-        return extras
-    extras['save_code'] = bool(force_save_code)
+        return {}
+    _apply_wandb_env_defaults_for_lite()
+    force_save_code = _wandb_truthy_env('WANDB_SAVE_CODE')
+    extras = {'save_code': bool(force_save_code)}
     try:
-        extras['settings'] = wandb.Settings(console='off', _disable_stats=True)
+        extras['settings'] = wandb.Settings(
+            console='off',
+            _disable_stats=True,
+            _disable_meta=True,
+        )
     except (TypeError, ValueError):
         try:
-            extras['settings'] = wandb.Settings(console='off')
-        except Exception:
-            pass
+            extras['settings'] = wandb.Settings(console='off', _disable_stats=True)
+        except (TypeError, ValueError):
+            try:
+                extras['settings'] = wandb.Settings(console='off')
+            except Exception:
+                pass
     if not _WANDB_LITE_HINT_PRINTED:
         print(
-            '[INFO] W&B lite (MOTIFSAT_WANDB_LITE): minimal code snapshot & system/console capture. '
-            'For tight quota also set WANDB_DIR (and WANDB_CACHE_DIR) to scratch; '
-            'WANDB_MODE=disabled disables W&B entirely.'
+            '[INFO] W&B lite (MOTIFSAT_WANDB_LITE): env defaults + _disable_stats/_disable_meta; '
+            f'wandb.log throttled every {_wandb_log_interval()} steps unless force=True. '
+            'Set MOTIFSAT_WANDB_LOG_EVERY=1 to log every step. '
+            'For quota also set WANDB_DIR to scratch; WANDB_MODE=disabled turns W&B off.'
         )
         _WANDB_LITE_HINT_PRINTED = True
     return extras
@@ -4634,9 +4710,13 @@ def train_vanilla_gnn_one_seed(local_config, data_dir, log_dir, model_name, data
         scheduler.step(val_roc)
 
         try:
-            wandb.log({'train/loss': train_loss, 'train/roc': train_roc, 'train/acc': train_acc,
-                       'valid/loss': val_loss, 'valid/roc': val_roc, 'valid/acc': val_acc,
-                       'test/loss': test_loss, 'test/roc': test_roc, 'test/acc': test_acc}, step=epoch)
+            wandb_log_maybe(
+                {'train/loss': train_loss, 'train/roc': train_roc, 'train/acc': train_acc,
+                 'valid/loss': val_loss, 'valid/roc': val_roc, 'valid/acc': val_acc,
+                 'test/loss': test_loss, 'test/roc': test_roc, 'test/acc': test_acc},
+                step=epoch,
+                force=(epoch == epochs - 1),
+            )
         except Exception:
             pass
 
@@ -5121,10 +5201,15 @@ def main():
     parser.add_argument('--wandb_lite', action='store_true', default=False,
                         help='Set MOTIFSAT_WANDB_LITE=1: smaller local W&B run dir (no code snapshot by default, '
                              'fewer stats/console files). Use with WANDB_DIR on scratch if quota is tight.')
+    parser.add_argument('--wandb_log_every', type=int, default=None,
+                        help='Set MOTIFSAT_WANDB_LOG_EVERY (default 50 with --wandb_lite, else 1). '
+                             'Throttles wandb_log_maybe unless step is a multiple of N or force (e.g. last epoch).')
     args = parser.parse_args()
 
     if args.wandb_lite:
         os.environ['MOTIFSAT_WANDB_LITE'] = '1'
+    if args.wandb_log_every is not None:
+        os.environ['MOTIFSAT_WANDB_LOG_EVERY'] = str(max(1, int(args.wandb_log_every)))
     
     dataset_name = args.dataset
     model_name = args.backbone

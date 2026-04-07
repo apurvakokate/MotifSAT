@@ -1097,11 +1097,15 @@ def main():
                         help='Log W&B PCA embedding panels + motif tables every N valid epochs (0=off). '
                              'Binary non-multilabel GSAT only. Default: 10.')
     parser.add_argument('--wandb_lite', action='store_true', default=False,
-                        help='Set MOTIFSAT_WANDB_LITE=1: smaller local W&B run directory (see run_gsat._wandb_init_extras).')
+                        help='Set MOTIFSAT_WANDB_LITE=1: smaller local W&B run directory (see run_gsat wandb helpers).')
+    parser.add_argument('--wandb_log_every', type=int, default=None,
+                        help='Set MOTIFSAT_WANDB_LOG_EVERY (throttle wandb.log; default 50 with --wandb_lite).')
     args = parser.parse_args()
 
     if args.wandb_lite:
         os.environ['MOTIFSAT_WANDB_LITE'] = '1'
+    if args.wandb_log_every is not None:
+        os.environ['MOTIFSAT_WANDB_LOG_EVERY'] = str(max(1, int(args.wandb_log_every)))
 
     dataset_name = args.dataset
 
