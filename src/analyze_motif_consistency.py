@@ -996,6 +996,55 @@ def _get_final_r(seed_dir):
     return None
 
 
+def get_motif_level_score_impact_points(seed_dir, split='test'):
+    """
+    Motif-level scatter data: x = mean node attention score per (graph, motif instance),
+    y = |Δ sigmoid(pred)| from motif-level masking. Same pairing as the motif branch of
+    plot_score_vs_impact and consistent with compute_posthoc_correlation's per-motif story.
+
+    Returns:
+        (xs, ys) as 1d float arrays, or (None, None) if files missing or no overlap.
+    """
+    from collections import defaultdict
+
+    seed_dir = Path(seed_dir)
+    node_scores_path = seed_dir / 'node_scores.jsonl'
+    motif_impact_path = seed_dir / 'Motif_level_node_and_edge_masking_impact.jsonl'
+    if not motif_impact_path.exists():
+        motif_impact_path = seed_dir / 'masked-edge-impact.jsonl'
+    if not node_scores_path.exists() or not motif_impact_path.exists():
+        return None, None
+
+    node_recs = _read_jsonl(node_scores_path, split)
+    impact_recs = _read_jsonl(motif_impact_path, split)
+
+    motif_scores = defaultdict(list)
+    for rec in node_recs:
+        midx = rec.get('motif_index', rec.get('motif_idx', -1))
+        if midx is None or midx < 0:
+            continue
+        motif_scores[(rec['graph_idx'], midx)].append(float(rec['score']))
+
+    if not motif_scores:
+        return None, None
+
+    motif_avg_score = {k: float(np.mean(v)) for k, v in motif_scores.items()}
+    motif_impacts = {}
+    for rec in impact_recs:
+        midx = rec.get('motif_idx', rec.get('motif_index', -1))
+        if midx is None or midx < 0:
+            continue
+        imp = abs(_sigmoid(rec['new_prediction']) - _sigmoid(rec['old_prediction']))
+        motif_impacts[(rec['graph_idx'], midx)] = imp
+
+    common_keys = set(motif_avg_score.keys()) & set(motif_impacts.keys())
+    if not common_keys:
+        return None, None
+    xs = np.array([motif_avg_score[k] for k in common_keys], dtype=float)
+    ys = np.array([motif_impacts[k] for k in common_keys], dtype=float)
+    return xs, ys
+
+
 def plot_score_vs_impact(seed_dir, split='test', output_dir=None, model_name=None,
                          dataset_name=None):
     """
@@ -1033,35 +1082,8 @@ def plot_score_vs_impact(seed_dir, split='test', output_dir=None, model_name=Non
 
     has_motif = node_scores_path.exists() and motif_impact_path.exists()
     if has_motif:
-        node_recs = _read_jsonl(node_scores_path, split)
-        impact_recs = _read_jsonl(motif_impact_path, split)
-
-        # Aggregate node scores per (graph_idx, motif_index) → mean score
-        from collections import defaultdict
-        motif_scores = defaultdict(list)
-        for rec in node_recs:
-            midx = rec.get('motif_index', -1)
-            if midx < 0:
-                continue
-            motif_scores[(rec['graph_idx'], midx)].append(rec['score'])
-
-        motif_avg_score = {k: float(np.mean(v)) for k, v in motif_scores.items()}
-
-        # Build impact lookup
-        motif_impacts = {}
-        for rec in impact_recs:
-            midx = rec.get('motif_idx', rec.get('motif_index', -1))
-            if midx < 0:
-                continue
-            imp = abs(_sigmoid(rec['new_prediction']) - _sigmoid(rec['old_prediction']))
-            motif_impacts[(rec['graph_idx'], midx)] = imp
-
-        # Match
-        common_keys = set(motif_avg_score.keys()) & set(motif_impacts.keys())
-        if common_keys:
-            xs = np.array([motif_avg_score[k] for k in common_keys])
-            ys = np.array([motif_impacts[k] for k in common_keys])
-
+        xs, ys = get_motif_level_score_impact_points(seed_dir, split)
+        if xs is not None and ys is not None and len(xs):
             fig, ax = plt.subplots(figsize=(9, 6))
             ax.scatter(xs, ys, alpha=0.3, s=8, c='#2196F3', edgecolors='none')
             if final_r is not None:
@@ -1077,7 +1099,7 @@ def plot_score_vs_impact(seed_dir, split='test', output_dir=None, model_name=Non
             plt.close(fig)
 
             corr, pval = sp_stats.pearsonr(xs, ys) if len(xs) > 2 else (np.nan, np.nan)
-            print(f"[INFO] Motif-level: {len(common_keys)} points, Pearson r={corr:.4f}, p={pval:.2e}")
+            print(f"[INFO] Motif-level: {len(xs)} points, Pearson r={corr:.4f}, p={pval:.2e}")
         else:
             print("[WARNING] No matching motif entries between node_scores and impact")
     else:

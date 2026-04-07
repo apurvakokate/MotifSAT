@@ -7,6 +7,11 @@ emb_stop=encoder (motif_readout_pred_info_only). ROC and explainer
 cells are the same numbers as collect_mutagenicity_tables for that row (build_table / build_posthoc_table).
 
 Plots use the anchor run's seed_dir. Optional SET_R filters runs before building pivots.
+
+Also writes ``motif_level_score_vs_impact_grid_{train,validation,test}.png`` under
+``{best_results_dir}/{dataset}/``: a grid of motif-level score vs masking-impact scatters (like
+``plot_score_vs_impact``), rows = experiments, columns = architectures, using each anchor ``seed_dir``;
+each panel annotates Pearson r, n, and the selected hyperparam row (``best_row``).
 """
 
 from __future__ import annotations
@@ -16,9 +21,16 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
+import matplotlib
+
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib import gridspec
+from scipy.stats import linregress, pearsonr
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -32,10 +44,19 @@ from collect_mutagenicity_tables import (
     find_results,
     format_mean_std_count,
 )
-from analyze_motif_consistency import plot_score_vs_impact
+from analyze_motif_consistency import get_motif_level_score_impact_points, plot_score_vs_impact
 
 
 MODEL_ORDER = ['GAT', 'GCN', 'GIN', 'PNA', 'SAGE']
+
+# Column accent (points + regression line) — distinct, print-friendly
+_MODEL_SCATTER_COLORS = {
+    'GAT': '#b71c1c',
+    'GCN': '#0d47a1',
+    'GIN': '#1b5e20',
+    'PNA': '#4a148c',
+    'SAGE': '#e65100',
+}
 
 DEFAULT_EXPERIMENT_LABELS = {
     'vanilla_gnn': 'Vanilla',
@@ -324,6 +345,200 @@ def _unpack_mean_std_count(t):
     return t[0], t[1], t[2]
 
 
+def _truncate_label(s: str, max_len: int = 56) -> str:
+    s = (s or '').strip()
+    if len(s) <= max_len:
+        return s
+    return s[: max_len - 1] + '…'
+
+
+def _plot_one_motif_scatter_panel(
+    ax,
+    xs: np.ndarray | None,
+    ys: np.ndarray | None,
+    model: str,
+    best_row: str,
+) -> None:
+    """Draw motif-level score vs impact on ax; annotate r, n, best hyperparam row."""
+    color = _MODEL_SCATTER_COLORS.get(model, '#37474f')
+    ax.set_facecolor('#fcfcfd')
+    if xs is None or ys is None or len(xs) < 1:
+        ax.text(
+            0.5,
+            0.55,
+            'No data',
+            ha='center',
+            va='center',
+            transform=ax.transAxes,
+            fontsize=9,
+            color='#9e9e9e',
+        )
+        br = _truncate_label(best_row) if best_row else '—'
+        ax.text(
+            0.5,
+            0.28,
+            f'Best row:\n{br}',
+            ha='center',
+            va='center',
+            transform=ax.transAxes,
+            fontsize=6.5,
+            color='#616161',
+            linespacing=1.2,
+        )
+        ax.set_xticks([])
+        ax.set_yticks([])
+        for spine in ax.spines.values():
+            spine.set_color('#e0e0e0')
+        return
+
+    ax.scatter(
+        xs,
+        ys,
+        s=14,
+        alpha=0.28,
+        c=color,
+        edgecolors='none',
+        rasterized=True,
+    )
+    r_val = np.nan
+    p_val = np.nan
+    if len(xs) >= 2:
+        r_val, p_val = pearsonr(xs, ys)
+    xmin, xmax = float(np.min(xs)), float(np.max(xs))
+    ymin, ymax = float(np.min(ys)), float(np.max(ys))
+    xpad = 0.04 if xmax - xmin > 1e-9 else 0.06
+    if xmax - xmin > 1e-9:
+        dx = xmax - xmin
+        ax.set_xlim(max(-0.02, xmin - dx * xpad), min(1.08, xmax + dx * xpad))
+    else:
+        ax.set_xlim(xmin - 0.06, xmax + 0.06)
+    if ymax - ymin > 1e-12:
+        dy = ymax - ymin
+        ax.set_ylim(max(-0.02, ymin - dy * 0.08), ymax + dy * 0.12)
+    else:
+        ax.set_ylim(-0.02, ymax + 0.05 if ymax > 0 else 0.08)
+
+    if len(xs) >= 2 and np.std(xs) > 1e-12:
+        lr = linregress(xs, ys)
+        if np.isfinite(lr.slope) and np.isfinite(lr.intercept):
+            x_line = np.linspace(xmin, xmax, 48)
+            y_line = lr.slope * x_line + lr.intercept
+            lw = 2.0 if len(xs) >= 3 else 1.65
+            ls = '-' if len(xs) >= 3 else '--'
+            ax.plot(x_line, y_line, color=color, linewidth=lw, alpha=0.92, linestyle=ls, zorder=3)
+
+    r_txt = f'{r_val:.3f}' if np.isfinite(r_val) else '—'
+    p_txt = f'{p_val:.1e}' if np.isfinite(p_val) else '—'
+    br = _truncate_label(best_row, 44) if best_row else '—'
+    stats = f'r = {r_txt}\np = {p_txt}\nn = {len(xs)}'
+    ax.text(
+        0.03,
+        0.97,
+        stats,
+        transform=ax.transAxes,
+        fontsize=7,
+        verticalalignment='top',
+        bbox=dict(boxstyle='round,pad=0.35', facecolor='white', edgecolor='#cfd8dc', alpha=0.94),
+        family='monospace',
+        zorder=5,
+    )
+    ax.text(
+        0.03,
+        0.02,
+        f'Best row:\n{br}',
+        transform=ax.transAxes,
+        fontsize=6,
+        verticalalignment='bottom',
+        color='#424242',
+        linespacing=1.15,
+        zorder=5,
+    )
+    ax.set_xlabel('Mean motif score', fontsize=7, color='#424242')
+    ax.set_ylabel('|Δ sigmoid(pred)|', fontsize=7, color='#424242')
+    ax.tick_params(axis='both', labelsize=6)
+    ax.grid(True, alpha=0.35, linewidth=0.6)
+    for spine in ax.spines.values():
+        spine.set_color('#bdbdbd')
+
+
+def _plot_motif_score_impact_grids(
+    anchor_rows: list[tuple[str, dict[str, dict[str, Any]]]],
+    dataset: str,
+    out_dir: Path,
+) -> None:
+    """
+    One PNG per split: grid rows = experiments, cols = architectures.
+    Each cell: motif-level scatter for the anchor seed_dir + best hyperparam row label.
+    """
+    if not anchor_rows:
+        return
+    n_exp = len(anchor_rows)
+    n_models = len(MODEL_ORDER)
+    split_map = (
+        ('train', 'train'),
+        ('valid', 'validation'),
+        ('test', 'test'),
+    )
+    w_in = 2.55 * n_models + 1.35
+    h_in = max(4.2, 2.05 * n_exp + 1.1)
+    out_dir = out_dir.resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    for split_key, split_title in split_map:
+        fig = plt.figure(figsize=(w_in, h_in), facecolor='#eceff1')
+        gs = gridspec.GridSpec(
+            n_exp,
+            n_models + 1,
+            figure=fig,
+            width_ratios=[0.34] + [1.0] * n_models,
+            wspace=0.28,
+            hspace=0.42,
+            left=0.04,
+            right=0.99,
+            top=0.94,
+            bottom=0.05,
+        )
+        fig.suptitle(
+            f'{dataset} — motif-level score vs masking impact ({split_title})\n'
+            f'anchor run per cell; line = OLS fit',
+            fontsize=11,
+            fontweight='600',
+            color='#263238',
+            y=0.98,
+        )
+
+        for i, (exp_label, model_info) in enumerate(anchor_rows):
+            ax_lab = fig.add_subplot(gs[i, 0])
+            ax_lab.axis('off')
+            ax_lab.text(
+                0.98,
+                0.5,
+                _truncate_label(exp_label, 48),
+                ha='right',
+                va='center',
+                fontsize=8,
+                color='#37474f',
+                transform=ax_lab.transAxes,
+            )
+
+            for j, model in enumerate(MODEL_ORDER):
+                ax = fig.add_subplot(gs[i, j + 1])
+                info = model_info.get(model) or {}
+                sd = info.get('seed_dir')
+                best_row = str(info.get('best_row', '') or '')
+                xs, ys = None, None
+                if sd is not None:
+                    xs, ys = get_motif_level_score_impact_points(Path(sd), split=split_key)
+                ax.set_title(model, fontsize=9, fontweight='600', color=_MODEL_SCATTER_COLORS.get(model, '#333'))
+                _plot_one_motif_scatter_panel(ax, xs, ys, model, best_row)
+
+        fname = f'motif_level_score_vs_impact_grid_{split_title}.png'
+        out_path = out_dir / fname
+        fig.savefig(out_path, dpi=160, bbox_inches='tight', facecolor=fig.get_facecolor())
+        plt.close(fig)
+        print(f'[INFO] Wrote {out_path}')
+
+
 def run(
     results_dir: Path,
     dataset: str,
@@ -390,6 +605,7 @@ def run(
     exp_valid_rows = []
     exp_test_rows = []
     hyperparam_rows = []
+    motif_anchor_rows: list[tuple[str, dict[str, dict[str, Any]]]] = []
 
     for exp_key in experiments:
         label = experiment_label(exp_key)
@@ -421,6 +637,10 @@ def run(
         ex_tr = {'Dataset': dataset, 'Experiment': label, 'Hyperparam_scan': 'yes' if has_scan else ''}
         ex_va = {'Dataset': dataset, 'Experiment': label, 'Hyperparam_scan': 'yes' if has_scan else ''}
         ex_te = {'Dataset': dataset, 'Experiment': label, 'Hyperparam_scan': 'yes' if has_scan else ''}
+
+        exp_motif_anchors: dict[str, dict[str, Any]] = {
+            m: {'seed_dir': None, 'best_row': ''} for m in MODEL_ORDER
+        }
 
         pred_tr_m, pred_tr_s, pred_tr_c = _unpack_mean_std_count(
             build_table(records, 'metric/best_clf_roc_train', verbose=verbose)
@@ -460,6 +680,7 @@ def run(
                 continue
 
             chosen_row = br.get('row', '')
+            exp_motif_anchors[model] = {'seed_dir': br['seed_dir'], 'best_row': chosen_row}
             perf_tr[model] = _cell_from_pivots(pred_tr_m, pred_tr_s, pred_tr_c, chosen_row, model)
             perf_va[model] = _cell_from_pivots(pred_va_m, pred_va_s, pred_va_c, chosen_row, model)
             perf_te[model] = _cell_from_pivots(pred_te_m, pred_te_s, pred_te_c, chosen_row, model)
@@ -496,6 +717,8 @@ def run(
                 out_sub = dst_m / f'{spl}_plots' / spl
                 _render_score_impact_plots_for_split(sd, dataset, model, spl, out_sub, verbose)
 
+        motif_anchor_rows.append((label, exp_motif_anchors))
+
         perf_train_rows.append(perf_tr)
         perf_valid_rows.append(perf_va)
         perf_test_rows.append(perf_te)
@@ -530,6 +753,13 @@ def run(
     _save_expl(exp_train_rows, train_dir / 'explainer_score_impact_correlation.csv')
     _save_expl(exp_valid_rows, valid_dir / 'explainer_score_impact_correlation.csv')
     _save_expl(exp_test_rows, test_dir / 'explainer_score_impact_correlation.csv')
+
+    if motif_anchor_rows:
+        _plot_motif_score_impact_grids(
+            motif_anchor_rows,
+            dataset,
+            best_results_dir / dataset,
+        )
 
     if hyperparam_rows:
         hdf = pd.DataFrame(hyperparam_rows)
