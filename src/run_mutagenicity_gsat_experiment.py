@@ -1096,8 +1096,13 @@ def main():
     parser.add_argument('--embedding_viz_every', type=int, default=10,
                         help='Log W&B PCA embedding panels + motif tables every N valid epochs (0=off). '
                              'Binary non-multilabel GSAT only. Default: 10.')
+    parser.add_argument('--wandb_lite', action='store_true', default=False,
+                        help='Set MOTIFSAT_WANDB_LITE=1: smaller local W&B run directory (see run_gsat._wandb_init_extras).')
     args = parser.parse_args()
-    
+
+    if args.wandb_lite:
+        os.environ['MOTIFSAT_WANDB_LITE'] = '1'
+
     dataset_name = args.dataset
 
     # Default folds: [0,1] for MolDatasets with folds, [0] for OGB (no fold splitting)

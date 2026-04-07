@@ -3218,26 +3218,43 @@ class GSAT(nn.Module):
                 print(f'[INFO] Early stopping at epoch {epoch} (no valid improvement for {self.early_stopping_patience} epochs). Best epoch: {metric_dict["metric/best_clf_epoch"]}')
                 break
 
-            # Calculate explainer performance every 10 epochs (resource intensive)
+            # Calculate explainer performance every 10 epochs (resource intensive).
+            # Not applicable to motif readout: extractor runs on motif-pooled features, not node get_emb.
             if epoch % 10 == 0 and epoch > 0:
                 try:
-                    print(f"[INFO] Calculating explainer performance at epoch {epoch}")
-                    explainer_metrics = calculate_explainer_performance(
-                        self.clf, self.extractor, loaders['valid'], self.device, epoch, self.learn_edge_att
-                    )
-                    wandb.log(explainer_metrics, step=epoch)
-                    # Persist explainer metrics so they can be collected later without retraining
-                    metric_dict.update(explainer_metrics)
-                    print(f"[INFO] Fidelity-: {explainer_metrics['explainer/fidelity_minus']:.4f}, "
-                          f"Fidelity+: {explainer_metrics['explainer/fidelity_plus']:.4f}, "
-                          f"Sparsity: {explainer_metrics['explainer/sparsity']:.4f}")
-                    print(f"[INFO] Edge Att - Mean: {explainer_metrics['edge_att/mean']:.4f}, "
-                          f"Std: {explainer_metrics['edge_att/std']:.4f}, "
-                          f"Low(<0.3): {explainer_metrics['edge_att/pct_below_0.3']:.2%}, "
-                          f"High(>0.7): {explainer_metrics['edge_att/pct_above_0.7']:.2%}")
-                    if 'motif/att_impact_correlation' in explainer_metrics:
-                        print(f"[INFO] Motif Att-Impact Correlation: {explainer_metrics['motif/att_impact_correlation']:.4f} "
-                              f"(n={explainer_metrics.get('motif/att_impact_n_samples', 0)})")
+                    if self.motif_method == 'readout':
+                        if not getattr(self, '_explainer_readout_skip_logged', False):
+                            print(
+                                '[INFO] Skipping node-level explainer fidelity for motif readout '
+                                '(ExtractorMLP input is motif-pooled, e.g. max_mean → 2H; not node get_emb → H). '
+                                'Use motif readout correlation metrics below.'
+                            )
+                            self._explainer_readout_skip_logged = True
+                    else:
+                        print(f"[INFO] Calculating explainer performance at epoch {epoch}")
+                        explainer_metrics = calculate_explainer_performance(
+                            self.clf,
+                            self.extractor,
+                            loaders['valid'],
+                            self.device,
+                            epoch,
+                            self.learn_edge_att,
+                            motif_incorporation_method=self.motif_method,
+                        )
+                        if explainer_metrics:
+                            wandb.log(explainer_metrics, step=epoch)
+                            # Persist explainer metrics so they can be collected later without retraining
+                            metric_dict.update(explainer_metrics)
+                            print(f"[INFO] Fidelity-: {explainer_metrics['explainer/fidelity_minus']:.4f}, "
+                                  f"Fidelity+: {explainer_metrics['explainer/fidelity_plus']:.4f}, "
+                                  f"Sparsity: {explainer_metrics['explainer/sparsity']:.4f}")
+                            print(f"[INFO] Edge Att - Mean: {explainer_metrics['edge_att/mean']:.4f}, "
+                                  f"Std: {explainer_metrics['edge_att/std']:.4f}, "
+                                  f"Low(<0.3): {explainer_metrics['edge_att/pct_below_0.3']:.2%}, "
+                                  f"High(>0.7): {explainer_metrics['edge_att/pct_above_0.7']:.2%}")
+                            if 'motif/att_impact_correlation' in explainer_metrics:
+                                print(f"[INFO] Motif Att-Impact Correlation: {explainer_metrics['motif/att_impact_correlation']:.4f} "
+                                      f"(n={explainer_metrics.get('motif/att_impact_n_samples', 0)})")
                 except Exception as e:
                     print(f"[WARNING] Failed to calculate explainer performance: {e}")
 
@@ -4094,6 +4111,50 @@ def write_seed_dir_run_configs(seed_dir, local_config, dataset_name, model_name,
             pass
 
 
+_WANDB_LITE_HINT_PRINTED = False
+
+
+def _wandb_truthy_env(name):
+    return os.environ.get(name, '').strip().lower() in ('1', 'true', 'yes', 'on')
+
+
+def _wandb_init_extras():
+    """
+    Extra kwargs for ``wandb.init`` to limit local run-directory growth (NFS / home quota).
+
+    Environment (set before training starts):
+
+    - **MOTIFSAT_WANDB_LITE=1** or **WANDB_LITE=1** — disable code snapshot by default, turn off
+      system stats collection, and set console capture to ``off`` (smaller ``run-*.wandb`` / logs).
+    - **WANDB_SAVE_CODE=1** — force ``save_code=True`` even when lite (debugging).
+    - **WANDB_DIR** — put the whole ``wandb/`` tree on scratch or another large filesystem.
+    - **WANDB_CACHE_DIR** — cache away from a full home volume (supported by recent wandb clients).
+    - **WANDB_MODE=disabled** — no W&B I/O (``wandb.log`` becomes a no-op after init).
+    """
+    global _WANDB_LITE_HINT_PRINTED
+    lite = _wandb_truthy_env('MOTIFSAT_WANDB_LITE') or _wandb_truthy_env('WANDB_LITE')
+    force_save_code = _wandb_truthy_env('WANDB_SAVE_CODE')
+    extras = {}
+    if not lite:
+        return extras
+    extras['save_code'] = bool(force_save_code)
+    try:
+        extras['settings'] = wandb.Settings(console='off', _disable_stats=True)
+    except (TypeError, ValueError):
+        try:
+            extras['settings'] = wandb.Settings(console='off')
+        except Exception:
+            pass
+    if not _WANDB_LITE_HINT_PRINTED:
+        print(
+            '[INFO] W&B lite (MOTIFSAT_WANDB_LITE): minimal code snapshot & system/console capture. '
+            'For tight quota also set WANDB_DIR (and WANDB_CACHE_DIR) to scratch; '
+            'WANDB_MODE=disabled disables W&B entirely.'
+        )
+        _WANDB_LITE_HINT_PRINTED = True
+    return extras
+
+
 def _wandb_histogram_safe(values, max_samples=100_000, num_bins=64):
     """
     Build wandb.Histogram from 1D float values. Handles large tensors and API quirks
@@ -4121,7 +4182,15 @@ def _wandb_histogram_safe(values, max_samples=100_000, num_bins=64):
         return None
 
 
-def calculate_explainer_performance(model, extractor, data_loader, device, epoch, learn_edge_att=False):
+def calculate_explainer_performance(
+    model,
+    extractor,
+    data_loader,
+    device,
+    epoch,
+    learn_edge_att=False,
+    motif_incorporation_method=None,
+):
     """
     Calculate explainer performance using edge masking approach.
     
@@ -4138,10 +4207,16 @@ def calculate_explainer_performance(model, extractor, data_loader, device, epoch
         device: torch device
         epoch: Current epoch number
         learn_edge_att: Whether extractor outputs edge-level attention
+        motif_incorporation_method: If ``'readout'``, return ``{}`` (extractor sees motif-pooled tensors,
+            not per-node ``get_emb``; use ``compute_motif_readout_correlation_metrics`` instead).
     
     Returns:
-        Dictionary of metrics for wandb logging
+        Dictionary of metrics for wandb logging (empty dict when skipped for motif readout).
     """
+    if motif_incorporation_method == 'readout':
+        # GSAT.train skips calling this for readout; keep guard for direct/API use.
+        return {}
+
     model.eval()
     extractor.eval()
     
@@ -4455,10 +4530,15 @@ def train_vanilla_gnn_one_seed(local_config, data_dir, log_dir, model_name, data
     wandb_name = f"{model_name}-fold{fold}-seed{random_state}-vanilla_clean"
     try:
         wandb_dir = os.environ.get('WANDB_DIR', '../wandb')
-        wandb.init(project=wandb_project, name=wandb_name, dir=wandb_dir,
-                   config={'dataset': dataset_name, 'model': model_name, 'fold': fold,
-                           'seed': random_state, 'experiment': experiment_name, 'method': 'vanilla_clean'},
-                   reinit=True)
+        wandb.init(
+            project=wandb_project,
+            name=wandb_name,
+            dir=wandb_dir,
+            config={'dataset': dataset_name, 'model': model_name, 'fold': fold,
+                    'seed': random_state, 'experiment': experiment_name, 'method': 'vanilla_clean'},
+            reinit=True,
+            **_wandb_init_extras(),
+        )
     except Exception as e:
         print(f"[WARNING] wandb init failed: {e}")
 
@@ -4704,7 +4784,8 @@ def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_nam
             name=wandb_name,
             dir=wandb_dir,  # Store wandb logs (uses env var on HPC)
             config=_wandb_flat,
-            reinit=True
+            reinit=True,
+            **_wandb_init_extras(),
         )
         print(f"[INFO] Initialized wandb: {wandb_project}/{wandb_name}")
     except Exception as e:
@@ -5037,7 +5118,13 @@ def main():
     parser.add_argument('--config', type=str, default=None,
                    help='Path to tuning config file')
     parser.add_argument('--cuda', type=int, help='cuda device id, -1 for cpu')
+    parser.add_argument('--wandb_lite', action='store_true', default=False,
+                        help='Set MOTIFSAT_WANDB_LITE=1: smaller local W&B run dir (no code snapshot by default, '
+                             'fewer stats/console files). Use with WANDB_DIR on scratch if quota is tight.')
     args = parser.parse_args()
+
+    if args.wandb_lite:
+        os.environ['MOTIFSAT_WANDB_LITE'] = '1'
     
     dataset_name = args.dataset
     model_name = args.backbone
