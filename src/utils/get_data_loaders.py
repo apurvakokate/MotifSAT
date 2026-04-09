@@ -196,6 +196,34 @@ def get_data_loaders(
             )
             num_class =2
 
+            if fold is not None and DATASET_TYPE[dataset_name] == 'BinaryClass':
+                assoc_dir = Path(data_dir) / 'motif_association'
+                assoc_stem = f'{dataset_name}_fold{fold}_training'
+                pt_path = assoc_dir / f'{assoc_stem}_motif_pvalues.pt'
+                if pt_path.is_file():
+                    try:
+                        from motif_class_association import AddMotifAssocP
+
+                        try:
+                            pv = torch.load(pt_path, weights_only=True)
+                        except TypeError:
+                            pv = torch.load(pt_path)
+                        add = AddMotifAssocP(pv)
+
+                        def _chain_motif_assoc(old_t, new_t):
+                            if old_t is None:
+                                return new_t
+                            from torch_geometric.transforms import Compose
+
+                            return Compose([new_t, old_t])
+
+                        train_set.transform = _chain_motif_assoc(train_set.transform, add)
+                        valid_set.transform = _chain_motif_assoc(valid_set.transform, add)
+                        test_set.transform = _chain_motif_assoc(test_set.transform, add)
+                        print(f'[INFO] Motif Fisher p-values attached (transform) from {pt_path}')
+                    except Exception as e:
+                        print(f'[WARN] Motif association transform not attached: {e}')
+
         loaders = {
             "train": DataLoader(train_set, batch_size=batch_size, shuffle=True),
             "valid": DataLoader(valid_set, batch_size=batch_size, shuffle=False),

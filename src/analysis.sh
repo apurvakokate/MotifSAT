@@ -7,6 +7,10 @@
 # Requirements per GSAT seed_dir (molecular loader with datasets + masked_data):
 #   - node_scores.jsonl, Motif_level_node_and_edge_masking_impact.jsonl (last-epoch export in run_gsat.train)
 # vanilla_gnn uses train_vanilla_gnn_one_seed: empty node_scores.jsonl → consistency step is skipped.
+#
+# Motif–class Fisher table: compute_motif_class_association.py caches under ${DATA_DIR}/motif_association/
+# (training split by default). If present, get_data_loaders attaches node_motif_assoc_p to each graph.
+# motif_stat_vs_importance_roc.py writes ${OUTPUT_BASE}/motif_importance_vs_fisher_roc_${DATASET}.csv
 
 set -euo pipefail
 
@@ -138,5 +142,36 @@ python collect_best_results.py \
   --results_dir "${RESULTS_DIR}" \
   --best_results_dir "${BEST_RESULTS_DIR}" \
   ${SET_R:+--set_r "${SET_R}"} || echo "[ERROR] collect_best_results failed"
+
+# ─── 4. Motif–class Fisher association (cached) + ROC: model importance vs statistical motifs ───
+FOLD="${FOLD:-0}"
+DATA_DIR="${DATA_DIR:-../data}"
+ASSOC_DIR="${DATA_DIR}/motif_association"
+STEM="${DATASET}_fold${FOLD}_training"
+ASSOC_CSV="${ASSOC_DIR}/${STEM}_motif_class_association.csv"
+mkdir -p "${ASSOC_DIR}" "${OUTPUT_BASE}"
+if [[ ! -f "${ASSOC_CSV}" ]]; then
+  echo "============================================================"
+  echo "  Computing motif–class association (Fisher / chi-sq) → ${ASSOC_CSV}"
+  echo "============================================================"
+  python compute_motif_class_association.py \
+    --dataset "${DATASET}" \
+    --fold "${FOLD}" \
+    --data_dir "${DATA_DIR}" || echo "[WARN] compute_motif_class_association failed (set --csv_file to your FOLDS CSV if needed)"
+else
+  echo "[INFO] Using cached motif association table: ${ASSOC_CSV}"
+fi
+ROC_OUT="${OUTPUT_BASE}/motif_importance_vs_fisher_roc_${DATASET}.csv"
+if [[ -f "${ASSOC_CSV}" ]]; then
+  echo "============================================================"
+  echo "  Motif importance vs Fisher significance ROC → ${ROC_OUT}"
+  echo "============================================================"
+  python motif_stat_vs_importance_roc.py \
+    --association_csv "${ASSOC_CSV}" \
+    --results_dir "${RESULTS_DIR}" \
+    --dataset "${DATASET}" \
+    --out_csv "${ROC_OUT}" || echo "[WARN] motif_stat_vs_importance_roc failed"
+  echo "[INFO] ROC table: ${ROC_OUT}"
+fi
 
 echo "Done. Summary tables (collect_mutagenicity_tables); best tables + score-vs-impact plots under ${BEST_RESULTS_DIR}/"
