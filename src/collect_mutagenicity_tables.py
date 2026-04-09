@@ -228,6 +228,11 @@ EXPERIMENT_ROW_CONFIG = {
         'row_label_prefix': 'sampling',
         'path_extract': 'readout_sampling_mode',
     },
+    'no_info_loss': {
+        'summary_path': None,
+        'row_label_prefix': 'variant',
+        'path_extract': 'no_info_loss_variant',
+    },
     'motif_readout_decay_injection_ablation': {
         'summary_path': None,
         'row_label_prefix': 'inj',
@@ -502,6 +507,16 @@ def _extract_value_from_parts(parts, mode):
                 return 'node_samp'
             if 'motif_samp' in p:
                 return 'motif_samp'
+        return None
+
+    elif mode == 'no_info_loss_variant':
+        joined = '/'.join(parts)
+        if 'no_info_loss_base' in joined:
+            return 'base_gsat'
+        if 'no_info_loss_maxmean_node_samp' in joined:
+            return 'maxmean_node_samp'
+        if 'no_info_loss_maxmean_motif_samp' in joined:
+            return 'maxmean_motif_samp'
         return None
 
     elif mode == 'prior_gate_shift':

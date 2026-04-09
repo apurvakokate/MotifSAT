@@ -29,6 +29,7 @@ EXPERIMENTS=(
   base_gsat_decay_r_injection
   base_gsat_motif_loss
   motif_readout_decay_w_message
+  no_info_loss
   motif_readout_decay_injection_ablation
   base_gsat_readout_intra_att
   motif_readout_prior_node_gate   # collect_mutagenicity_tables: one row per motif_prior_shift_scale (0, 0.1, 0.5, 1)

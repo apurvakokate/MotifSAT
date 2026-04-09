@@ -29,6 +29,7 @@ Active groups (EXPERIMENT_GROUPS):
   simplified_motif_readout_maxmean_z1 — same as simplified_motif_readout_maxmean but motif MLP input z_k = LN(z^(1)) || LN(max||mean) (emb_stop=0 mean-pool per motif + max_mean)
   simplified_motif_readout_maxmean_injection_ablation — maxmean + no info warmup; sweep injection 010 / 101 / 011 / 111
   simplified_motif_readout_maxmean_info_loss_ablation — maxmean + 010 + no warmup; sweep info_loss_coef ∈ {0.01, 0.1, 0.3}
+  no_info_loss — info_loss_coef=0, 010 injection; (1) base GSAT decay final_r=0.8, (2) motif readout max_mean + node sampling, (3) motif readout max_mean + motif sampling
 
 Injection codes map to GSAT flags (w_node ≡ w_feat): 100=w_feat only, 010=w_message only, 001=w_readout only, 111=all three.
 
@@ -217,6 +218,57 @@ EXPERIMENT_GROUPS = {
                     'between_motif_coef': 0,
                     'pred_loss_coef': 1.0,
                     'info_loss_coef': 1.0,
+                    **INJECTION_PRESETS['010'],
+                },
+                'learn_edge_att': False,
+            },
+        ],
+    },
+    'no_info_loss': {
+        'experiment_name': 'no_info_loss',
+        'variants': [
+            {
+                'variant_id': 'no_info_loss_base',
+                'gsat_overrides': {
+                    'tuning_id': 'no_info_loss_base',
+                    **_DECAY_R_BASE,
+                    'final_r': 0.8,
+                    **_BASE_GSAT_NONE,
+                    'info_loss_coef': 0.0,
+                    **INJECTION_PRESETS['010'],
+                },
+                'learn_edge_att': False,
+            },
+            {
+                'variant_id': 'no_info_loss_maxmean_node_samp',
+                'gsat_overrides': {
+                    'tuning_id': 'no_info_loss_maxmean_node_samp',
+                    **_DECAY_R_BASE,
+                    'final_r': 0.8,
+                    'motif_incorporation_method': 'readout',
+                    'motif_pooling_method': 'max_mean',
+                    'motif_level_sampling': False,
+                    'motif_loss_coef': 0,
+                    'between_motif_coef': 0,
+                    'pred_loss_coef': 1.0,
+                    'info_loss_coef': 0.0,
+                    **INJECTION_PRESETS['010'],
+                },
+                'learn_edge_att': False,
+            },
+            {
+                'variant_id': 'no_info_loss_maxmean_motif_samp',
+                'gsat_overrides': {
+                    'tuning_id': 'no_info_loss_maxmean_motif_samp',
+                    **_DECAY_R_BASE,
+                    'final_r': 0.8,
+                    'motif_incorporation_method': 'readout',
+                    'motif_pooling_method': 'max_mean',
+                    'motif_level_sampling': True,
+                    'motif_loss_coef': 0,
+                    'between_motif_coef': 0,
+                    'pred_loss_coef': 1.0,
+                    'info_loss_coef': 0.0,
                     **INJECTION_PRESETS['010'],
                 },
                 'learn_edge_att': False,
@@ -1147,6 +1199,7 @@ def main():
         'simplified_motif_readout_maxmean_z1',
         'simplified_motif_readout_maxmean_injection_ablation',
         'simplified_motif_readout_maxmean_info_loss_ablation',
+        'no_info_loss',
     }
     if dataset_name not in DATASETS_WITH_MOTIFS:
         skipped = [e for e in args.experiments if e in motif_experiments]
