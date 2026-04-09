@@ -23,7 +23,8 @@ import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from DataLoader import DATASET_COLUMN, DATASET_TYPE, get_setup_files_with_folds, CHOSEN_THRESHOLD
+from DataLoader import CHOSEN_THRESHOLD, get_setup_files_with_folds
+from utils.get_data_loaders import DATASET_COLUMN, DATASET_TYPE
 from motif_class_association import (
     association_table,
     build_graph_motif_presence,
