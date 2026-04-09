@@ -18,6 +18,12 @@ import os
 import sys
 from pathlib import Path
 
+# Must match run_gsat.train_gsat_one_seed / get_data_loaders motif pickle root.
+_DEFAULT_DICTIONARY_PATH = os.environ.get(
+    'MOTIFSAT_DICTIONARY_PATH',
+    '/nfs/stak/users/kokatea/hpc-share/ChemIntuit/MotifBreakdown/DICTIONARY_CREATE',
+)
+
 import numpy as np
 import pandas as pd
 
@@ -41,7 +47,9 @@ def main():
     p.add_argument(
         '--dictionary_path',
         type=str,
-        default='/nfs/stak/users/kokatea/hpc-share/ChemIntuit/MOSE-GNN/DICTIONARY',
+        default=None,
+        help='Root containing FOLDS/nofilter/... BRICS pickles (default: env MOTIFSAT_DICTIONARY_PATH '
+        f'or MotifBreakdown/DICTIONARY_CREATE; same as run_gsat.train_gsat_one_seed).',
     )
     p.add_argument('--dictionary_fold_variant', type=str, default='nofilter')
     p.add_argument(
@@ -72,6 +80,8 @@ def main():
     )
     args = p.parse_args()
 
+    dictionary_path = args.dictionary_path or _DEFAULT_DICTIONARY_PATH
+
     data_dir = Path(args.data_dir or (Path(__file__).resolve().parent.parent / 'data'))
     out_root = Path(args.out_dir) if args.out_dir else (data_dir / 'motif_association')
     ds = args.dataset
@@ -81,7 +91,7 @@ def main():
 
     lookup, motif_list, *_rest = get_setup_files_with_folds(
         ds, date_tag, args.fold, algo,
-        path=args.dictionary_path,
+        path=dictionary_path,
         dictionary_fold_variant=args.dictionary_fold_variant,
     )
 
@@ -142,6 +152,7 @@ def main():
         'vocab_size': int(vocab_size),
         'algorithm': algo,
         'dictionary_fold_variant': args.dictionary_fold_variant,
+        'dictionary_path': str(dictionary_path),
         'csv_source': str(csv_path),
     }
     save_association_artifacts(out_root, stem, tab, pvec, meta)

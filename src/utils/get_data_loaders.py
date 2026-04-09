@@ -1,3 +1,4 @@
+import os
 import torch
 import numpy as np
 from pathlib import Path
@@ -77,6 +78,14 @@ DATASET_TYPE = {
                   'Fluoride_Carbonyl':'BinaryClass',
                 }
 
+# Same root as run_gsat.train_gsat_one_seed (BRICS motif pickles under .../FOLDS/nofilter/...).
+# Override with env MOTIFSAT_DICTIONARY_PATH on other hosts (e.g. /nfs/hpc/share/...).
+_DEFAULT_MOTIF_DICTIONARY_PATH = os.environ.get(
+    'MOTIFSAT_DICTIONARY_PATH',
+    '/nfs/stak/users/kokatea/hpc-share/ChemIntuit/MotifBreakdown/DICTIONARY_CREATE',
+)
+
+
 def get_data_loaders(
     data_dir,
     dataset_name,
@@ -85,9 +94,11 @@ def get_data_loaders(
     random_state,
     mutag_x=False,
     fold=None,
-    path="/nfs/stak/users/kokatea/hpc-share/ChemIntuit/MOSE-GNN/DICTIONARY",
+    path=None,
     dictionary_fold_variant="nofilter",
 ):
+    if path is None:
+        path = _DEFAULT_MOTIF_DICTIONARY_PATH
     multi_label = False
     assert dataset_name in ['ba_2motifs', 'mutag', 'Graph-SST2', 'mnist',
                             'spmotif_0.5', 'spmotif_0.7', 'spmotif_0.9',

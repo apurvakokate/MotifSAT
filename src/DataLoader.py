@@ -1,3 +1,4 @@
+import os
 import numpy as np
 import pickle
 import torch
@@ -92,9 +93,14 @@ def get_setup_files_with_folds(
     date_tag,
     fold,
     algorithm,
-    path="/nfs/stak/users/kokatea/hpc-share/ChemIntuit/MOSE-GNN/DICTIONARY",
+    path=None,
     dictionary_fold_variant="nofilter",
 ):
+    if path is None:
+        path = os.environ.get(
+            'MOTIFSAT_DICTIONARY_PATH',
+            '/nfs/stak/users/kokatea/hpc-share/ChemIntuit/MotifBreakdown/DICTIONARY_CREATE',
+        )
     """
     Load motif dictionary pickles for a train/val/test fold.
 
