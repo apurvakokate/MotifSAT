@@ -233,6 +233,11 @@ EXPERIMENT_ROW_CONFIG = {
         'row_label_prefix': 'variant',
         'path_extract': 'no_info_loss_variant',
     },
+    'no_info_loss_deterministic_attn': {
+        'summary_path': None,
+        'row_label_prefix': 'variant',
+        'path_extract': 'no_info_loss_det_variant',
+    },
     'motif_readout_decay_injection_ablation': {
         'summary_path': None,
         'row_label_prefix': 'inj',
@@ -517,6 +522,14 @@ def _extract_value_from_parts(parts, mode):
             return 'maxmean_node_samp'
         if 'no_info_loss_maxmean_motif_samp' in joined:
             return 'maxmean_motif_samp'
+        return None
+
+    elif mode == 'no_info_loss_det_variant':
+        joined = '/'.join(parts)
+        if 'no_info_loss_det_base' in joined:
+            return 'base_gsat'
+        if 'no_info_loss_det_maxmean' in joined:
+            return 'maxmean_readout'
         return None
 
     elif mode == 'prior_gate_shift':

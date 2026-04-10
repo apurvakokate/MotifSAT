@@ -1435,6 +1435,8 @@ class GSAT(nn.Module):
 
         # Info loss warmup: prediction-only phase before info loss kicks in
         self.info_warmup_epochs = method_config.get('info_warmup_epochs', 0)
+        # If True: always use σ(logits) for attention (no Concrete / Gumbel-style sampling in training)
+        self.no_attention_sampling = bool(method_config.get('no_attention_sampling', False))
         # Motif IB: linear ramp of loss weight 0→1 over ib_ramp_epochs after warmup; r_ib linear init→final
         self.ib_ramp_epochs = int(method_config.get('ib_ramp_epochs', 0))
         
@@ -1516,6 +1518,8 @@ class GSAT(nn.Module):
         if self.motif_weight_diversity_coef > 0:
             print(f'[INFO] Motif weight diversity loss coef: {self.motif_weight_diversity_coef}')
         print(f'[INFO] Use raw score loss: {self.use_raw_score_loss}')
+        if self.no_attention_sampling:
+            print('[INFO] Attention: deterministic σ(logits) only (no_attention_sampling=True)')
         if self.info_warmup_epochs > 0:
             print(f'[INFO] Info loss warmup: {self.info_warmup_epochs} epochs (prediction-only, deterministic gating)')
         if self.ib_ramp_epochs > 0:
@@ -3976,6 +3980,8 @@ class GSAT(nn.Module):
                 edge_f.write(json.dumps(edge_record) + '\n')
 
     def sampling(self, att_log_logits, epoch, training):
+        if self.no_attention_sampling:
+            return att_log_logits.sigmoid()
         if training and epoch < self.info_warmup_epochs:
             att = att_log_logits.sigmoid()
         else:
