@@ -118,19 +118,40 @@ def _cluster_order(M: np.ndarray) -> np.ndarray:
     return np.array(leaves_list(Z))
 
 
-def _motif_labels(rows: pd.DataFrame, max_len: int = 22) -> list[str]:
-    out = []
+def _motif_labels(
+    rows: pd.DataFrame,
+    max_len: int = 22,
+    *,
+    tick_style: str = 'two_line',
+) -> list[str]:
+    """
+    tick_style:
+      two_line — motif id on one line, truncated SMILES on the next (readable for few motifs).
+      one_line — single line ``id: SMILES`` (truncated).
+      id_only — motif id only (best for dense heatmaps; cross-ref association CSV for SMILES).
+    """
+    if tick_style not in ('two_line', 'one_line', 'id_only'):
+        raise ValueError(f'tick_style must be two_line|one_line|id_only, got {tick_style!r}')
+    out: list[str] = []
     for _, r in rows.iterrows():
         mid = int(r['motif_id'])
         smi = r.get('motif_smiles')
+        if tick_style == 'id_only':
+            out.append(str(mid))
+            continue
         if pd.isna(smi) or smi is None:
-            s = f'{mid}'
-        else:
-            t = str(smi)
+            out.append(str(mid))
+            continue
+        t = str(smi)
+        if tick_style == 'one_line':
             if len(t) > max_len:
                 t = t[: max_len - 1] + '…'
-            s = f'{mid}\n{t}'
-        out.append(s)
+            out.append(f'{mid}: {t}')
+            continue
+        # two_line
+        if len(t) > max_len:
+            t = t[: max_len - 1] + '…'
+        out.append(f'{mid}\n{t}')
     return out
 
 

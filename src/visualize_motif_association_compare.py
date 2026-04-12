@@ -21,6 +21,10 @@ Example::
       --dataset Mutagenicity --dataset BBBP \\
       --fold 0 --which_split training \\
       --out_dir ../figures/motif_compare
+
+Heatmap ticks default to ``--heatmap_tick_style id_only`` (readable at ``top_k`` 32+); use
+``two_line`` for id+SMILES on axes. The descriptive figure uses a taller volcano row; tune with
+``--descriptive_fig_height`` and ``--volcano_annotate_fontsize``.
 """
 
 from __future__ import annotations
@@ -144,8 +148,10 @@ def plot_compare_descriptive(
     clip_log2: float,
     dpi: int,
     fig_width_per_col: float,
+    fig_height: float,
     title_suffix: str,
     annotate_min_neglog10_p: float | None = 10.0,
+    volcano_annotate_fontsize: float = 4.5,
 ):
     n = len(columns)
     if n == 0:
@@ -172,7 +178,18 @@ def plot_compare_descriptive(
     cmap_neu = '#78909c'
 
     fig_w = fig_width_per_col * n
-    fig, axes = plt.subplots(4, n, figsize=(fig_w, 12.5), squeeze=False)
+    # Taller volcano row than histograms so scatter is readable; summary row sized for text + label bar.
+    fig, axes = plt.subplots(
+        4,
+        n,
+        figsize=(fig_w, fig_height),
+        squeeze=False,
+        gridspec_kw={
+            'height_ratios': [0.72, 1.0, 1.0, 2.65],
+            'hspace': 0.44,
+            'wspace': 0.28,
+        },
+    )
     if n == 1:
         axes = np.asarray(axes)
 
@@ -236,7 +253,12 @@ def plot_compare_descriptive(
             alpha=0.45, linewidths=0, rasterized=True,
         )
         annotate_volcano_fisher_p(
-            ax_vol, df, lor_plot, sig, annotate_min_neglog10_p=annotate_min_neglog10_p, fontsize=4.8,
+            ax_vol,
+            df,
+            lor_plot,
+            sig,
+            annotate_min_neglog10_p=annotate_min_neglog10_p,
+            fontsize=volcano_annotate_fontsize,
         )
         ax_vol.axhline(-math.log10(0.05), color='#37474f', linestyle='--', linewidth=0.85, alpha=0.75)
         ax_vol.axvline(0.0, color='#90a4ae', linestyle='-', linewidth=0.55, alpha=0.8)
@@ -283,6 +305,7 @@ def plot_compare_motif_motif(
     no_cluster: bool,
     dpi: float,
     fig_h_per_panel: float,
+    heatmap_tick_style: str,
 ):
     n = len(datasets)
     if n == 0:
@@ -336,11 +359,20 @@ def plot_compare_motif_motif(
         if do_cluster and M.shape[0] > 2:
             order = _cluster_order(M)
         M = M[order][:, order]
-        labels_list.append(_motif_labels(top_df.iloc[order], max_len=14))
+        ml = 20 if heatmap_tick_style == 'one_line' else 14
+        labels_list.append(
+            _motif_labels(top_df.iloc[order], max_len=ml, tick_style=heatmap_tick_style),
+        )
         mats.append(M)
+        tick_note = (
+            ''
+            if heatmap_tick_style == 'two_line'
+            else '\naxes: motif id (see association CSV for SMILES)'
+        )
         titles.append(
             f'{ds}\nn={n_g}, top {M.shape[0]} by {rank_by}\n{dependence}'
             + (' · clustered' if do_cluster else '')
+            + tick_note
         )
 
     if dependence == 'phi':
@@ -353,8 +385,8 @@ def plot_compare_motif_motif(
         cbar_lbl = 'Jaccard'
 
     max_w = max(m.shape[0] for m in mats)
-    fig_w = min(4.0 + 1.05 * max_w, 16.0) * n * 0.42
-    fig_h = min(fig_h_per_panel + 0.12 * max_w, 18.0)
+    fig_w = min(4.5 + 1.12 * max_w, 18.0) * n * 0.46
+    fig_h = min(fig_h_per_panel + 0.16 * max_w, 22.0)
     fig, axes = plt.subplots(1, n, figsize=(fig_w, fig_h), squeeze=False, constrained_layout=True)
     axr = axes[0, :] if n > 1 else [axes[0, 0]]
 
@@ -362,20 +394,21 @@ def plot_compare_motif_motif(
         im = ax.imshow(M, cmap=cmap_name, aspect='equal', vmin=vmin, vmax=vmax)
         ax.set_xticks(np.arange(M.shape[0]))
         ax.set_yticks(np.arange(M.shape[0]))
-        fs = max(4, min(7, int(520 // max(M.shape[0], 1))))
-        # Keep labels outside cells: y right-aligned so text does not cover column 0;
-        # x anchored above tick line (va='top') so rotated labels do not sit on the heatmap.
-        ax.set_xticklabels(lab, fontsize=fs, rotation=90, ha='center', va='top', rotation_mode='anchor')
+        fs = max(5, min(9, int(720 // max(M.shape[0], 1))))
+        # Keep labels outside cells: y right-aligned; x labels below tick line (bottom axis).
+        ax.set_xticklabels(
+            lab, fontsize=fs, rotation=90, ha='center', va='top', rotation_mode='anchor',
+        )
         ax.set_yticklabels(lab, fontsize=fs, ha='right')
         ax.tick_params(axis='x', which='major', pad=3, length=3)
         ax.tick_params(axis='y', which='major', pad=3, length=3)
         ax.set_title(tit, fontsize=9)
         plt.colorbar(im, ax=ax, fraction=0.046, pad=0.08, label=cbar_lbl)
 
-    fig.suptitle('Motif–motif dependence (top label-associated motifs)', fontsize=11)
+    fig.suptitle('Motif–motif dependence (top label-associated motifs)', fontsize=11, y=0.99)
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_path, dpi=dpi, bbox_inches='tight', facecolor='white')
+    fig.savefig(out_path, dpi=dpi, bbox_inches='tight', pad_inches=0.15, facecolor='white')
     plt.close(fig)
     print(f'[INFO] Wrote {out_path.resolve()}')
 
@@ -427,9 +460,34 @@ def main():
         choices=['fisher_p', 'fisher_q_bh', 'abs_log2_or'],
     )
     p.add_argument('--dependence', type=str, default='phi', choices=['phi', 'jaccard'])
+    p.add_argument(
+        '--heatmap_tick_style',
+        type=str,
+        default='id_only',
+        choices=['id_only', 'one_line', 'two_line'],
+        help='Motif–motif heatmap axis labels: id_only (recommended), one_line (id: SMILES), or two_line',
+    )
+    p.add_argument(
+        '--fig_h_per_panel',
+        type=float,
+        default=7.5,
+        help='Height per heatmap panel in compare_motif_motif_*.png',
+    )
     p.add_argument('--no_cluster', action='store_true')
     p.add_argument('--dpi', type=int, default=150)
     p.add_argument('--fig_width_per_col', type=float, default=4.2)
+    p.add_argument(
+        '--descriptive_fig_height',
+        type=float,
+        default=15.0,
+        help='Total figure height for compare_descriptive.png (volcano row scales with this)',
+    )
+    p.add_argument(
+        '--volcano_annotate_fontsize',
+        type=float,
+        default=4.5,
+        help='Font size for volcano point labels in compare_descriptive (smaller = less overlap)',
+    )
     p.add_argument('--title_suffix', type=str, default='')
     p.add_argument(
         '--annotate-min-neglog10-p',
@@ -503,8 +561,10 @@ def main():
             clip_log2=args.clip_log2,
             dpi=args.dpi,
             fig_width_per_col=args.fig_width_per_col,
+            fig_height=args.descriptive_fig_height,
             title_suffix=args.title_suffix,
             annotate_min_neglog10_p=ann,
+            volcano_annotate_fontsize=args.volcano_annotate_fontsize,
         )
 
     if not args.skip_heatmap:
@@ -526,7 +586,8 @@ def main():
             dependence=args.dependence,
             no_cluster=args.no_cluster,
             dpi=args.dpi,
-            fig_h_per_panel=5.5,
+            fig_h_per_panel=args.fig_h_per_panel,
+            heatmap_tick_style=args.heatmap_tick_style,
         )
 
 
