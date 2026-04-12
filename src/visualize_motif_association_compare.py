@@ -22,9 +22,9 @@ Example::
       --fold 0 --which_split training \\
       --out_dir ../figures/motif_compare
 
-Heatmap ticks default to ``--heatmap_tick_style id_only`` (readable at ``top_k`` 32+); use
-``two_line`` for id+SMILES on axes. The descriptive figure uses a taller volcano row; tune with
-``--descriptive_fig_height`` and ``--volcano_annotate_fontsize``.
+Heatmap ticks default to ``--heatmap_tick_style one_line`` (``id:`` + truncated SMILES per axis).
+Use ``--heatmap_tick_style id_only`` for dense grids. The descriptive figure uses a taller volcano
+row; tune with ``--descriptive_fig_height`` and ``--volcano_annotate_fontsize``.
 """
 
 from __future__ import annotations
@@ -128,6 +128,71 @@ def ensure_association_csv(
         )
 
 
+def _draw_compare_summary_panel(
+    ax_sum,
+    *,
+    name: str,
+    title_suffix: str,
+    n_g: int,
+    n0: int,
+    n1: int,
+    n_motifs: int,
+    min_count: int,
+) -> None:
+    """First row of compare_descriptive: dataset title, compact stats, class-fraction bar."""
+    ax_sum.set_xlim(0, 1)
+    ax_sum.set_ylim(0, 1)
+    ax_sum.axis('off')
+
+    ts = title_suffix.strip()
+    title = f'{name}{(" · " + ts) if ts else ""}'
+
+    ax_sum.text(
+        0.5,
+        0.96,
+        title,
+        ha='center',
+        va='top',
+        fontsize=10.5,
+        fontweight='600',
+        color='#1a237e',
+        transform=ax_sum.transAxes,
+    )
+
+    pct0 = 100.0 * n0 / max(n_g, 1)
+    pct1 = 100.0 * n1 / max(n_g, 1)
+    stats = (
+        f'Graphs  {n_g:,}\n'
+        f'Negative (y=0)  {n0:,}  ({pct0:.1f}%)\n'
+        f'Positive (y=1)  {n1:,}  ({pct1:.1f}%)\n'
+        f'Motifs in table  {n_motifs:,}  ·  min n_present ≥ {min_count}'
+    )
+    ax_sum.text(
+        0.04,
+        0.78,
+        stats,
+        ha='left',
+        va='top',
+        fontsize=8,
+        linespacing=1.35,
+        color='#263238',
+        transform=ax_sum.transAxes,
+    )
+
+    # Stacked bar: right third of panel only — avoids bleeding into adjacent columns.
+    ax_bar = ax_sum.inset_axes([0.58, 0.14, 0.38, 0.72])
+    ax_bar.set_facecolor('#fafafa')
+    ax_bar.barh([0], [n0 / n_g], left=0.0, height=0.82, color='#546e7a', edgecolor='white', linewidth=0.8)
+    ax_bar.barh([0], [n1 / n_g], left=n0 / n_g, height=0.82, color='#ef6c00', edgecolor='white', linewidth=0.8)
+    ax_bar.set_xlim(0, 1)
+    ax_bar.set_ylim(-0.55, 0.55)
+    ax_bar.set_yticks([])
+    ax_bar.set_xticks([0, 0.5, 1.0])
+    ax_bar.tick_params(axis='x', labelsize=7, colors='#424242')
+    ax_bar.set_xlabel('Class fraction', fontsize=7.5, color='#424242')
+    ax_bar.set_title('Label balance', fontsize=8.5, color='#37474f', pad=6)
+
+
 def _sig_array(df: pd.DataFrame, value_col: str) -> tuple[np.ndarray, str]:
     if value_col == 'neglog10_p':
         return df['neglog10_p'].values, r'$-\log_{10}(p_\mathrm{Fisher})$'
@@ -185,9 +250,9 @@ def plot_compare_descriptive(
         figsize=(fig_w, fig_height),
         squeeze=False,
         gridspec_kw={
-            'height_ratios': [0.72, 1.0, 1.0, 2.65],
+            'height_ratios': [0.78, 1.0, 1.0, 2.65],
             'hspace': 0.44,
-            'wspace': 0.28,
+            'wspace': 0.38,
         },
     )
     if n == 1:
@@ -208,22 +273,16 @@ def plot_compare_descriptive(
             continue
 
         n_g, n0, n1 = dataset_class_counts(df.iloc[0])
-        summary = (
-            f'{name}{ts}\n'
-            f'Graphs: {n_g}  |  y=0: {n0} ({100.0 * n0 / max(n_g, 1):.1f}%)  '
-            f'|  y=1: {n1} ({100.0 * n1 / max(n_g, 1):.1f}%)\n'
-            f'Motifs: {len(df)}  (min n_present ≥ {min_count})'
+        _draw_compare_summary_panel(
+            ax_sum,
+            name=name,
+            title_suffix=title_suffix,
+            n_g=n_g,
+            n0=n0,
+            n1=n1,
+            n_motifs=len(df),
+            min_count=min_count,
         )
-        ax_sum.axis('off')
-        ax_sum.text(0.02, 0.5, summary, ha='left', va='center', fontsize=9, family='monospace', transform=ax_sum.transAxes)
-        ax_bar = ax_sum.inset_axes([0.52, 0.1, 0.45, 0.45])
-        ax_bar.barh([0], [n0 / n_g], left=0.0, height=0.85, color='#546e7a', edgecolor='white')
-        ax_bar.barh([0], [n1 / n_g], left=n0 / n_g, height=0.85, color='#ef6c00', edgecolor='white')
-        ax_bar.set_xlim(0, 1)
-        ax_bar.set_yticks([])
-        ax_bar.set_xticks([0, 0.5, 1.0])
-        ax_bar.set_xlabel('Class fraction', fontsize=7)
-        ax_bar.set_title('Labels', fontsize=8)
 
         prev = df['n_present'].values.astype(float)
         ax_hp.hist(
@@ -277,13 +336,14 @@ def plot_compare_descriptive(
 
     fig.suptitle(
         'Motif–class association compared across datasets (BRICS)',
-        fontsize=11,
-        y=0.995,
+        fontsize=12,
+        fontweight='600',
+        y=0.985,
     )
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.tight_layout(rect=[0, 0, 1, 0.97])
-    fig.savefig(out_path, dpi=dpi, bbox_inches='tight', facecolor='white')
+    fig.tight_layout(rect=[0, 0.02, 1, 0.94])
+    fig.savefig(out_path, dpi=dpi, bbox_inches='tight', pad_inches=0.2, facecolor='white')
     plt.close(fig)
     print(f'[INFO] Wrote {out_path.resolve()}')
 
@@ -359,21 +419,22 @@ def plot_compare_motif_motif(
         if do_cluster and M.shape[0] > 2:
             order = _cluster_order(M)
         M = M[order][:, order]
-        ml = 20 if heatmap_tick_style == 'one_line' else 14
+        if heatmap_tick_style == 'one_line':
+            ml = 30
+        elif heatmap_tick_style == 'id_only':
+            ml = 14
+        else:
+            ml = 14
         labels_list.append(
             _motif_labels(top_df.iloc[order], max_len=ml, tick_style=heatmap_tick_style),
         )
         mats.append(M)
-        tick_note = (
-            ''
-            if heatmap_tick_style == 'two_line'
-            else '\naxes: motif id (see association CSV for SMILES)'
-        )
-        titles.append(
-            f'{ds}\nn={n_g}, top {M.shape[0]} by {rank_by}\n{dependence}'
+        sub = (
+            f'n={n_g:,} graphs · top {M.shape[0]} by {rank_by} · {dependence}'
             + (' · clustered' if do_cluster else '')
-            + tick_note
         )
+        id_hint = '\nAxes: motif id only — see association CSV for full SMILES' if heatmap_tick_style == 'id_only' else ''
+        titles.append(f'{ds}\n{sub}{id_hint}')
 
     if dependence == 'phi':
         vmin, vmax = -1.0, 1.0
@@ -394,7 +455,7 @@ def plot_compare_motif_motif(
         im = ax.imshow(M, cmap=cmap_name, aspect='equal', vmin=vmin, vmax=vmax)
         ax.set_xticks(np.arange(M.shape[0]))
         ax.set_yticks(np.arange(M.shape[0]))
-        fs = max(5, min(9, int(720 // max(M.shape[0], 1))))
+        fs = max(4, min(8, int(560 // max(M.shape[0], 1))))
         # Keep labels outside cells: y right-aligned; x labels below tick line (bottom axis).
         ax.set_xticklabels(
             lab, fontsize=fs, rotation=90, ha='center', va='top', rotation_mode='anchor',
@@ -402,7 +463,7 @@ def plot_compare_motif_motif(
         ax.set_yticklabels(lab, fontsize=fs, ha='right')
         ax.tick_params(axis='x', which='major', pad=3, length=3)
         ax.tick_params(axis='y', which='major', pad=3, length=3)
-        ax.set_title(tit, fontsize=9)
+        ax.set_title(tit, fontsize=9, linespacing=1.15)
         plt.colorbar(im, ax=ax, fraction=0.046, pad=0.08, label=cbar_lbl)
 
     fig.suptitle('Motif–motif dependence (top label-associated motifs)', fontsize=11, y=0.99)
@@ -463,9 +524,9 @@ def main():
     p.add_argument(
         '--heatmap_tick_style',
         type=str,
-        default='id_only',
+        default='one_line',
         choices=['id_only', 'one_line', 'two_line'],
-        help='Motif–motif heatmap axis labels: id_only (recommended), one_line (id: SMILES), or two_line',
+        help='Heatmap ticks: one_line (id + truncated SMILES, default), two_line, or id_only',
     )
     p.add_argument(
         '--fig_h_per_panel',
@@ -475,7 +536,12 @@ def main():
     )
     p.add_argument('--no_cluster', action='store_true')
     p.add_argument('--dpi', type=int, default=150)
-    p.add_argument('--fig_width_per_col', type=float, default=4.2)
+    p.add_argument(
+        '--fig_width_per_col',
+        type=float,
+        default=4.75,
+        help='Width (inches) per dataset column in compare_descriptive.png',
+    )
     p.add_argument(
         '--descriptive_fig_height',
         type=float,

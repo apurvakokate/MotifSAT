@@ -144,9 +144,18 @@ def _motif_labels(
             continue
         t = str(smi)
         if tick_style == 'one_line':
-            if len(t) > max_len:
-                t = t[: max_len - 1] + '…'
-            out.append(f'{mid}: {t}')
+            # max_len = max total characters for the tick (id + ': ' + SMILES).
+            prefix = f'{mid}: '
+            raw = prefix + t
+            if len(raw) <= max_len:
+                out.append(raw)
+                continue
+            allow = max(4, max_len - len(prefix) - 1)
+            t2 = (t[:allow] + '…') if len(t) > allow else t
+            raw2 = prefix + t2
+            if len(raw2) > max_len:
+                raw2 = raw2[: max_len - 1] + '…'
+            out.append(raw2)
             continue
         # two_line
         if len(t) > max_len:
