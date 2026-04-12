@@ -42,6 +42,7 @@ from matplotlib.lines import Line2D
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from visualize_motif_discrimination import (
+    annotate_volcano_fisher_p,
     dataset_class_counts,
     prepare_association_df,
     _lor_color,
@@ -144,6 +145,7 @@ def plot_compare_descriptive(
     dpi: int,
     fig_width_per_col: float,
     title_suffix: str,
+    annotate_min_neglog10_p: float | None = 10.0,
 ):
     n = len(columns)
     if n == 0:
@@ -207,15 +209,23 @@ def plot_compare_descriptive(
         ax_bar.set_title('Labels', fontsize=8)
 
         prev = df['n_present'].values.astype(float)
-        ax_hp.hist(prev, bins=min(48, max(12, int(np.sqrt(len(prev)) + 5))), color='#455a64', edgecolor='white', linewidth=0.3)
+        ax_hp.hist(
+            prev, bins=min(48, max(12, int(np.sqrt(len(prev)) + 5))),
+            color='#455a64', edgecolor='#263238', linewidth=0.55, alpha=0.92,
+        )
+        ax_hp.set_yscale('symlog', linthresh=1.0)
         ax_hp.set_xlabel(r'$n_{\mathrm{present}}$', fontsize=8)
-        ax_hp.set_ylabel('Motifs', fontsize=8)
+        ax_hp.set_ylabel('Motif count (symlog y)', fontsize=8)
         ax_hp.set_title('Prevalence', fontsize=9)
 
         sig, sig_lab = _sig_array(df, value_col)
-        ax_hs.hist(sig, bins=min(40, max(15, len(df) // 30 + 10)), color='#6a1b9a', edgecolor='white', linewidth=0.3)
+        ax_hs.hist(
+            sig, bins=min(40, max(15, len(df) // 30 + 10)),
+            color='#6a1b9a', edgecolor='#38006b', linewidth=0.55, alpha=0.92,
+        )
+        ax_hs.set_yscale('symlog', linthresh=1.0)
         ax_hs.set_xlabel(sig_lab, fontsize=8)
-        ax_hs.set_ylabel('Motifs', fontsize=8)
+        ax_hs.set_ylabel('Motif count (symlog y)', fontsize=8)
         ax_hs.set_title(r'Significance ($-\log_{10}$)', fontsize=9)
 
         lor = df['log2_or'].values.astype(float)
@@ -224,6 +234,9 @@ def plot_compare_descriptive(
         ax_vol.scatter(
             lor_plot, sig, c=colors, s=np.clip(8000.0 / max(len(df), 1), 3.0, 26.0),
             alpha=0.45, linewidths=0, rasterized=True,
+        )
+        annotate_volcano_fisher_p(
+            ax_vol, df, lor_plot, sig, annotate_min_neglog10_p=annotate_min_neglog10_p, fontsize=4.8,
         )
         ax_vol.axhline(-math.log10(0.05), color='#37474f', linestyle='--', linewidth=0.85, alpha=0.75)
         ax_vol.axvline(0.0, color='#90a4ae', linestyle='-', linewidth=0.55, alpha=0.8)
@@ -416,6 +429,12 @@ def main():
     p.add_argument('--fig_width_per_col', type=float, default=4.2)
     p.add_argument('--title_suffix', type=str, default='')
     p.add_argument(
+        '--annotate-min-neglog10-p',
+        type=float,
+        default=10.0,
+        help='Volcano: label motifs with −log10(Fisher p) ≥ this (0 disables)',
+    )
+    p.add_argument(
         '--no-compute-association',
         action='store_true',
         help='If association CSV is missing, exit with error instead of running compute_motif_class_association.py',
@@ -471,6 +490,7 @@ def main():
             columns.append((ds, csv_assoc))
 
     if not args.skip_descriptive:
+        ann = None if args.annotate_min_neglog10_p <= 0 else float(args.annotate_min_neglog10_p)
         plot_compare_descriptive(
             columns=columns,
             out_path=out_dir / 'compare_descriptive.png',
@@ -481,6 +501,7 @@ def main():
             dpi=args.dpi,
             fig_width_per_col=args.fig_width_per_col,
             title_suffix=args.title_suffix,
+            annotate_min_neglog10_p=ann,
         )
 
     if not args.skip_heatmap:

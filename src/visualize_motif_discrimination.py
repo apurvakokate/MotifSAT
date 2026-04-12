@@ -10,7 +10,8 @@ For each ``--panel`` dataset, produces **one vertical block** with:
 2. **Motif prevalence** — histogram of ``n_present`` (how often each motif appears in the split).
 3. **Significance distribution** — histogram of :math:`-\\log_{10}(p)` or :math:`-\\log_{10}(q)`.
 4. **Volcano** — **every motif** as a point: x = :math:`\\log_2` odds ratio (y=1 | present vs absent),
-   y = :math:`-\\log_{10}(p)` (or BH q). Same red/blue/gray encoding as before.
+   y = :math:`-\\log_{10}(p)` (or BH q). Motifs with :math:`-\\log_{10}(p_\\mathrm{Fisher}) \\geq 10` get a text label
+   (see ``--annotate-min-neglog10-p``; use ``0`` to turn off).
 
 Example::
 
@@ -128,6 +129,58 @@ def _lor_color(lor: float) -> str:
     return '#78909c'
 
 
+def _volcano_motif_label(row: pd.Series, max_len: int = 26) -> str:
+    mid = int(row['motif_id'])
+    smi = row.get('motif_smiles')
+    if pd.isna(smi) or smi is None or str(smi).strip() == '':
+        return f'id={mid}'
+    s = str(smi).strip()
+    if len(s) > max_len:
+        s = s[: max_len - 1] + '…'
+    return f'{mid}: {s}'
+
+
+def annotate_volcano_fisher_p(
+    ax,
+    df: pd.DataFrame,
+    lor_plot: np.ndarray,
+    sig: np.ndarray,
+    *,
+    annotate_min_neglog10_p: float | None,
+    fontsize: float = 5.0,
+) -> None:
+    """Draw text for points with ``−log10(Fisher p)`` ≥ threshold (Fisher only; not BH q)."""
+    if annotate_min_neglog10_p is None or annotate_min_neglog10_p <= 0:
+        return
+    thr = float(annotate_min_neglog10_p)
+    for i, (_, row) in enumerate(df.iterrows()):
+        nlp = float(row['neglog10_p'])
+        if not math.isfinite(nlp) or nlp < thr:
+            continue
+        lx = float(lor_plot[i])
+        py = float(sig[i])
+        if not math.isfinite(lx) or not math.isfinite(py):
+            continue
+        lbl = _volcano_motif_label(row)
+        ax.annotate(
+            lbl,
+            (lx, py),
+            xytext=(3, 3),
+            textcoords='offset points',
+            fontsize=fontsize,
+            color='#111111',
+            alpha=0.92,
+            bbox=dict(
+                boxstyle='round,pad=0.15',
+                facecolor='white',
+                edgecolor='#bdbdbd',
+                linewidth=0.35,
+                alpha=0.9,
+            ),
+            zorder=6,
+        )
+
+
 def plot_descriptive_panels(
     panels: list[tuple[str, Path]],
     out_path: Path,
@@ -139,6 +192,7 @@ def plot_descriptive_panels(
     fig_width: float,
     dpi: int,
     title_suffix: str,
+    annotate_min_neglog10_p: float | None = 10.0,
 ):
     n = len(panels)
     if n == 0:
@@ -199,9 +253,13 @@ def plot_descriptive_panels(
         ax_bar.set_title('Label distribution', fontsize=8)
 
         prev = df['n_present'].values.astype(float)
-        ax_hist_prev.hist(prev, bins=min(48, max(12, int(np.sqrt(len(prev)) + 5))), color='#455a64', edgecolor='white', linewidth=0.3)
+        ax_hist_prev.hist(
+            prev, bins=min(48, max(12, int(np.sqrt(len(prev)) + 5))),
+            color='#455a64', edgecolor='#263238', linewidth=0.55, alpha=0.92,
+        )
+        ax_hist_prev.set_yscale('symlog', linthresh=1.0)
         ax_hist_prev.set_xlabel(r'$n_{\mathrm{present}}$ (graphs with motif)', fontsize=8)
-        ax_hist_prev.set_ylabel('Motifs', fontsize=8)
+        ax_hist_prev.set_ylabel('Motif count (symlog y)', fontsize=8)
         ax_hist_prev.set_title('Prevalence of motifs', fontsize=9)
 
         if value_col == 'neglog10_p':
@@ -217,9 +275,13 @@ def plot_descriptive_panels(
         else:
             raise ValueError(value_col)
 
-        ax_hist_sig.hist(sig, bins=min(40, max(15, len(df) // 30 + 10)), color='#6a1b9a', edgecolor='white', linewidth=0.3)
+        ax_hist_sig.hist(
+            sig, bins=min(40, max(15, len(df) // 30 + 10)),
+            color='#6a1b9a', edgecolor='#38006b', linewidth=0.55, alpha=0.92,
+        )
+        ax_hist_sig.set_yscale('symlog', linthresh=1.0)
         ax_hist_sig.set_xlabel(sig_lab, fontsize=8)
-        ax_hist_sig.set_ylabel('Motifs', fontsize=8)
+        ax_hist_sig.set_ylabel('Motif count (symlog y)', fontsize=8)
         ax_hist_sig.set_title('Significance across all motifs', fontsize=9)
 
         lor = df['log2_or'].values.astype(float)
@@ -229,6 +291,9 @@ def plot_descriptive_panels(
         ax_vol.scatter(
             lor_plot, y_sig, c=colors, s=np.clip(8000.0 / max(len(df), 1), 3.0, 28.0),
             alpha=0.45, linewidths=0, edgecolors='none', rasterized=True,
+        )
+        annotate_volcano_fisher_p(
+            ax_vol, df, lor_plot, y_sig, annotate_min_neglog10_p=annotate_min_neglog10_p,
         )
         ax_vol.axhline(-math.log10(0.05), color='#37474f', linestyle='--', linewidth=0.9, alpha=0.75, label=r'$p=0.05$')
         ax_vol.axvline(0.0, color='#90a4ae', linestyle='-', linewidth=0.6, alpha=0.8)
@@ -291,6 +356,12 @@ def main():
     p.add_argument('--fig_width', type=float, default=11.0)
     p.add_argument('--dpi', type=int, default=150)
     p.add_argument('--title_suffix', type=str, default='', help='Append to panel titles')
+    p.add_argument(
+        '--annotate-min-neglog10-p',
+        type=float,
+        default=10.0,
+        help='Annotate volcano when −log10(Fisher p) ≥ this (0 disables)',
+    )
     args = p.parse_args()
 
     panels: list[tuple[str, Path]] = []
@@ -304,6 +375,7 @@ def main():
             raise FileNotFoundError(path)
         panels.append((name, path))
 
+    ann = None if args.annotate_min_neglog10_p <= 0 else float(args.annotate_min_neglog10_p)
     plot_descriptive_panels(
         panels,
         Path(args.out),
@@ -314,6 +386,7 @@ def main():
         fig_width=args.fig_width,
         dpi=args.dpi,
         title_suffix=args.title_suffix,
+        annotate_min_neglog10_p=ann,
     )
 
 
