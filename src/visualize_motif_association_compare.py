@@ -139,7 +139,7 @@ def _draw_compare_summary_panel(
     n_motifs: int,
     min_count: int,
 ) -> None:
-    """First row of compare_descriptive: dataset title, compact stats, class-fraction bar."""
+    """First row of compare_descriptive: dataset title, full-width stats, then a wide short bar below."""
     ax_sum.set_xlim(0, 1)
     ax_sum.set_ylim(0, 1)
     ax_sum.axis('off')
@@ -167,31 +167,31 @@ def _draw_compare_summary_panel(
         f'Positive (y=1)  {n1:,}  ({pct1:.1f}%)\n'
         f'Motifs in table  {n_motifs:,}  ·  min n_present ≥ {min_count}'
     )
-    # Left half: full-width stats block (uses panel width; avoids a narrow text column).
+    # Centered block above the bar — uses nearly full width so lines are not clipped.
     ax_sum.text(
-        0.03,
-        0.82,
+        0.5,
+        0.78,
         stats,
-        ha='left',
+        ha='center',
         va='top',
         fontsize=9,
-        linespacing=1.4,
+        linespacing=1.45,
         color='#263238',
         transform=ax_sum.transAxes,
     )
 
-    # Right half: label-balance bar uses full column height beside the stats.
-    ax_bar = ax_sum.inset_axes([0.52, 0.10, 0.46, 0.82])
+    # Short, wide stacked bar below all text: [left, bottom, width, height] in parent axes coords.
+    ax_bar = ax_sum.inset_axes([0.04, 0.06, 0.92, 0.20])
     ax_bar.set_facecolor('#fafafa')
-    ax_bar.barh([0], [n0 / n_g], left=0.0, height=0.82, color='#546e7a', edgecolor='white', linewidth=0.8)
-    ax_bar.barh([0], [n1 / n_g], left=n0 / n_g, height=0.82, color='#ef6c00', edgecolor='white', linewidth=0.8)
+    ax_bar.barh([0], [n0 / n_g], left=0.0, height=0.45, color='#546e7a', edgecolor='white', linewidth=0.8)
+    ax_bar.barh([0], [n1 / n_g], left=n0 / n_g, height=0.45, color='#ef6c00', edgecolor='white', linewidth=0.8)
     ax_bar.set_xlim(0, 1)
-    ax_bar.set_ylim(-0.55, 0.55)
+    ax_bar.set_ylim(-0.65, 0.65)
     ax_bar.set_yticks([])
     ax_bar.set_xticks([0, 0.5, 1.0])
     ax_bar.tick_params(axis='x', labelsize=7, colors='#424242')
-    ax_bar.set_xlabel('Class fraction', fontsize=7.5, color='#424242')
-    ax_bar.set_title('Label balance', fontsize=8.5, color='#37474f', pad=6)
+    ax_bar.set_xlabel('Class fraction', fontsize=7.5, color='#424242', labelpad=4)
+    ax_bar.set_title('Label balance', fontsize=8.5, color='#37474f', pad=8)
 
 
 def _sig_array(df: pd.DataFrame, value_col: str) -> tuple[np.ndarray, str]:
