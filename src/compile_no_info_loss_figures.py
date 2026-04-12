@@ -505,18 +505,34 @@ def compile_overview_figure(
         for c, metric in enumerate(ALL_METRICS):
             ax = axes[r, c]
             if metric == "edge_dist":
-                sd0 = resolve_seed_dir(results_dir, dataset, model, exp, tid, folds[0], seed)
-                if sd0 is None:
-                    ax.set_axis_off()
-                    continue
-                wname = wandb_display_name(model, folds[0], seed, tid)
-                k = plot_edge_histogram_on_axis(
-                    ax, sd0, wandb_mod, wandb_entity, wandb_project, wname, color="C0", alpha=0.8
-                )
-                if not k:
+                any_drawn = False
+                # Overlay all requested folds in the same edge-distribution cell.
+                # First fold uses the base axis; additional folds use twinx to avoid
+                # conflicting y-scales when histogram counts differ by fold.
+                for fi, fold in enumerate(folds):
+                    sd = resolve_seed_dir(results_dir, dataset, model, exp, tid, fold, seed)
+                    if sd is None:
+                        continue
+                    target_ax = ax if fi == 0 else ax.twinx()
+                    wname = wandb_display_name(model, fold, seed, tid)
+                    k = plot_edge_histogram_on_axis(
+                        target_ax,
+                        sd,
+                        wandb_mod,
+                        wandb_entity,
+                        wandb_project,
+                        wname,
+                        color=f"C{fi % 10}",
+                        alpha=0.65 if fi == 0 else 0.45,
+                    )
+                    if k:
+                        any_drawn = True
+                        if k == "wandb":
+                            target_ax.set_ylabel(f"count (f{fold})", fontsize=7)
+                        else:
+                            target_ax.set_ylabel(f"approx. (f{fold})", fontsize=7)
+                if not any_drawn:
                     ax.text(0.5, 0.5, "—", ha="center", va="center", transform=ax.transAxes)
-                elif k == "local":
-                    ax.set_ylabel("approx.")
             else:
                 fold_curves = {}
                 for fold in folds:
