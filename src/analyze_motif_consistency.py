@@ -1081,9 +1081,11 @@ def plot_score_vs_impact(seed_dir, split='test', output_dir=None, model_name=Non
         motif_impact_path = seed_dir / 'masked-edge-impact.jsonl'  # legacy fallback
 
     has_motif = node_scores_path.exists() and motif_impact_path.exists()
+    motif_xy_for_combined = None
     if has_motif:
         xs, ys = get_motif_level_score_impact_points(seed_dir, split)
         if xs is not None and ys is not None and len(xs):
+            motif_xy_for_combined = (xs, ys)
             fig, ax = plt.subplots(figsize=(9, 6))
             ax.scatter(xs, ys, alpha=0.3, s=8, c='#2196F3', edgecolors='none')
             if final_r is not None:
@@ -1175,9 +1177,8 @@ def plot_score_vs_impact(seed_dir, split='test', output_dir=None, model_name=Non
 
     # ── Combined figure (motif-level + individual node) ──
     panels = []
-    if has_motif and common_keys:
-        xs_m = np.array([motif_avg_score[k] for k in common_keys])
-        ys_m = np.array([motif_impacts[k] for k in common_keys])
+    if motif_xy_for_combined is not None:
+        xs_m, ys_m = motif_xy_for_combined
         panels.append(('Motif-Level (Feature+Edge)', xs_m, ys_m, '#2196F3', 8, 0.3))
     if indiv_node_data is not None:
         panels.append(('Individual Node (Feature+Edge)',
