@@ -126,9 +126,9 @@ def _motif_labels(
 ) -> list[str]:
     """
     tick_style:
-      two_line — motif id on one line, truncated SMILES on the next (readable for few motifs).
-      one_line — single line ``id: SMILES`` (truncated).
-      id_only — motif id only (best for dense heatmaps; cross-ref association CSV for SMILES).
+      two_line — long SMILES split across two lines (no motif id).
+      one_line — single line of truncated SMILES only.
+      id_only — motif id only (dense grids; cross-ref CSV for SMILES).
     """
     if tick_style not in ('two_line', 'one_line', 'id_only'):
         raise ValueError(f'tick_style must be two_line|one_line|id_only, got {tick_style!r}')
@@ -140,27 +140,22 @@ def _motif_labels(
             out.append(str(mid))
             continue
         if pd.isna(smi) or smi is None:
-            out.append(str(mid))
+            out.append('—')
             continue
         t = str(smi)
         if tick_style == 'one_line':
-            # max_len = max total characters for the tick (id + ': ' + SMILES).
-            prefix = f'{mid}: '
-            raw = prefix + t
-            if len(raw) <= max_len:
-                out.append(raw)
-                continue
-            allow = max(4, max_len - len(prefix) - 1)
-            t2 = (t[:allow] + '…') if len(t) > allow else t
-            raw2 = prefix + t2
-            if len(raw2) > max_len:
-                raw2 = raw2[: max_len - 1] + '…'
-            out.append(raw2)
+            if len(t) <= max_len:
+                out.append(t)
+            else:
+                out.append(t[: max_len - 1] + '…')
             continue
-        # two_line
-        if len(t) > max_len:
-            t = t[: max_len - 1] + '…'
-        out.append(f'{mid}\n{t}')
+        # two_line: two chunks of SMILES, max_len ≈ chars per line
+        if len(t) <= max_len:
+            out.append(t)
+        elif len(t) <= 2 * max_len:
+            out.append(t[:max_len] + '\n' + t[max_len:])
+        else:
+            out.append(t[:max_len] + '\n' + t[max_len : 2 * max_len - 1] + '…')
     return out
 
 

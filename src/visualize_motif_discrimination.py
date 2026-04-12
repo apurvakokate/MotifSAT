@@ -10,8 +10,8 @@ For each ``--panel`` dataset, produces **one vertical block** with:
 2. **Motif prevalence** — histogram of ``n_present`` (how often each motif appears in the split).
 3. **Significance distribution** — histogram of :math:`-\\log_{10}(p)` or :math:`-\\log_{10}(q)`.
 4. **Volcano** — **every motif** as a point: x = :math:`\\log_2` odds ratio (y=1 | present vs absent),
-   y = :math:`-\\log_{10}(p)` (or BH q). Motifs with :math:`-\\log_{10}(p_\\mathrm{Fisher}) \\geq 10` get a text label
-   (see ``--annotate-min-neglog10-p``; use ``0`` to turn off).
+   y = :math:`-\\log_{10}(p)` (or BH q). Motifs with :math:`-\\log_{10}(p_\\mathrm{Fisher}) \\geq 10` get a
+   text label (truncated SMILES only; see ``--annotate-min-neglog10-p``; use ``0`` to turn off).
 
 Example::
 
@@ -130,14 +130,13 @@ def _lor_color(lor: float) -> str:
 
 
 def _volcano_motif_label(row: pd.Series, max_len: int = 26) -> str:
-    mid = int(row['motif_id'])
     smi = row.get('motif_smiles')
     if pd.isna(smi) or smi is None or str(smi).strip() == '':
-        return f'id={mid}'
+        return '—'
     s = str(smi).strip()
     if len(s) > max_len:
         s = s[: max_len - 1] + '…'
-    return f'{mid}: {s}'
+    return s
 
 
 def annotate_volcano_fisher_p(
