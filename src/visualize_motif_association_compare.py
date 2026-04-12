@@ -10,9 +10,10 @@ Produces (under ``--out_dir``):
 2. ``compare_motif_motif_<dependence>.png`` — motif–motif dependence heatmaps (Φ or Jaccard),
    one panel per dataset, **shared** color limits.
 
-Requires precomputed ``*_motif_class_association.csv`` per dataset for the descriptive figure
-(under ``<data_dir>/motif_association/``). Heatmaps load **live** graph–motif presence
-(see ``visualize_motif_motif_dependence.py``).
+For the descriptive figure, expects ``*_motif_class_association.csv`` under
+``<data_dir>/motif_association/``. If a file is missing, this script **runs**
+``compute_motif_class_association.py`` for that dataset (unless ``--no-compute-association``).
+Heatmaps load **live** graph–motif presence (see ``visualize_motif_motif_dependence.py``).
 
 Example::
 
@@ -26,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import subprocess
 import sys
 from pathlib import Path
 
@@ -56,6 +58,69 @@ from visualize_motif_motif_dependence import (
 
 def default_association_csv(data_dir: Path, dataset: str, fold: int, which_split: str) -> Path:
     return data_dir / 'motif_association' / f'{dataset}_fold{fold}_{which_split}_motif_class_association.csv'
+
+
+def ensure_association_csv(
+    *,
+    dataset: str,
+    csv_path: Path,
+    data_dir: Path,
+    fold: int,
+    which_split: str,
+    algorithm: str,
+    dictionary_path: str | None,
+    dictionary_fold_variant: str,
+    folds_csv: str | None,
+    min_support: int,
+) -> None:
+    """Run ``compute_motif_class_association.py`` if ``csv_path`` is missing."""
+    if csv_path.is_file():
+        return
+
+    src_dir = Path(__file__).resolve().parent
+    compute_script = src_dir / 'compute_motif_class_association.py'
+    if not compute_script.is_file():
+        raise FileNotFoundError(
+            f'Missing association CSV {csv_path} and compute script not found at {compute_script}',
+        )
+
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    cmd: list[str] = [
+        sys.executable,
+        str(compute_script),
+        '--dataset',
+        dataset,
+        '--fold',
+        str(fold),
+        '--which_split',
+        which_split,
+        '--data_dir',
+        str(data_dir),
+        '--algorithm',
+        algorithm,
+        '--dictionary_fold_variant',
+        dictionary_fold_variant,
+        '--min_support',
+        str(min_support),
+    ]
+    if dictionary_path:
+        cmd.extend(['--dictionary_path', dictionary_path])
+    if folds_csv:
+        cmd.extend(['--csv_file', folds_csv])
+
+    print('=' * 60)
+    print(f'  Computing motif–class association → {csv_path}')
+    print('=' * 60)
+    r = subprocess.run(cmd, cwd=str(src_dir))
+    if r.returncode != 0:
+        raise RuntimeError(
+            f'compute_motif_class_association failed (exit {r.returncode}). '
+            'Check FOLDS CSV / dictionary paths, or pass --csv_file to your fold CSV.',
+        )
+    if not csv_path.is_file():
+        raise FileNotFoundError(
+            f'Association CSV still missing after compute: {csv_path}',
+        )
 
 
 def _sig_array(df: pd.DataFrame, value_col: str) -> tuple[np.ndarray, str]:
@@ -351,9 +416,14 @@ def main():
     p.add_argument('--fig_width_per_col', type=float, default=4.2)
     p.add_argument('--title_suffix', type=str, default='')
     p.add_argument(
+        '--no-compute-association',
+        action='store_true',
+        help='If association CSV is missing, exit with error instead of running compute_motif_class_association.py',
+    )
+    p.add_argument(
         '--skip_descriptive',
         action='store_true',
-        help='Only write motif–motif comparison (requires association CSVs unused)',
+        help='Only write motif–motif comparison (skips descriptive plot and CSV check)',
     )
     p.add_argument(
         '--skip_heatmap',
@@ -375,15 +445,30 @@ def main():
     names = list(dict.fromkeys(names))
 
     columns: list[tuple[str, Path]] = []
-    for ds in names:
-        csv_assoc = default_association_csv(data_dir, ds, args.fold, args.which_split)
-        if not csv_assoc.is_file():
-            raise FileNotFoundError(
-                f'Missing association CSV: {csv_assoc}\n'
-                f'Run: python compute_motif_class_association.py --dataset {ds} --fold {args.fold} '
-                f'--which_split {args.which_split}',
-            )
-        columns.append((ds, csv_assoc))
+    if not args.skip_descriptive:
+        folds_for_compute = args.csv_file if len(names) == 1 else None
+        for ds in names:
+            csv_assoc = default_association_csv(data_dir, ds, args.fold, args.which_split)
+            if not csv_assoc.is_file():
+                if args.no_compute_association:
+                    raise FileNotFoundError(
+                        f'Missing association CSV: {csv_assoc}\n'
+                        f'Run: python compute_motif_class_association.py --dataset {ds} --fold {args.fold} '
+                        f'--which_split {args.which_split} --data_dir {data_dir}',
+                    )
+                ensure_association_csv(
+                    dataset=ds,
+                    csv_path=csv_assoc,
+                    data_dir=data_dir,
+                    fold=args.fold,
+                    which_split=args.which_split,
+                    algorithm=args.algorithm,
+                    dictionary_path=args.dictionary_path,
+                    dictionary_fold_variant=args.dictionary_fold_variant,
+                    folds_csv=folds_for_compute,
+                    min_support=args.min_support,
+                )
+            columns.append((ds, csv_assoc))
 
     if not args.skip_descriptive:
         plot_compare_descriptive(
