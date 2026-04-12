@@ -148,15 +148,18 @@ def plot_motif_motif_heatmap(
     colorbar_label: str,
 ):
     n = M.shape[0]
-    fig, ax = plt.subplots(figsize=fig_size, dpi=dpi)
+    fig, ax = plt.subplots(figsize=fig_size, dpi=dpi, constrained_layout=True)
     im = ax.imshow(M, cmap=cmap, aspect='equal', vmin=vmin, vmax=vmax)
     ax.set_xticks(np.arange(n))
     ax.set_yticks(np.arange(n))
-    ax.set_xticklabels(labels, fontsize=6, rotation=90, ha='center')
-    ax.set_yticklabels(labels, fontsize=6)
-    plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label=colorbar_label)
+    ax.set_xticklabels(
+        labels, fontsize=6, rotation=90, ha='center', va='top', rotation_mode='anchor',
+    )
+    ax.set_yticklabels(labels, fontsize=6, ha='right')
+    ax.tick_params(axis='x', which='major', pad=3, length=3)
+    ax.tick_params(axis='y', which='major', pad=3, length=3)
+    plt.colorbar(im, ax=ax, fraction=0.046, pad=0.08, label=colorbar_label)
     ax.set_title(title, fontsize=10)
-    fig.tight_layout()
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=dpi, bbox_inches='tight', facecolor='white')

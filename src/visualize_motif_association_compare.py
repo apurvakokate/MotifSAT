@@ -355,7 +355,7 @@ def plot_compare_motif_motif(
     max_w = max(m.shape[0] for m in mats)
     fig_w = min(4.0 + 1.05 * max_w, 16.0) * n * 0.42
     fig_h = min(fig_h_per_panel + 0.12 * max_w, 18.0)
-    fig, axes = plt.subplots(1, n, figsize=(fig_w, fig_h), squeeze=False)
+    fig, axes = plt.subplots(1, n, figsize=(fig_w, fig_h), squeeze=False, constrained_layout=True)
     axr = axes[0, :] if n > 1 else [axes[0, 0]]
 
     for ax, M, lab, tit in zip(axr, mats, labels_list, titles):
@@ -363,15 +363,18 @@ def plot_compare_motif_motif(
         ax.set_xticks(np.arange(M.shape[0]))
         ax.set_yticks(np.arange(M.shape[0]))
         fs = max(4, min(7, int(520 // max(M.shape[0], 1))))
-        ax.set_xticklabels(lab, fontsize=fs, rotation=90, ha='center')
-        ax.set_yticklabels(lab, fontsize=fs)
+        # Keep labels outside cells: y right-aligned so text does not cover column 0;
+        # x anchored above tick line (va='top') so rotated labels do not sit on the heatmap.
+        ax.set_xticklabels(lab, fontsize=fs, rotation=90, ha='center', va='top', rotation_mode='anchor')
+        ax.set_yticklabels(lab, fontsize=fs, ha='right')
+        ax.tick_params(axis='x', which='major', pad=3, length=3)
+        ax.tick_params(axis='y', which='major', pad=3, length=3)
         ax.set_title(tit, fontsize=9)
-        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label=cbar_lbl)
+        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.08, label=cbar_lbl)
 
-    fig.suptitle('Motif–motif dependence (top label-associated motifs)', fontsize=11, y=1.02)
+    fig.suptitle('Motif–motif dependence (top label-associated motifs)', fontsize=11)
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.tight_layout()
     fig.savefig(out_path, dpi=dpi, bbox_inches='tight', facecolor='white')
     plt.close(fig)
     print(f'[INFO] Wrote {out_path.resolve()}')
