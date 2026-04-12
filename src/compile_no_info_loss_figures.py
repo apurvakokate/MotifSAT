@@ -51,6 +51,7 @@ DETERMINISTIC_ROWS: List[Tuple[str, str, str]] = [
 
 CURVE_METRICS: Tuple[str, ...] = ("train_loss", "valid_loss", "train_auroc", "valid_auroc")
 ALL_METRICS: Tuple[str, ...] = CURVE_METRICS + ("edge_dist",)
+DEFAULT_ARCHITECTURES: Tuple[str, ...] = ("GIN", "PNA", "GAT", "SAGE", "GCN")
 
 
 def _default_results_dir() -> str:
@@ -59,6 +60,21 @@ def _default_results_dir() -> str:
 
 def _default_out_dir() -> str:
     return os.path.join(os.path.dirname(__file__), "..", "figures")
+
+
+def _unique_output_path(path: Path, overwrite: bool) -> Path:
+    """Return a non-colliding output path unless overwrite=True."""
+    if overwrite or not path.exists():
+        return path
+    stem = path.stem
+    suffix = path.suffix
+    parent = path.parent
+    idx = 1
+    while True:
+        candidate = parent / f"{stem}__v{idx}{suffix}"
+        if not candidate.exists():
+            return candidate
+        idx += 1
 
 
 # ---------------------------------------------------------------------------
@@ -619,6 +635,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p.add_argument("--results-dir", type=str, default=_default_results_dir())
     p.add_argument("--dataset", type=str, default="Mutagenicity")
     p.add_argument("--model", type=str, default="GIN", help="Subfolder model_<name> in results tree.")
+    p.add_argument("--models", type=str, nargs="+", default=None, help="Run multiple architectures.")
+    p.add_argument(
+        "--all-architectures",
+        action="store_true",
+        help=f"Run all default architectures: {', '.join(DEFAULT_ARCHITECTURES)}",
+    )
     p.add_argument("--folds", type=int, nargs="+", default=[0, 1])
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--out-dir", type=str, default=_default_out_dir())
@@ -627,6 +649,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p.add_argument("--no-wandb", action="store_true", help="Skip W&B API; edge panels use local fallback only.")
     p.add_argument("--overview", action="store_true", help="Also write no_info_loss_overview_{stoch|det}.png (rows×5 cols).")
     p.add_argument("--csv", action="store_true", help="Write scalar table CSV next to PNG.")
+    p.add_argument(
+        "--only-overview-tables",
+        action="store_true",
+        help="Skip per-metric figures; save only overview grids and scalar tables.",
+    )
+    p.add_argument("--overwrite", action="store_true", help="Overwrite existing files instead of versioning names.")
     args = p.parse_args(argv)
 
     out_dir = Path(args.out_dir)
@@ -638,36 +666,50 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     project = args.wandb_project or f"GSAT-{args.dataset}"
 
+    if args.all_architectures:
+        model_list: List[str] = list(DEFAULT_ARCHITECTURES)
+    elif args.models:
+        model_list = list(args.models)
+    else:
+        model_list = [args.model]
+
+    save_overview = args.overview or args.only_overview_tables
+
     def run_regime(
+        model_name: str,
         name: str,
         rows: List[Tuple[str, str, str]],
         tag: str,
     ) -> None:
-        title_p = f"{args.dataset} {args.model} seed={args.seed} ({name})"
-        for metric in ALL_METRICS:
-            fig = compile_metric_figure(
-                metric,
-                rows,
-                args.results_dir,
-                args.dataset,
-                args.model,
-                args.folds,
-                args.seed,
-                wandb_mod,
-                args.wandb_entity,
-                project,
-                title_p,
-            )
-            outp = out_dir / f"no_info_loss_{metric}_{tag}.png"
-            fig.savefig(outp, dpi=150, bbox_inches="tight")
-            plt.close(fig)
-            print(f"[INFO] Wrote {outp}")
-        if args.overview:
+        title_p = f"{args.dataset} {model_name} seed={args.seed} ({name})"
+        if not args.only_overview_tables:
+            for metric in ALL_METRICS:
+                fig = compile_metric_figure(
+                    metric,
+                    rows,
+                    args.results_dir,
+                    args.dataset,
+                    model_name,
+                    args.folds,
+                    args.seed,
+                    wandb_mod,
+                    args.wandb_entity,
+                    project,
+                    title_p,
+                )
+                outp = _unique_output_path(
+                    out_dir / f"no_info_loss_{metric}_{tag}_model_{model_name}.png",
+                    overwrite=args.overwrite,
+                )
+                fig.savefig(outp, dpi=150, bbox_inches="tight")
+                plt.close(fig)
+                print(f"[INFO] Wrote {outp}")
+        if save_overview:
             fig_o = compile_overview_figure(
                 rows,
                 args.results_dir,
                 args.dataset,
-                args.model,
+                model_name,
                 args.folds,
                 args.seed,
                 wandb_mod,
@@ -675,26 +717,43 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 project,
                 title_p + " overview",
             )
-            op = out_dir / f"no_info_loss_overview_{tag}.png"
+            op = _unique_output_path(
+                out_dir / f"no_info_loss_overview_{tag}_model_{model_name}.png",
+                overwrite=args.overwrite,
+            )
             fig_o.savefig(op, dpi=150, bbox_inches="tight")
             plt.close(fig_o)
             print(f"[INFO] Wrote {op}")
-        csv_path = (out_dir / f"no_info_loss_scalar_table_{tag}.csv") if args.csv else None
+        csv_path = (
+            _unique_output_path(
+                out_dir / f"no_info_loss_scalar_table_{tag}_model_{model_name}.csv",
+                overwrite=args.overwrite,
+            )
+            if args.csv
+            else None
+        )
+        scalar_png = _unique_output_path(
+            out_dir / f"no_info_loss_scalar_table_{tag}_model_{model_name}.png",
+            overwrite=args.overwrite,
+        )
         render_scalar_table(
             name,
             rows,
             args.results_dir,
             args.dataset,
-            args.model,
+            model_name,
             args.folds,
             args.seed,
-            str(out_dir / f"no_info_loss_scalar_table_{tag}.png"),
+            str(scalar_png),
             str(csv_path) if csv_path else None,
         )
-        print(f"[INFO] Wrote {out_dir / f'no_info_loss_scalar_table_{tag}.png'}")
+        print(f"[INFO] Wrote {scalar_png}")
+        if csv_path:
+            print(f"[INFO] Wrote {csv_path}")
 
-    run_regime("no_info_loss (stochastic attention)", STOCHASTIC_ROWS, "stochastic")
-    run_regime("no_info_loss_deterministic_attn", DETERMINISTIC_ROWS, "deterministic")
+    for model_name in model_list:
+        run_regime(model_name, "no_info_loss (stochastic attention)", STOCHASTIC_ROWS, "stochastic")
+        run_regime(model_name, "no_info_loss_deterministic_attn", DETERMINISTIC_ROWS, "deterministic")
     return 0
 
 
