@@ -79,7 +79,19 @@ echo ""
 # # Skipped by default (slow). Uncomment to populate ${OUTPUT_BASE} with plots + consistency.
 # for EXP in "${EXPERIMENTS[@]}"; do
 #   for MODEL in "${MODELS[@]}"; do
-#     EXP_ROOT="${RESULTS_DIR}/${DATASET}/model_${MODEL}/experiment_${EXP}"
+#     # Resolve on-disk experiment folder from EXPERIMENT_GROUPS[EXP].experiment_name when available.
+#     EXP_DISK=$(python - <<'PY' "$EXP"
+# import sys
+# try:
+#     from run_mutagenicity_gsat_experiment import EXPERIMENT_GROUPS
+#     key = sys.argv[1]
+#     cfg = EXPERIMENT_GROUPS.get(key, {})
+#     print(cfg.get('experiment_name', key))
+# except Exception:
+#     print(sys.argv[1])
+# PY
+# )
+#     EXP_ROOT="${RESULTS_DIR}/${DATASET}/model_${MODEL}/experiment_${EXP_DISK}"
 #     if [[ ! -d "$EXP_ROOT" ]]; then
 #       echo "[SKIP] No directory: ${EXP_ROOT}"
 #       continue

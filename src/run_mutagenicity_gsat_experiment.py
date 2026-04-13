@@ -29,7 +29,7 @@ Active groups (EXPERIMENT_GROUPS):
   simplified_motif_readout_maxmean_z1 — same as simplified_motif_readout_maxmean but motif MLP input z_k = LN(z^(1)) || LN(max||mean) (emb_stop=0 mean-pool per motif + max_mean)
   simplified_motif_readout_maxmean_injection_ablation — maxmean + no info warmup; sweep injection 010 / 101 / 011 / 111
   simplified_motif_readout_maxmean_info_loss_ablation — maxmean + 010 + no warmup; sweep info_loss_coef ∈ {0.01, 0.1, 0.3}
-  no_info_loss — info_loss_coef=0, 010 injection; (1) base GSAT decay final_r=0.8, (2) motif readout max_mean + node sampling, (3) motif readout max_mean + motif sampling
+  no_info_loss — info_loss_coef=0, 011 injection; (1) base GSAT decay final_r=0.8, (2) motif readout max_mean + node sampling, (3) motif readout max_mean + motif sampling
   no_info_loss_deterministic_attn — same as no_info_loss intent but no_attention_sampling=True (σ(logits) only, no Concrete noise); (1) base GSAT, (2) motif readout max_mean (node-level motif sampling)
 
 Injection codes map to GSAT flags (w_node ≡ w_feat): 100=w_feat only, 010=w_message only, 001=w_readout only, 111=all three.
@@ -226,7 +226,7 @@ EXPERIMENT_GROUPS = {
         ],
     },
     'no_info_loss': {
-        'experiment_name': 'no_info_loss',
+        'experiment_name': 'no_info_loss_inj011',
         'variants': [
             {
                 'variant_id': 'no_info_loss_base',
@@ -236,7 +236,7 @@ EXPERIMENT_GROUPS = {
                     'final_r': 0.8,
                     **_BASE_GSAT_NONE,
                     'info_loss_coef': 0.0,
-                    **INJECTION_PRESETS['010'],
+                    **INJECTION_PRESETS['011'],
                 },
                 'learn_edge_att': False,
             },
@@ -253,7 +253,7 @@ EXPERIMENT_GROUPS = {
                     'between_motif_coef': 0,
                     'pred_loss_coef': 1.0,
                     'info_loss_coef': 0.0,
-                    **INJECTION_PRESETS['010'],
+                    **INJECTION_PRESETS['011'],
                 },
                 'learn_edge_att': False,
             },
@@ -270,14 +270,14 @@ EXPERIMENT_GROUPS = {
                     'between_motif_coef': 0,
                     'pred_loss_coef': 1.0,
                     'info_loss_coef': 0.0,
-                    **INJECTION_PRESETS['010'],
+                    **INJECTION_PRESETS['011'],
                 },
                 'learn_edge_att': False,
             },
         ],
     },
     'no_info_loss_deterministic_attn': {
-        'experiment_name': 'no_info_loss_deterministic_attn',
+        'experiment_name': 'no_info_loss_deterministic_attn_inj011',
         'variants': [
             {
                 'variant_id': 'no_info_loss_det_base',
@@ -288,7 +288,7 @@ EXPERIMENT_GROUPS = {
                     **_BASE_GSAT_NONE,
                     'info_loss_coef': 0.0,
                     'no_attention_sampling': True,
-                    **INJECTION_PRESETS['010'],
+                    **INJECTION_PRESETS['011'],
                 },
                 'learn_edge_att': False,
             },
@@ -306,7 +306,7 @@ EXPERIMENT_GROUPS = {
                     'pred_loss_coef': 1.0,
                     'info_loss_coef': 0.0,
                     'no_attention_sampling': True,
-                    **INJECTION_PRESETS['010'],
+                    **INJECTION_PRESETS['011'],
                 },
                 'learn_edge_att': False,
             },

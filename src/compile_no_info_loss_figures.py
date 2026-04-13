@@ -8,7 +8,7 @@ Row ↔ tuning_id mapping (stochastic attention, experiment `no_info_loss`):
   - Row 1 — motif readout max_mean + node-level motif sampling: `no_info_loss_maxmean_node_samp`
   - Row 2 — motif readout max_mean + motif-level sampling: `no_info_loss_maxmean_motif_samp`
 
-Deterministic attention (`no_attention_sampling=True`, experiment `no_info_loss_deterministic_attn`)
+Deterministic attention (`no_attention_sampling=True`, experiment `no_info_loss_deterministic_attn_inj011`)
 has only two registered variants (no separate deterministic motif-sampling row):
   - Row 0 — base: `no_info_loss_det_base`
   - Row 1 — readout max_mean + node-level motif sampling: `no_info_loss_det_maxmean`
@@ -39,14 +39,14 @@ import numpy as np
 # ---------------------------------------------------------------------------
 
 STOCHASTIC_ROWS: List[Tuple[str, str, str]] = [
-    ("Base", "no_info_loss", "no_info_loss_base"),
-    ("Readout + node samp.", "no_info_loss", "no_info_loss_maxmean_node_samp"),
-    ("Readout + motif samp.", "no_info_loss", "no_info_loss_maxmean_motif_samp"),
+    ("Base", "no_info_loss_inj011", "no_info_loss_base"),
+    ("Readout + node samp.", "no_info_loss_inj011", "no_info_loss_maxmean_node_samp"),
+    ("Readout + motif samp.", "no_info_loss_inj011", "no_info_loss_maxmean_motif_samp"),
 ]
 
 DETERMINISTIC_ROWS: List[Tuple[str, str, str]] = [
-    ("Base", "no_info_loss_deterministic_attn", "no_info_loss_det_base"),
-    ("Readout + node samp.", "no_info_loss_deterministic_attn", "no_info_loss_det_maxmean"),
+    ("Base", "no_info_loss_deterministic_attn_inj011", "no_info_loss_det_base"),
+    ("Readout + node samp.", "no_info_loss_deterministic_attn_inj011", "no_info_loss_det_maxmean"),
 ]
 
 CURVE_METRICS: Tuple[str, ...] = ("train_loss", "valid_loss", "train_auroc", "valid_auroc")

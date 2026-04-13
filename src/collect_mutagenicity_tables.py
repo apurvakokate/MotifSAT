@@ -800,17 +800,29 @@ def find_results(results_dir: Path, experiment_name: str, verbose: bool = False,
         print(f'[WARN] Directory does not exist: {base}')
         return []
 
-    experiment_dir = f'experiment_{experiment_name}'
+    experiment_dirs = {f'experiment_{experiment_name}'}
+    # Some groups use a custom on-disk experiment_name in run_mutagenicity_gsat_experiment.py.
+    # Keep analysis calls stable by accepting either group key or configured experiment_name.
+    try:
+        from run_mutagenicity_gsat_experiment import EXPERIMENT_GROUPS  # type: ignore
+
+        cfg = EXPERIMENT_GROUPS.get(experiment_name)
+        if isinstance(cfg, dict):
+            cfg_exp_name = cfg.get('experiment_name')
+            if isinstance(cfg_exp_name, str) and cfg_exp_name:
+                experiment_dirs.add(f'experiment_{cfg_exp_name}')
+    except Exception:
+        pass
     records = []
 
     candidate_seed_dirs = set()
 
     for p in base.rglob('final_metrics.json'):
-        if experiment_dir in p.parts:
+        if any(ed in p.parts for ed in experiment_dirs):
             candidate_seed_dirs.add(p.parent)
 
     for p in base.rglob('attention_distributions.jsonl'):
-        if experiment_dir in p.parts:
+        if any(ed in p.parts for ed in experiment_dirs):
             candidate_seed_dirs.add(p.parent)
 
     if verbose:
