@@ -144,7 +144,7 @@ def association_table(
     motif_smiles: Sequence[str | None] | None,
     min_support: int = 5,
 ) -> pd.DataFrame:
-    """One row per motif id with Fisher / chi2 p-values and counts."""
+    """One row per motif id with Fisher / chi2 p-values, counts, and class-conditional gap stats."""
     rows = []
     y = np.asarray(y).astype(int).ravel()
     n = len(y)
@@ -174,6 +174,26 @@ def association_table(
     if not rows:
         return pd.DataFrame()
     df = pd.DataFrame(rows)
+    # Class-conditional motif prevalence and discriminativeness:
+    # p(m|y=0) = c / (a+c), p(m|y=1) = d / (b+d), delta = p(m|y=1) - p(m|y=0)
+    n_y0 = (df['contingency_a_absent_y0'] + df['contingency_c_present_y0']).astype(float)
+    n_y1 = (df['contingency_b_absent_y1'] + df['contingency_d_present_y1']).astype(float)
+    p_m_given_y0 = np.divide(
+        df['contingency_c_present_y0'].astype(float),
+        n_y0,
+        out=np.full(len(df), np.nan, dtype=float),
+        where=n_y0 > 0,
+    )
+    p_m_given_y1 = np.divide(
+        df['contingency_d_present_y1'].astype(float),
+        n_y1,
+        out=np.full(len(df), np.nan, dtype=float),
+        where=n_y1 > 0,
+    )
+    df['p_motif_given_y0'] = p_m_given_y0
+    df['p_motif_given_y1'] = p_m_given_y1
+    df['delta_p_motif_y1_minus_y0'] = p_m_given_y1 - p_m_given_y0
+    df['abs_delta_p_motif'] = np.abs(df['delta_p_motif_y1_minus_y0'])
     fp = df['fisher_p'].astype(float)
     df['fisher_q_bh'] = _benjamini_hochberg(fp.to_numpy())
     return df
