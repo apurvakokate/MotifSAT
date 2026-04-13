@@ -1,9 +1,11 @@
 #!/usr/bin/env python
 """
-Compare model attention-derived motif importance with Fisher-significant motifs (ROC / AUC).
+Compare model attention-derived motif importance with class-discriminative motifs (|delta|).
 
 For each node_scores.jsonl under RESULTS_DIR, aggregate mean |score| per global motif_id on a split,
-join with precomputed association CSV, and compute ROC AUC treating Fisher FDR significance as label.
+join with precomputed association CSV, and compute:
+- ROC AUC where positive label = top-|delta| motifs (by quantile)
+- Spearman correlation between mean |score| and |delta|
 
 Writes a CSV table (e.g. motif_importance_vs_fisher_roc.csv).
 """
@@ -26,6 +28,11 @@ try:
     from sklearn.metrics import roc_auc_score
 except ImportError:
     roc_auc_score = None
+
+try:
+    from scipy.stats import spearmanr
+except ImportError:
+    spearmanr = None
 
 
 def mean_abs_score_per_motif(jsonl_path: Path, split: str = 'test') -> dict[int, float]:
@@ -56,34 +63,84 @@ def parse_result_path(seed_dir: Path) -> dict:
     return out
 
 
-def one_auc(
+def motif_abs_delta(row: pd.Series) -> float | None:
+    """
+    |delta| = |P(motif|y=1) - P(motif|y=0)| from contingency:
+              y=0   y=1
+    absent      a     b
+    present     c     d
+    """
+    need = [
+        'contingency_a_absent_y0',
+        'contingency_b_absent_y1',
+        'contingency_c_present_y0',
+        'contingency_d_present_y1',
+    ]
+    for k in need:
+        if k not in row or pd.isna(row[k]):
+            return None
+    a = float(row['contingency_a_absent_y0'])
+    b = float(row['contingency_b_absent_y1'])
+    c = float(row['contingency_c_present_y0'])
+    d = float(row['contingency_d_present_y1'])
+    n0 = a + c
+    n1 = b + d
+    if n0 <= 0 or n1 <= 0:
+        return None
+    p_m_given_y0 = c / n0
+    p_m_given_y1 = d / n1
+    return float(abs(p_m_given_y1 - p_m_given_y0))
+
+
+def paired_score_and_delta(
     assoc: pd.DataFrame,
     mean_score: dict[int, float],
-    *,
-    use_fdr_q: bool,
-) -> tuple[float | None, int]:
-    """ROC AUC: positive label = Fisher-significant motif; score = mean |attention|."""
-    if roc_auc_score is None:
-        return None, 0
-    y = []
-    s = []
+) -> tuple[np.ndarray, np.ndarray]:
+    """Collect aligned vectors: score = mean |attention|, target = |delta|."""
+    s: list[float] = []
+    d: list[float] = []
     for _, row in assoc.iterrows():
         mid = int(row['motif_id'])
         if mid not in mean_score:
             continue
-        if use_fdr_q:
-            if 'fisher_q_bh' not in row or pd.isna(row['fisher_q_bh']):
-                continue
-            lab = float(row['fisher_q_bh']) < 0.05
-        else:
-            if 'fisher_p' not in row or pd.isna(row['fisher_p']):
-                continue
-            lab = float(row['fisher_p']) < 0.05
-        y.append(int(lab))
+        dd = motif_abs_delta(row)
+        if dd is None or not np.isfinite(dd):
+            continue
         s.append(float(mean_score[mid]))
-    if len(y) < 3 or len(set(y)) < 2:
-        return float('nan'), len(y)
-    return float(roc_auc_score(y, s)), len(y)
+        d.append(float(dd))
+    return np.asarray(s, dtype=float), np.asarray(d, dtype=float)
+
+
+def auc_vs_delta_top_quantile(
+    scores: np.ndarray,
+    deltas: np.ndarray,
+    *,
+    delta_label_quantile: float,
+) -> tuple[float | None, int, float]:
+    """
+    ROC AUC where positive motifs are top-|delta| motifs by quantile threshold.
+    """
+    if roc_auc_score is None:
+        return None, 0, float('nan')
+    if scores.size < 3 or deltas.size < 3:
+        return float('nan'), int(min(scores.size, deltas.size)), float('nan')
+    thr = float(np.nanquantile(deltas, delta_label_quantile))
+    y = (deltas >= thr).astype(int)
+    if len(np.unique(y)) < 2:
+        return float('nan'), int(len(y)), thr
+    return float(roc_auc_score(y, scores)), int(len(y)), thr
+
+
+def spearman_score_vs_delta(scores: np.ndarray, deltas: np.ndarray) -> tuple[float | None, float | None, int]:
+    """Spearman rank correlation between score and |delta|."""
+    if spearmanr is None:
+        return None, None, 0
+    if scores.size < 3 or deltas.size < 3:
+        return float('nan'), float('nan'), int(min(scores.size, deltas.size))
+    rho, pval = spearmanr(scores, deltas)
+    rho = float(rho) if np.isfinite(rho) else float('nan')
+    pval = float(pval) if np.isfinite(pval) else float('nan')
+    return rho, pval, int(len(scores))
 
 
 def main():
@@ -92,6 +149,12 @@ def main():
     p.add_argument('--results_dir', type=str, default=os.environ.get('RESULTS_DIR', '../tuning_results'))
     p.add_argument('--dataset', type=str, default=os.environ.get('DATASET', 'Mutagenicity'))
     p.add_argument('--split', type=str, default='test', help='Which split in node_scores.jsonl')
+    p.add_argument(
+        '--delta_label_quantile',
+        type=float,
+        default=0.75,
+        help='Positive motif label for ROC is |delta| >= this quantile (default: top 25%%).',
+    )
     p.add_argument('--out_csv', type=str, default='motif_importance_vs_fisher_roc.csv')
     args = p.parse_args()
 
@@ -115,16 +178,24 @@ def main():
         if not mean_score:
             continue
         meta = parse_result_path(seed_dir)
-        auc_p, n_m = one_auc(assoc, mean_score, use_fdr_q=False)
-        auc_q, n_mq = one_auc(assoc, mean_score, use_fdr_q=True)
+        scores, deltas = paired_score_and_delta(assoc, mean_score)
+        auc_d, n_m_auc, thr = auc_vs_delta_top_quantile(
+            scores,
+            deltas,
+            delta_label_quantile=args.delta_label_quantile,
+        )
+        rho_d, rho_p, n_m_corr = spearman_score_vs_delta(scores, deltas)
         row = {
             **meta,
             'node_scores_jsonl': str(jsonl),
             'n_motifs_with_scores': len(mean_score),
-            'auc_score_vs_fisher_p_lt005': auc_p,
-            'auc_score_vs_fisher_q_lt005': auc_q,
-            'n_motifs_used_auc_p': n_m,
-            'n_motifs_used_auc_q': n_mq,
+            'delta_label_quantile': float(args.delta_label_quantile),
+            'delta_threshold_value': thr,
+            'auc_score_vs_abs_delta_topq': auc_d,
+            'n_motifs_used_auc_delta': n_m_auc,
+            'spearman_score_vs_abs_delta': rho_d,
+            'spearman_pvalue_score_vs_abs_delta': rho_p,
+            'n_motifs_used_spearman': n_m_corr,
         }
         rows.append(row)
 
