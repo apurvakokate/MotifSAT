@@ -9,7 +9,7 @@
 # vanilla_gnn uses train_vanilla_gnn_one_seed: empty node_scores.jsonl → consistency step is skipped.
 #
 # Motif–class Fisher table: compute_motif_class_association.py caches under ${DATA_DIR}/motif_association/
-# (training split by default). If present, get_data_loaders attaches node_motif_assoc_p to each graph.
+# (full dataset by default via --which_split all). If present, get_data_loaders attaches node_motif_assoc_p to each graph.
 # motif_stat_vs_importance_roc.py writes ${OUTPUT_BASE}/motif_importance_vs_fisher_roc_${DATASET}.csv
 
 set -euo pipefail
@@ -160,7 +160,8 @@ python collect_best_results.py \
 FOLD="${FOLD:-0}"
 DATA_DIR="${DATA_DIR:-../data}"
 ASSOC_DIR="${DATA_DIR}/motif_association"
-STEM="${DATASET}_fold${FOLD}_training"
+ASSOC_SPLIT="${ASSOC_SPLIT:-all}"
+STEM="${DATASET}_fold${FOLD}_${ASSOC_SPLIT}"
 ASSOC_CSV="${ASSOC_DIR}/${STEM}_motif_class_association.csv"
 mkdir -p "${ASSOC_DIR}" "${OUTPUT_BASE}"
 if [[ ! -f "${ASSOC_CSV}" ]]; then
@@ -170,6 +171,7 @@ if [[ ! -f "${ASSOC_CSV}" ]]; then
   python compute_motif_class_association.py \
     --dataset "${DATASET}" \
     --fold "${FOLD}" \
+    --which_split "${ASSOC_SPLIT}" \
     --data_dir "${DATA_DIR}" || echo "[WARN] compute_motif_class_association failed (set --csv_file to your FOLDS CSV if needed)"
 else
   echo "[INFO] Using cached motif association table: ${ASSOC_CSV}"

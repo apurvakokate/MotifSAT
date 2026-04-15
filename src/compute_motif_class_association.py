@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-Precompute motif–class association (Fisher / chi-squared) on the training split and save CSV + p-value tensor.
+Precompute motif–class association (Fisher / chi-squared) and save CSV + p-value tensor.
 
 Typical use (from repo `src/`):
   python compute_motif_class_association.py --dataset Mutagenicity --fold 0
@@ -74,9 +74,9 @@ def main():
     p.add_argument(
         '--which_split',
         type=str,
-        default='training',
+        default='all',
         choices=['training', 'valid', 'test', 'train_valid', 'all'],
-        help='Contingency table built from this CSV `group` (default: training only, no test leakage).',
+        help='Contingency table built from this CSV `group` (default: all rows / full dataset).',
     )
     args = p.parse_args()
 
