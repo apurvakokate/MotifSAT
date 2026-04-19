@@ -20,6 +20,7 @@ Active groups (EXPERIMENT_GROUPS):
   motif_readout_maxmean_node_vs_edge_att — max_mean + entropy; node-injection vs edge_atten downstream usage
   motif_readout_pred_info_only — L_pred + L_info only; max_mean + motif-level sampling; sweep motif_readout_emb_stop
     (encoder | layer 0..2 | final) to find discriminative motif α without extra losses
+  test_gradients — focused readout run with motif grad probe enabled (pred vs KL/info per motif)
   base_gsat_decay_r_minority_global — same as base_gsat_decay_r but motif pickles from FOLDS/minority_global/...
   factored_motif_attention_grid — 12 variants (M1–M4 × N1–N3): multi-granularity z_k, factored node logits, motif IB on mean node α (see experiment_factored_motif.py)
   factored_motif_additive — LN(z^(1)||z^att), MLP motif ℓ_k, node ℓ=ℓ_k+δ(intra), IB on σ(ℓ_k); sweep motif_ib_final_r ∈ {0.7,0.5,0.3}
@@ -220,6 +221,33 @@ EXPERIMENT_GROUPS = {
                     'pred_loss_coef': 1.0,
                     'info_loss_coef': 1.0,
                     **INJECTION_PRESETS['010'],
+                },
+                'learn_edge_att': False,
+            },
+        ],
+    },
+    'test_gradients': {
+        'experiment_name': 'test_gradients',
+        'variants': [
+            {
+                'variant_id': 'gradprobe_readout_maxmean_motifsamp_inj111',
+                'gsat_overrides': {
+                    'tuning_id': 'gradprobe_readout_maxmean_motifsamp_inj111',
+                    **_DECAY_R_BASE,
+                    'final_r': 0.8,
+                    'motif_incorporation_method': 'readout',
+                    'motif_pooling_method': 'max_mean',
+                    'motif_level_sampling': True,
+                    'motif_level_info_loss': True,
+                    'motif_loss_coef': 0,
+                    'between_motif_coef': 0,
+                    'pred_loss_coef': 1.0,
+                    'info_loss_coef': 1.0,
+                    'motif_grad_probe': True,
+                    'motif_grad_probe_every': 1,
+                    'motif_grad_probe_max_batches': 1,
+                    'motif_grad_probe_epochs': 5,
+                    **INJECTION_PRESETS['111'],
                 },
                 'learn_edge_att': False,
             },
@@ -1236,6 +1264,7 @@ def main():
         'simplified_motif_readout_maxmean_z1',
         'simplified_motif_readout_maxmean_injection_ablation',
         'simplified_motif_readout_maxmean_info_loss_ablation',
+        'test_gradients',
         'no_info_loss',
         'no_info_loss_deterministic_attn',
     }

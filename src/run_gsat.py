@@ -1290,6 +1290,10 @@ class GSAT(nn.Module):
         self.embedding_viz_max_motif_annotations = int(shared_config.get('embedding_viz_max_motif_annotations', 200))
         self.embedding_viz_skip_epoch0 = bool(shared_config.get('embedding_viz_skip_epoch0', True))
         self.embedding_viz_dpi = int(shared_config.get('embedding_viz_dpi', 300))
+        self.motif_grad_probe = bool(method_config.get('motif_grad_probe', False))
+        self.motif_grad_probe_every = max(1, int(method_config.get('motif_grad_probe_every', 1)))
+        self.motif_grad_probe_max_batches = max(1, int(method_config.get('motif_grad_probe_max_batches', 1)))
+        self.motif_grad_probe_epochs = int(method_config.get('motif_grad_probe_epochs', -1))
 
         self.epochs = method_config['epochs']
         self.pred_loss_coef = method_config['pred_loss_coef']
@@ -1540,6 +1544,12 @@ class GSAT(nn.Module):
                     f'[WARNING] Embedding PCA viz will be skipped: need binary single-label classification '
                     f'(got task={self.task_type}, multi_label={self.multi_label}, num_class={self.num_class}).'
                 )
+        if self.motif_grad_probe:
+            epoch_span = 'all' if self.motif_grad_probe_epochs < 0 else f'first {self.motif_grad_probe_epochs}'
+            print(
+                f'[INFO] Motif grad probe: ON (every={self.motif_grad_probe_every}, '
+                f'max_batches={self.motif_grad_probe_max_batches}, epochs={epoch_span})'
+            )
         # if self.motif_r_values is not None:
         #     print(f'[INFO] Score-based per-motif r: loaded {len(self.motif_r_values)} values')
         
@@ -1567,6 +1577,8 @@ class GSAT(nn.Module):
             f'fold{self.fold}_seed{self.random_state}'  # NO TIMESTAMP!
         )
         os.makedirs(self.seed_dir, exist_ok=True)
+        self.motif_grad_probe_path = os.path.join(self.seed_dir, 'motif_grad_probe.jsonl')
+        self._last_loss_terms = {}
         # Save configs
         with open(os.path.join(self.seed_dir, "method_config.yaml"), "w") as f:
             yaml.safe_dump(method_config, f, sort_keys=False)
@@ -1614,6 +1626,10 @@ class GSAT(nn.Module):
                 'motif_prior_gate_tanh': (
                     bool(self.motif_prior_gate_tanh) if self.motif_prior_node_gate else None
                 ),
+                'motif_grad_probe': self.motif_grad_probe,
+                'motif_grad_probe_every': self.motif_grad_probe_every,
+                'motif_grad_probe_max_batches': self.motif_grad_probe_max_batches,
+                'motif_grad_probe_epochs': self.motif_grad_probe_epochs,
             },
             'loss_coefficients': {
                 'pred_loss_coef': self.pred_loss_coef,
@@ -2107,6 +2123,11 @@ class GSAT(nn.Module):
             pred_loss + info_loss + within_term + between_term + diversity_term
             + entropy_term + motif_ib_term + align_term + interp_distill_term
         )
+        self._last_loss_terms = {
+            'pred': pred_loss,
+            'info': info_loss,
+            'total': loss,
+        }
 
         loss_dict = {
             'loss': loss.item(),
@@ -2162,6 +2183,88 @@ class GSAT(nn.Module):
         #     loss_dict['motif_graph_loss'] = aux_pred_loss.item()
         
         return loss, loss_dict
+
+    def _should_probe_motif_grads(self, epoch, batch_idx):
+        if not self.motif_grad_probe:
+            return False
+        if self.motif_method != 'readout':
+            return False
+        if self.motif_grad_probe_epochs >= 0 and epoch >= self.motif_grad_probe_epochs:
+            return False
+        if (batch_idx % self.motif_grad_probe_every) != 0:
+            return False
+        if (batch_idx // self.motif_grad_probe_every) >= self.motif_grad_probe_max_batches:
+            return False
+        return True
+
+    @staticmethod
+    def _safe_grad(scalar_loss, target, retain_graph):
+        if scalar_loss is None or target is None:
+            return None
+        if not isinstance(target, torch.Tensor) or not target.requires_grad:
+            return None
+        return torch.autograd.grad(
+            scalar_loss,
+            target,
+            retain_graph=retain_graph,
+            allow_unused=True,
+        )[0]
+
+    def _log_motif_grad_probe(self, epoch, batch_idx):
+        ctx = getattr(self, '_loss_ctx', None) or {}
+        motif_logit = ctx.get('motif_logit')
+        motif_emb = ctx.get('motif_emb')
+        motif_batch = ctx.get('motif_batch')
+        motif_ids = ctx.get('motif_ids')
+        if motif_logit is None or motif_batch is None:
+            return
+
+        pred_term = self._last_loss_terms.get('pred')
+        info_term = self._last_loss_terms.get('info')
+        total_term = self._last_loss_terms.get('total')
+        if pred_term is None or info_term is None or total_term is None:
+            return
+
+        g_pred_logit = self._safe_grad(pred_term, motif_logit, retain_graph=True)
+        g_info_logit = self._safe_grad(info_term, motif_logit, retain_graph=True)
+        g_total_logit = self._safe_grad(total_term, motif_logit, retain_graph=True)
+        g_pred_emb = self._safe_grad(pred_term, motif_emb, retain_graph=True) if motif_emb is not None else None
+        g_info_emb = self._safe_grad(info_term, motif_emb, retain_graph=True) if motif_emb is not None else None
+        g_total_emb = self._safe_grad(total_term, motif_emb, retain_graph=True) if motif_emb is not None else None
+
+        with torch.no_grad():
+            logit_vals = motif_logit.detach().view(-1).cpu()
+            batch_vals = motif_batch.detach().view(-1).cpu()
+            motif_id_vals = motif_ids.detach().view(-1).cpu() if motif_ids is not None else None
+            gp = None if g_pred_logit is None else g_pred_logit.detach().view(-1).cpu()
+            gi = None if g_info_logit is None else g_info_logit.detach().view(-1).cpu()
+            gt = None if g_total_logit is None else g_total_logit.detach().view(-1).cpu()
+            gep = None if g_pred_emb is None else g_pred_emb.detach().norm(dim=-1).view(-1).cpu()
+            gei = None if g_info_emb is None else g_info_emb.detach().norm(dim=-1).view(-1).cpu()
+            get = None if g_total_emb is None else g_total_emb.detach().norm(dim=-1).view(-1).cpu()
+            num_rows = int(logit_vals.numel())
+            with open(self.motif_grad_probe_path, 'a') as f:
+                for i in range(num_rows):
+                    rec = {
+                        'epoch': int(epoch),
+                        'batch_idx': int(batch_idx),
+                        'motif_row': int(i),
+                        'graph_idx_in_batch': int(batch_vals[i].item()),
+                        'motif_vocab_id': None if motif_id_vals is None else int(motif_id_vals[i].item()),
+                        'motif_logit': float(logit_vals[i].item()),
+                        'motif_alpha_soft': float(torch.sigmoid(logit_vals[i]).item()),
+                        'grad_pred_logit': 0.0 if gp is None else float(gp[i].item()),
+                        'grad_info_logit': 0.0 if gi is None else float(gi[i].item()),
+                        'grad_total_logit': 0.0 if gt is None else float(gt[i].item()),
+                        'grad_pred_motif_emb_l2': None if gep is None else float(gep[i].item()),
+                        'grad_info_motif_emb_l2': None if gei is None else float(gei[i].item()),
+                        'grad_total_motif_emb_l2': None if get is None else float(get[i].item()),
+                    }
+                    if self.motif_list is not None and rec['motif_vocab_id'] is not None:
+                        mv = rec['motif_vocab_id']
+                        if 0 <= mv < len(self.motif_list):
+                            rec['motif_name'] = str(self.motif_list[mv])
+                    f.write(json.dumps(rec) + '\n')
 
     def _effective_motif_prior_shift_scale(self, epoch):
         """Scheduled s(epoch) capped at motif_prior_shift_scale (target)."""
@@ -2287,9 +2390,11 @@ class GSAT(nn.Module):
                     'node_att': node_att,
                     'node_batch': data.batch,
                     'motif_batch': motif_batch,
+                    'motif_ids': motif_ids,
                     'inverse_indices': inverse_indices,
                     'dim_m': dim_m,
                     'motif_logit': motif_att_log_logits.squeeze(-1),
+                    'motif_emb': _z_k,
                     'motif_sizes': counts,
                     'motif_att_soft': motif_att_soft.squeeze(-1),
                     'motif_interp_logits': None,
@@ -2329,9 +2434,11 @@ class GSAT(nn.Module):
                     'node_att': node_att,
                     'node_batch': data.batch,
                     'motif_batch': motif_batch,
+                    'motif_ids': motif_ids,
                     'inverse_indices': inverse_indices,
                     'dim_m': dim_m,
                     'motif_logit': motif_att_log_logits.squeeze(-1),
+                    'motif_emb': _motif_emb_zk,
                     'motif_att_soft': motif_att_soft.squeeze(-1),
                     'motif_interp_logits': None,
                 }
@@ -2424,9 +2531,11 @@ class GSAT(nn.Module):
                     'node_att': node_att,
                     'node_batch': data.batch,
                     'motif_batch': motif_batch,
+                    'motif_ids': motif_ids,
                     'inverse_indices': inverse_indices,
                     'dim_m': dim_m,
                     'motif_logit': motif_att_log_logits.squeeze(-1),
+                    'motif_emb': motif_emb,
                     'motif_att_soft': motif_att_soft.squeeze(-1),
                     'motif_interp_logits': motif_interp_logits.squeeze(-1) if motif_interp_logits is not None else None,
                 }
@@ -3071,7 +3180,7 @@ class GSAT(nn.Module):
         att, loss, loss_dict, clf_logits = self.forward_pass(data, epoch, training=False)
         return att.data.cpu().reshape(-1), loss_dict, clf_logits.data.cpu()
 
-    def train_one_batch(self, data, epoch):
+    def train_one_batch(self, data, epoch, batch_idx=0):
         self.extractor.train()
         self.clf.train()
         if self.motif_clf is not None:
@@ -3081,6 +3190,8 @@ class GSAT(nn.Module):
 
         att, loss, loss_dict, clf_logits = self.forward_pass(data, epoch, training=True)
         self.optimizer.zero_grad()
+        if self._should_probe_motif_grads(epoch, batch_idx):
+            self._log_motif_grad_probe(epoch, batch_idx)
         loss.backward()
         self.optimizer.step()
         return att.data.cpu().reshape(-1), loss_dict, clf_logits.data.cpu()
@@ -3095,7 +3206,10 @@ class GSAT(nn.Module):
         pbar = tqdm(data_loader)
         for idx, data in enumerate(pbar):
             data = process_data(data, use_edge_attr)
-            att, loss_dict, clf_logits = run_one_batch(data.to(self.device), epoch)
+            if phase.strip() == 'train':
+                att, loss_dict, clf_logits = run_one_batch(data.to(self.device), epoch, idx)
+            else:
+                att, loss_dict, clf_logits = run_one_batch(data.to(self.device), epoch)
 
             exp_labels = data.edge_label.data.cpu()
             precision_at_k = self.get_precision_at_k(att, exp_labels, self.k, data.batch, data.edge_index)
@@ -5201,6 +5315,14 @@ def main():
     parser.add_argument('--embedding_viz_every', type=int, default=None,
                         help='If set, log valid-set PCA embedding scatters (nodes + motifs) to wandb every N epochs; '
                              'binary non-multilabel classification only. Overrides shared_config value.')
+    parser.add_argument('--motif_grad_probe', action='store_true', default=False,
+                        help='If set (readout mode), write per-motif pred/info/total gradients to motif_grad_probe.jsonl.')
+    parser.add_argument('--motif_grad_probe_every', type=int, default=None,
+                        help='Probe every N train batches (default 1).')
+    parser.add_argument('--motif_grad_probe_max_batches', type=int, default=None,
+                        help='Maximum probed train batches per epoch (default 1).')
+    parser.add_argument('--motif_grad_probe_epochs', type=int, default=None,
+                        help='Only probe first N epochs; use -1 for all epochs.')
     parser.add_argument('--config', type=str, default=None,
                    help='Path to tuning config file')
     parser.add_argument('--cuda', type=int, help='cuda device id, -1 for cpu')
@@ -5357,6 +5479,14 @@ def main():
 
     if args.embedding_viz_every is not None:
         local_config['shared_config']['embedding_viz_every'] = int(args.embedding_viz_every)
+    if args.motif_grad_probe:
+        local_config['GSAT_config']['motif_grad_probe'] = True
+    if args.motif_grad_probe_every is not None:
+        local_config['GSAT_config']['motif_grad_probe_every'] = int(args.motif_grad_probe_every)
+    if args.motif_grad_probe_max_batches is not None:
+        local_config['GSAT_config']['motif_grad_probe_max_batches'] = int(args.motif_grad_probe_max_batches)
+    if args.motif_grad_probe_epochs is not None:
+        local_config['GSAT_config']['motif_grad_probe_epochs'] = int(args.motif_grad_probe_epochs)
 
     print(f'[INFO] Motif incorporation method: {local_config["GSAT_config"].get("motif_incorporation_method", None)}')
     print(f'[INFO] Learn edge attention: {local_config["shared_config"].get("learn_edge_att", False)}')
