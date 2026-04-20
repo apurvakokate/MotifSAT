@@ -1294,6 +1294,8 @@ class GSAT(nn.Module):
         self.motif_grad_probe_every = max(1, int(method_config.get('motif_grad_probe_every', 1)))
         self.motif_grad_probe_max_batches = max(1, int(method_config.get('motif_grad_probe_max_batches', 1)))
         self.motif_grad_probe_epochs = int(method_config.get('motif_grad_probe_epochs', -1))
+        self.motif_grad_probe_start_epoch = max(0, int(method_config.get('motif_grad_probe_start_epoch', 0)))
+        self.motif_grad_probe_epoch_every = max(1, int(method_config.get('motif_grad_probe_epoch_every', 1)))
 
         self.epochs = method_config['epochs']
         self.pred_loss_coef = method_config['pred_loss_coef']
@@ -1548,7 +1550,9 @@ class GSAT(nn.Module):
             epoch_span = 'all' if self.motif_grad_probe_epochs < 0 else f'first {self.motif_grad_probe_epochs}'
             print(
                 f'[INFO] Motif grad probe: ON (every={self.motif_grad_probe_every}, '
-                f'max_batches={self.motif_grad_probe_max_batches}, epochs={epoch_span})'
+                f'max_batches={self.motif_grad_probe_max_batches}, epochs={epoch_span}, '
+                f'start_epoch={self.motif_grad_probe_start_epoch}, '
+                f'epoch_every={self.motif_grad_probe_epoch_every})'
             )
         # if self.motif_r_values is not None:
         #     print(f'[INFO] Score-based per-motif r: loaded {len(self.motif_r_values)} values')
@@ -1630,6 +1634,8 @@ class GSAT(nn.Module):
                 'motif_grad_probe_every': self.motif_grad_probe_every,
                 'motif_grad_probe_max_batches': self.motif_grad_probe_max_batches,
                 'motif_grad_probe_epochs': self.motif_grad_probe_epochs,
+                'motif_grad_probe_start_epoch': self.motif_grad_probe_start_epoch,
+                'motif_grad_probe_epoch_every': self.motif_grad_probe_epoch_every,
             },
             'loss_coefficients': {
                 'pred_loss_coef': self.pred_loss_coef,
@@ -2189,6 +2195,10 @@ class GSAT(nn.Module):
             return False
         if self.motif_method != 'readout':
             return False
+        if epoch < self.motif_grad_probe_start_epoch:
+            return False
+        if ((epoch - self.motif_grad_probe_start_epoch) % self.motif_grad_probe_epoch_every) != 0:
+            return False
         if self.motif_grad_probe_epochs >= 0 and epoch >= self.motif_grad_probe_epochs:
             return False
         if (batch_idx % self.motif_grad_probe_every) != 0:
@@ -2218,6 +2228,10 @@ class GSAT(nn.Module):
         motif_ids = ctx.get('motif_ids')
         if motif_logit is None or motif_batch is None:
             return
+        print(f"motif_logit requires_grad: {motif_logit.requires_grad}")
+        print(f"motif_logit is_leaf: {motif_logit.is_leaf}")
+        print(f"motif_logit grad_fn: {motif_logit.grad_fn}")
+        input()
 
         pred_term = self._last_loss_terms.get('pred')
         info_term = self._last_loss_terms.get('info')
@@ -5323,6 +5337,10 @@ def main():
                         help='Maximum probed train batches per epoch (default 1).')
     parser.add_argument('--motif_grad_probe_epochs', type=int, default=None,
                         help='Only probe first N epochs; use -1 for all epochs.')
+    parser.add_argument('--motif_grad_probe_start_epoch', type=int, default=None,
+                        help='Start motif grad probing at this epoch (default 0).')
+    parser.add_argument('--motif_grad_probe_epoch_every', type=int, default=None,
+                        help='Probe every K epochs from start_epoch (default 1).')
     parser.add_argument('--config', type=str, default=None,
                    help='Path to tuning config file')
     parser.add_argument('--cuda', type=int, help='cuda device id, -1 for cpu')
@@ -5487,6 +5505,10 @@ def main():
         local_config['GSAT_config']['motif_grad_probe_max_batches'] = int(args.motif_grad_probe_max_batches)
     if args.motif_grad_probe_epochs is not None:
         local_config['GSAT_config']['motif_grad_probe_epochs'] = int(args.motif_grad_probe_epochs)
+    if args.motif_grad_probe_start_epoch is not None:
+        local_config['GSAT_config']['motif_grad_probe_start_epoch'] = int(args.motif_grad_probe_start_epoch)
+    if args.motif_grad_probe_epoch_every is not None:
+        local_config['GSAT_config']['motif_grad_probe_epoch_every'] = int(args.motif_grad_probe_epoch_every)
 
     print(f'[INFO] Motif incorporation method: {local_config["GSAT_config"].get("motif_incorporation_method", None)}')
     print(f'[INFO] Learn edge attention: {local_config["shared_config"].get("learn_edge_att", False)}')
