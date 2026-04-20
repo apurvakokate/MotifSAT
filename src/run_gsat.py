@@ -1582,7 +1582,6 @@ class GSAT(nn.Module):
         )
         os.makedirs(self.seed_dir, exist_ok=True)
         self.motif_grad_probe_path = os.path.join(self.seed_dir, 'motif_grad_probe.jsonl')
-        self._last_loss_terms = {}
         # Save configs
         with open(os.path.join(self.seed_dir, "method_config.yaml"), "w") as f:
             yaml.safe_dump(method_config, f, sort_keys=False)
@@ -2129,11 +2128,6 @@ class GSAT(nn.Module):
             pred_loss + info_loss + within_term + between_term + diversity_term
             + entropy_term + motif_ib_term + align_term + interp_distill_term
         )
-        self._last_loss_terms = {
-            'pred': pred_loss,
-            'info': info_loss,
-            'total': loss,
-        }
 
         loss_dict = {
             'loss': loss.item(),
@@ -2188,7 +2182,12 @@ class GSAT(nn.Module):
         #     loss_dict['loss'] = loss.item()
         #     loss_dict['motif_graph_loss'] = aux_pred_loss.item()
         
-        return loss, loss_dict
+        loss_terms = {
+            'pred': pred_loss,
+            'info': info_loss,
+            'total': loss,
+        }
+        return loss, loss_dict, loss_terms
 
     def _should_probe_motif_grads(self, epoch, batch_idx):
         if not self.motif_grad_probe:
@@ -2220,22 +2219,23 @@ class GSAT(nn.Module):
             allow_unused=True,
         )[0]
 
-    def _log_motif_grad_probe(self, epoch, batch_idx):
-        ctx = getattr(self, '_loss_ctx', None) or {}
-        motif_logit = ctx.get('motif_logit')
-        motif_emb = ctx.get('motif_emb')
-        motif_batch = ctx.get('motif_batch')
-        motif_ids = ctx.get('motif_ids')
+    def _log_motif_grad_probe(
+        self,
+        epoch,
+        batch_idx,
+        motif_logit,
+        pred_term,
+        info_term,
+        total_term,
+        motif_emb=None,
+        motif_batch=None,
+        motif_ids=None,
+    ):
         if motif_logit is None or motif_batch is None:
             return
         print(f"motif_logit requires_grad: {motif_logit.requires_grad}")
         print(f"motif_logit is_leaf: {motif_logit.is_leaf}")
         print(f"motif_logit grad_fn: {motif_logit.grad_fn}")
-        input()
-
-        pred_term = self._last_loss_terms.get('pred')
-        info_term = self._last_loss_terms.get('info')
-        total_term = self._last_loss_terms.get('total')
         if pred_term is None or info_term is None or total_term is None:
             return
 
@@ -2292,7 +2292,7 @@ class GSAT(nn.Module):
             self.motif_prior_shift_ramp_epochs,
         )
 
-    def forward_pass(self, data, epoch, training):
+    def forward_pass(self, data, epoch, training, batch_idx=0):
         """
         Forward pass through GSAT with different motif incorporation methods.
         
@@ -2592,12 +2592,25 @@ class GSAT(nn.Module):
 
         # Get nodes_to_motifs if available (needed for motif_method='loss')
         nodes_to_motifs = getattr(data, 'nodes_to_motifs', None)
-        loss, loss_dict = self.__loss__(
+        loss, loss_dict, loss_terms = self.__loss__(
             att, clf_logits, data.y, epoch, nodes_to_motifs, data.batch,
             aux_clf_logits=aux_clf_logits, motif_batch=motif_batch,
             motif_ids=motif_ids, raw_att_for_loss=raw_att_for_loss,
             motif_att_soft=motif_att_soft,
         )
+        if training and self._should_probe_motif_grads(epoch, batch_idx):
+            ctx = getattr(self, '_loss_ctx', None) or {}
+            self._log_motif_grad_probe(
+                epoch=epoch,
+                batch_idx=batch_idx,
+                motif_logit=ctx.get('motif_logit'),
+                motif_emb=ctx.get('motif_emb'),
+                motif_batch=ctx.get('motif_batch'),
+                motif_ids=ctx.get('motif_ids'),
+                pred_term=loss_terms.get('pred'),
+                info_term=loss_terms.get('info'),
+                total_term=loss_terms.get('total'),
+            )
         return edge_att, loss, loss_dict, clf_logits
 
     @torch.no_grad()
@@ -3191,7 +3204,7 @@ class GSAT(nn.Module):
         if self.motif_interp_head is not None:
             self.motif_interp_head.eval()
 
-        att, loss, loss_dict, clf_logits = self.forward_pass(data, epoch, training=False)
+        att, loss, loss_dict, clf_logits = self.forward_pass(data, epoch, training=False, batch_idx=0)
         return att.data.cpu().reshape(-1), loss_dict, clf_logits.data.cpu()
 
     def train_one_batch(self, data, epoch, batch_idx=0):
@@ -3202,10 +3215,8 @@ class GSAT(nn.Module):
         if self.motif_interp_head is not None:
             self.motif_interp_head.train()
 
-        att, loss, loss_dict, clf_logits = self.forward_pass(data, epoch, training=True)
+        att, loss, loss_dict, clf_logits = self.forward_pass(data, epoch, training=True, batch_idx=batch_idx)
         self.optimizer.zero_grad()
-        if self._should_probe_motif_grads(epoch, batch_idx):
-            self._log_motif_grad_probe(epoch, batch_idx)
         loss.backward()
         self.optimizer.step()
         return att.data.cpu().reshape(-1), loss_dict, clf_logits.data.cpu()
