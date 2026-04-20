@@ -2224,6 +2224,7 @@ class GSAT(nn.Module):
         epoch,
         batch_idx,
         motif_logit,
+        motif_logit_raw,
         pred_term,
         info_term,
         total_term,
@@ -2231,17 +2232,40 @@ class GSAT(nn.Module):
         motif_batch=None,
         motif_ids=None,
     ):
-        if motif_logit is None or motif_batch is None:
+        if motif_logit is None or motif_logit_raw is None or motif_batch is None:
             return
         print(f"motif_logit requires_grad: {motif_logit.requires_grad}")
         print(f"motif_logit is_leaf: {motif_logit.is_leaf}")
         print(f"motif_logit grad_fn: {motif_logit.grad_fn}")
         if pred_term is None or info_term is None or total_term is None:
             return
+        self._last_loss_terms = {
+            'pred': pred_term,
+            'info': info_term,
+            'total': total_term,
+        }
+        for k, v in self._last_loss_terms.items():
+            if v is not None:
+                print(
+                    f"{k}: type={type(v)}, is_tensor={isinstance(v, torch.Tensor)}, "
+                    f"grad_fn={getattr(v, 'grad_fn', 'N/A')}"
+                )
 
-        g_pred_logit = self._safe_grad(pred_term, motif_logit, retain_graph=True)
-        g_info_logit = self._safe_grad(info_term, motif_logit, retain_graph=True)
-        g_total_logit = self._safe_grad(total_term, motif_logit, retain_graph=True)
+        # Explicitly validate that total loss is connected to motif_logit.
+        try:
+            test = torch.autograd.grad(
+                total_term,
+                motif_logit_raw,
+                retain_graph=True,
+                allow_unused=False,  # force an error if path is broken
+            )
+            print(f"Path EXISTS: grad={test}")
+        except RuntimeError as e:
+            print(f"Path BROKEN: {e}")
+
+        g_pred_logit = self._safe_grad(pred_term, motif_logit_raw, retain_graph=True)
+        g_info_logit = self._safe_grad(info_term, motif_logit_raw, retain_graph=True)
+        g_total_logit = self._safe_grad(total_term, motif_logit_raw, retain_graph=True)
         g_pred_emb = self._safe_grad(pred_term, motif_emb, retain_graph=True) if motif_emb is not None else None
         g_info_emb = self._safe_grad(info_term, motif_emb, retain_graph=True) if motif_emb is not None else None
         g_total_emb = self._safe_grad(total_term, motif_emb, retain_graph=True) if motif_emb is not None else None
@@ -2408,6 +2432,7 @@ class GSAT(nn.Module):
                     'inverse_indices': inverse_indices,
                     'dim_m': dim_m,
                     'motif_logit': motif_att_log_logits.squeeze(-1),
+                    'motif_logit_raw': motif_att_log_logits,
                     'motif_emb': _z_k,
                     'motif_sizes': counts,
                     'motif_att_soft': motif_att_soft.squeeze(-1),
@@ -2452,6 +2477,7 @@ class GSAT(nn.Module):
                     'inverse_indices': inverse_indices,
                     'dim_m': dim_m,
                     'motif_logit': motif_att_log_logits.squeeze(-1),
+                    'motif_logit_raw': motif_att_log_logits,
                     'motif_emb': _motif_emb_zk,
                     'motif_att_soft': motif_att_soft.squeeze(-1),
                     'motif_interp_logits': None,
@@ -2549,6 +2575,7 @@ class GSAT(nn.Module):
                     'inverse_indices': inverse_indices,
                     'dim_m': dim_m,
                     'motif_logit': motif_att_log_logits.squeeze(-1),
+                    'motif_logit_raw': motif_att_log_logits,
                     'motif_emb': motif_emb,
                     'motif_att_soft': motif_att_soft.squeeze(-1),
                     'motif_interp_logits': motif_interp_logits.squeeze(-1) if motif_interp_logits is not None else None,
@@ -2604,6 +2631,7 @@ class GSAT(nn.Module):
                 epoch=epoch,
                 batch_idx=batch_idx,
                 motif_logit=ctx.get('motif_logit'),
+                motif_logit_raw=ctx.get('motif_logit_raw'),
                 motif_emb=ctx.get('motif_emb'),
                 motif_batch=ctx.get('motif_batch'),
                 motif_ids=ctx.get('motif_ids'),
