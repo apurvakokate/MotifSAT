@@ -1441,6 +1441,9 @@ class GSAT(nn.Module):
 
         # Info loss warmup: prediction-only phase before info loss kicks in
         self.info_warmup_epochs = method_config.get('info_warmup_epochs', 0)
+        self.attention_sampling_temp = float(method_config.get('attention_sampling_temp', 1.0))
+        if self.attention_sampling_temp <= 0:
+            raise ValueError('attention_sampling_temp must be > 0')
         # If True: always use σ(logits) for attention (no Concrete / Gumbel-style sampling in training)
         self.no_attention_sampling = bool(method_config.get('no_attention_sampling', False))
         # Motif IB: linear ramp of loss weight 0→1 over ib_ramp_epochs after warmup; r_ib linear init→final
@@ -1526,6 +1529,8 @@ class GSAT(nn.Module):
         print(f'[INFO] Use raw score loss: {self.use_raw_score_loss}')
         if self.no_attention_sampling:
             print('[INFO] Attention: deterministic σ(logits) only (no_attention_sampling=True)')
+        else:
+            print(f'[INFO] Attention sampling temperature: {self.attention_sampling_temp}')
         if self.info_warmup_epochs > 0:
             print(f'[INFO] Info loss warmup: {self.info_warmup_epochs} epochs (prediction-only, deterministic gating)')
         if self.ib_ramp_epochs > 0:
@@ -1607,6 +1612,7 @@ class GSAT(nn.Module):
                 'motif_level_info_loss': self.motif_level_info_loss,
                 'motif_level_sampling': self.motif_level_sampling,
                 'use_raw_score_loss': self.use_raw_score_loss,
+                'attention_sampling_temp': self.attention_sampling_temp,
                 'info_warmup_epochs': self.info_warmup_epochs,
                 'ib_ramp_epochs': self.ib_ramp_epochs,
                 'w_feat': self.w_feat,
@@ -4152,7 +4158,7 @@ class GSAT(nn.Module):
         if training and epoch < self.info_warmup_epochs:
             att = att_log_logits.sigmoid()
         else:
-            att = self.concrete_sample(att_log_logits, temp=1, training=training)
+            att = self.concrete_sample(att_log_logits, temp=self.attention_sampling_temp, training=training)
         return att
 
     @staticmethod
