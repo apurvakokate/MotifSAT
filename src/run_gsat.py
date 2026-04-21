@@ -326,6 +326,28 @@ class RegularizedMotifScoringMLP(nn.Module):
         return self.final_layer(h)
 
 
+class RawLocalMotifScoringMLP(nn.Module):
+    """
+    Motif logit head on raw atom-feature motif statistics.
+
+    Input per motif m: [h_m || h_nbr || (h_m - h_nbr)],
+    where h_m is mean raw feature in motif m and h_nbr is mean neighbor-motif feature.
+    """
+
+    def __init__(self, x_dim, hidden_size):
+        super().__init__()
+        in_dim = int(x_dim) * 3
+        hid = max(int(hidden_size), 32)
+        self.net = nn.Sequential(
+            nn.Linear(in_dim, hid),
+            nn.ReLU(),
+            nn.Linear(hid, 1),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
 class MotifPriorNodeGateMLP(nn.Module):
     """
     Local shift on top of motif-level extractor logits (readout + prior).
@@ -1252,11 +1274,12 @@ class GSAT(nn.Module):
                  method_config, shared_config, fold, task_type='classification', datasets=None, masked_data=None, motif_clf=None,
                  motif_list=None, intra_motif_pool=None, motif_prior_node_gate_module=None,
                  motif_interp_head=None, motif_logit_temperature=None, motif_gate_mult_scale=None,
-                 motif_scoring_mlp=None):
+                 motif_scoring_mlp=None, raw_motif_local_scorer=None):
         super().__init__()
         self.clf = clf
         self.extractor = extractor
         self.motif_scoring_mlp = motif_scoring_mlp  # factored_motif_regularized: LayerNorm motif MLP (not ExtractorMLP)
+        self.raw_motif_local_scorer = raw_motif_local_scorer  # raw_local: score motifs from raw feature context
         self.intra_motif_pool = intra_motif_pool  # Intra-motif attention pool (readout + intra_att only)
         self.motif_prior_node_gate_module = motif_prior_node_gate_module  # readout + motif_prior_node_gate only
         self.motif_interp_head = motif_interp_head  # E5 interpretability-only head
@@ -1421,6 +1444,8 @@ class GSAT(nn.Module):
                 raise ValueError("motif_pooling_method='intra_att' requires motif_incorporation_method='readout'")
             if intra_motif_pool is None:
                 raise ValueError("motif_pooling_method='intra_att' requires intra_motif_pool module (train_gsat_one_seed)")
+        if self.motif_method == 'raw_local' and self.raw_motif_local_scorer is None:
+            raise ValueError("motif_incorporation_method='raw_local' requires raw_motif_local_scorer")
 
         if self.factored_motif_attention and not self.factored_motif_regularized:
             if self.motif_method != 'readout':
@@ -1482,7 +1507,7 @@ class GSAT(nn.Module):
             self.between_motif_coef = 0.0
         # If method is 'readout' or 'graph', motif consistency loss is not applicable
         # (consistency is enforced structurally), so disable it
-        elif self.motif_method in ['readout', 'graph']:
+        elif self.motif_method in ['readout', 'raw_local', 'graph']:
             # For these methods, motif_loss_coef is used for auxiliary motif graph loss
             # when train_motif_graph=True (only applicable for 'graph' method)
             pass
@@ -1494,6 +1519,8 @@ class GSAT(nn.Module):
         print(f'[INFO] Motif-level info loss: {self.motif_level_info_loss}')
         print(f'[INFO] Motif-level sampling: {self.motif_level_sampling}')
         print(f'[INFO] Motif pooling method: {self.motif_pooling_method}')
+        if self.motif_method == 'raw_local':
+            print('[INFO] Raw-local motif scorer enabled (x_v -> h_m/h_nbr -> motif logits)')
         if self.motif_method == 'readout':
             print(
                 f'[INFO] Motif readout GNN emb_stop: raw={self.motif_readout_emb_stop_raw!r} '
@@ -1793,6 +1820,42 @@ class GSAT(nn.Module):
             edge_attr=data.edge_attr,
             emb_stop=self.motif_readout_emb_stop,
         )
+
+    def _raw_local_motif_logits(self, data):
+        """
+        Raw-local motif scoring path:
+        1) h_m = mean raw atom features within motif m
+        2) h_nbr = mean neighboring motifs' h_m
+        3) logit_m = MLP([h_m || h_nbr || (h_m - h_nbr)])
+        """
+        nodes_to_motifs = getattr(data, 'nodes_to_motifs', None)
+        if nodes_to_motifs is None:
+            raise ValueError("'raw_local' method requires nodes_to_motifs attribute in data")
+        inverse_indices, motif_batch, motif_ids = compute_motif_inverse_indices(nodes_to_motifs, data.batch)
+        dim_m = int(inverse_indices.max().item()) + 1
+
+        x_raw = data.x.float()
+        h_m = scatter(x_raw, inverse_indices, dim=0, dim_size=dim_m, reduce='mean')
+
+        src_node, dst_node = data.edge_index
+        src_m = inverse_indices[src_node]
+        dst_m = inverse_indices[dst_node]
+        inter_mask = src_m != dst_m
+        if inter_mask.any():
+            motif_pairs = torch.stack([src_m[inter_mask], dst_m[inter_mask]], dim=1)
+            motif_pairs = torch.unique(motif_pairs, dim=0)
+            nbr_sum = scatter(h_m[motif_pairs[:, 1]], motif_pairs[:, 0], dim=0, dim_size=dim_m, reduce='sum')
+            nbr_cnt = scatter(
+                torch.ones(motif_pairs.size(0), dtype=h_m.dtype, device=h_m.device),
+                motif_pairs[:, 0], dim=0, dim_size=dim_m, reduce='sum',
+            )
+            h_nbr = nbr_sum / nbr_cnt.clamp(min=1).unsqueeze(-1)
+        else:
+            h_nbr = torch.zeros_like(h_m)
+
+        motif_feat = torch.cat([h_m, h_nbr, h_m - h_nbr], dim=-1)
+        motif_att_log_logits = self.raw_motif_local_scorer(motif_feat)
+        return motif_att_log_logits, motif_feat, inverse_indices, motif_batch, motif_ids, dim_m
 
     def _factored_motif_prepare(self, data):
         """
@@ -2198,7 +2261,7 @@ class GSAT(nn.Module):
     def _should_probe_motif_grads(self, epoch, batch_idx):
         if not self.motif_grad_probe:
             return False
-        if self.motif_method != 'readout':
+        if self.motif_method not in ('readout', 'raw_local'):
             return False
         if epoch < self.motif_grad_probe_start_epoch:
             return False
@@ -2330,6 +2393,7 @@ class GSAT(nn.Module):
             None: Baseline GSAT (node-level attention, no motif loss)
             'loss': GSAT with motif consistency loss (node-level attention)
             'readout': Motif-level readout (pool embeddings, score motifs, broadcast to nodes)
+            'raw_local': Raw-local motif gate from pooled raw atom features; broadcast motif gate to nodes
             'graph': (commented out) Motif-level graph
         """
         # Vanilla GNN: bypass attention entirely
@@ -2349,7 +2413,7 @@ class GSAT(nn.Module):
             return edge_att, loss, loss_dict, clf_logits
 
         # Check for unmapped nodes if using motif incorporation methods
-        needs_motifs = self.motif_method in ['loss', 'readout']
+        needs_motifs = self.motif_method in ['loss', 'readout', 'raw_local']
         if needs_motifs:
             nodes_to_motifs = getattr(data, 'nodes_to_motifs', None)
             if nodes_to_motifs is None:
@@ -2594,6 +2658,38 @@ class GSAT(nn.Module):
                     self.w_feat, self.w_message, self.w_readout, edge_attr=data.edge_attr,
                 )
 
+        elif self.motif_method == 'raw_local':
+            (
+                motif_att_log_logits,
+                motif_feat,
+                inverse_indices,
+                motif_batch,
+                motif_ids,
+                dim_m,
+            ) = self._raw_local_motif_logits(data)
+            motif_att_soft = motif_att_log_logits.sigmoid()
+            node_att = lift_motif_att_to_node_att(motif_att_soft, inverse_indices)
+            att = motif_att_soft if self.motif_level_info_loss else node_att
+            raw_att_for_loss = att
+            edge_att = self.lift_node_att_to_edge_att(node_att, data.edge_index)
+            clf_logits = forward_clf_with_node_attention_injection(
+                self.clf, data, node_att, edge_att, self.learn_edge_att,
+                self.w_feat, self.w_message, self.w_readout, edge_attr=data.edge_attr,
+            )
+            self._loss_ctx = {
+                'node_att': node_att,
+                'node_batch': data.batch,
+                'motif_batch': motif_batch,
+                'motif_ids': motif_ids,
+                'inverse_indices': inverse_indices,
+                'dim_m': dim_m,
+                'motif_logit': motif_att_log_logits.squeeze(-1),
+                'motif_logit_raw': motif_att_log_logits,
+                'motif_emb': motif_feat,
+                'motif_att_soft': motif_att_soft.squeeze(-1),
+                'motif_interp_logits': None,
+            }
+
         # # GRAPH METHOD (commented out for simplification)
         # elif self.motif_method == 'graph':
         #     nodes_to_motifs = getattr(data, 'nodes_to_motifs', None)
@@ -2834,6 +2930,30 @@ class GSAT(nn.Module):
                 emb.detach().cpu(),
                 node_att.detach().cpu(),
                 motif_emb.detach().cpu(),
+                motif_imp.detach().cpu(),
+                data.batch.detach().cpu(),
+                motif_batch_vec.detach().cpu(),
+                motif_global_ids.detach().cpu(),
+            )
+
+        if self.motif_method == 'raw_local':
+            emb = self.clf.get_emb(data.x, data.edge_index, batch=data.batch, edge_attr=data.edge_attr, emb_stop=None)
+            (
+                motif_att_log_logits,
+                motif_feat,
+                inverse_indices,
+                motif_batch_vec,
+                motif_global_ids,
+                _dim_m,
+            ) = self._raw_local_motif_logits(data)
+            motif_att = motif_att_log_logits.sigmoid()
+            node_att = lift_motif_att_to_node_att(motif_att, inverse_indices)
+            na = node_att.squeeze(-1)
+            motif_imp = scatter(na, inverse_indices, dim=0, reduce='mean', dim_size=motif_feat.size(0))
+            return (
+                emb.detach().cpu(),
+                node_att.detach().cpu(),
+                motif_feat.detach().cpu(),
                 motif_imp.detach().cpu(),
                 data.batch.detach().cpu(),
                 motif_batch_vec.detach().cpu(),
@@ -5114,6 +5234,7 @@ def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_nam
     hidden_size = model_config['hidden_size']
     motif_pool = method_config.get('motif_pooling_method', 'mean')
     motif_scoring_mlp = None
+    raw_motif_local_scorer = None
     if method_config.get('factored_motif_regularized', False):
         if method_config.get('factored_motif_attention', False):
             raise ValueError('factored_motif_regularized and factored_motif_attention are mutually exclusive')
@@ -5143,6 +5264,8 @@ def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_nam
         extractor_input_dim = hidden_size
     extractor = ExtractorMLP(hidden_size, shared_config, input_dim=extractor_input_dim).to(device)
     lr, wd = method_config['lr'], method_config.get('weight_decay', 0)
+    if method_config.get('motif_incorporation_method') == 'raw_local':
+        raw_motif_local_scorer = RawLocalMotifScoringMLP(x_dim, hidden_size).to(device)
 
     intra_motif_pool = None
     if method_config.get('factored_motif_regularized', False):
@@ -5191,6 +5314,8 @@ def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_nam
         params_to_optimize += list(intra_motif_pool.parameters())
     if motif_scoring_mlp is not None:
         params_to_optimize += list(motif_scoring_mlp.parameters())
+    if raw_motif_local_scorer is not None:
+        params_to_optimize += list(raw_motif_local_scorer.parameters())
     if motif_prior_node_gate_module is not None:
         params_to_optimize += list(motif_prior_node_gate_module.parameters())
     if motif_interp_head is not None:
@@ -5226,6 +5351,7 @@ def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_nam
         motif_logit_temperature=motif_logit_temperature,
         motif_gate_mult_scale=motif_gate_mult_scale,
         motif_scoring_mlp=motif_scoring_mlp,
+        raw_motif_local_scorer=raw_motif_local_scorer,
     )
 
     # Save model_config to seed_dir for post-hoc analysis (hidden_size, n_layers, etc.)
@@ -5288,11 +5414,12 @@ def main():
     parser.add_argument('--no_learn_edge_att', action='store_true', default=False,
                         help='Force node-level attention (overrides config).')
     parser.add_argument('--motif_incorporation_method', type=str, default=None,
-                        choices=[None, 'loss', 'readout', 'graph'],
+                        choices=[None, 'loss', 'readout', 'raw_local', 'graph'],
                         help='Method for incorporating motif information: '
                              'None=baseline GSAT (no motif), '
                              'loss=motif consistency loss, '
                              'readout=motif-level attention readout, '
+                             'raw_local=motif logits from pooled raw atom features, '
                              'graph=motif-level graph construction')
     parser.add_argument('--train_motif_graph', action='store_true', default=False,
                         help='For graph method: also train classifier on motif graph (auxiliary loss)')
