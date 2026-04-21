@@ -336,7 +336,8 @@ class RawLocalMotifScoringMLP(nn.Module):
 
     def __init__(self, x_dim, hidden_size):
         super().__init__()
-        in_dim = int(x_dim) * 3
+        # Step 3 design: score from L-hop contextualized raw motif embedding h_m_ctx only.
+        in_dim = int(x_dim)
         hid = max(int(hidden_size), 32)
         self.net = nn.Sequential(
             nn.Linear(in_dim, hid),
