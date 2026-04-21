@@ -576,6 +576,7 @@ def lift_motif_att_to_node_att(motif_att, inverse_indices):
 
 def forward_clf_with_node_attention_injection(
     clf, data, node_att, edge_att, learn_edge_att, w_feat, w_message, w_readout, edge_attr=None,
+    normalize_readout_weights=False,
 ):
     """
     <USAGE> Shared GSAT classifier forward: W_FEAT / W_MESSAGE / W_READOUT when using node-level attention.
@@ -591,7 +592,12 @@ def forward_clf_with_node_attention_injection(
         x_clf, data.edge_index, batch=data.batch, edge_attr=edge_attr, edge_atten=edge_atten_mp,
     )
     if w_readout:
-        clf_emb = clf_emb * node_att
+        if normalize_readout_weights:
+            alpha = node_att.view(-1)
+            denom = scatter(alpha, data.batch, dim=0, reduce='sum')[data.batch].clamp(min=1e-6)
+            clf_emb = clf_emb * (alpha / denom).unsqueeze(-1)
+        else:
+            clf_emb = clf_emb * node_att
     return clf.get_pred_from_emb(clf_emb, data.batch)
 
 
@@ -1823,10 +1829,10 @@ class GSAT(nn.Module):
 
     def _raw_local_motif_logits(self, data):
         """
-        Raw-local motif scoring path:
-        1) h_m = mean raw atom features within motif m
-        2) h_nbr = mean neighboring motifs' h_m
-        3) logit_m = MLP([h_m || h_nbr || (h_m - h_nbr)])
+        Raw-local motif scoring with L-hop parameter-free neighborhood aggregation:
+        1) h_m^0 = mean raw atom features within motif m
+        2) h_m^l = mean({h_nbr^(l-1)} U {h_m^(l-1)}) for l=1..L, L=#GNN layers
+        3) logit_m = MLP(h_m^L)
         """
         nodes_to_motifs = getattr(data, 'nodes_to_motifs', None)
         if nodes_to_motifs is None:
@@ -1835,27 +1841,36 @@ class GSAT(nn.Module):
         dim_m = int(inverse_indices.max().item()) + 1
 
         x_raw = data.x.float()
-        h_m = scatter(x_raw, inverse_indices, dim=0, dim_size=dim_m, reduce='mean')
+        h_m0 = scatter(x_raw, inverse_indices, dim=0, dim_size=dim_m, reduce='mean')
 
         src_node, dst_node = data.edge_index
         src_m = inverse_indices[src_node]
         dst_m = inverse_indices[dst_node]
         inter_mask = src_m != dst_m
+        dir_src = dir_dst = None
         if inter_mask.any():
             motif_pairs = torch.stack([src_m[inter_mask], dst_m[inter_mask]], dim=1)
+            motif_pairs = torch.sort(motif_pairs, dim=1).values
             motif_pairs = torch.unique(motif_pairs, dim=0)
-            nbr_sum = scatter(h_m[motif_pairs[:, 1]], motif_pairs[:, 0], dim=0, dim_size=dim_m, reduce='sum')
-            nbr_cnt = scatter(
-                torch.ones(motif_pairs.size(0), dtype=h_m.dtype, device=h_m.device),
-                motif_pairs[:, 0], dim=0, dim_size=dim_m, reduce='sum',
-            )
-            h_nbr = nbr_sum / nbr_cnt.clamp(min=1).unsqueeze(-1)
-        else:
-            h_nbr = torch.zeros_like(h_m)
+            if motif_pairs.numel() > 0:
+                dir_src = torch.cat([motif_pairs[:, 0], motif_pairs[:, 1]], dim=0)
+                dir_dst = torch.cat([motif_pairs[:, 1], motif_pairs[:, 0]], dim=0)
 
-        motif_feat = torch.cat([h_m, h_nbr, h_m - h_nbr], dim=-1)
-        motif_att_log_logits = self.raw_motif_local_scorer(motif_feat)
-        return motif_att_log_logits, motif_feat, inverse_indices, motif_batch, motif_ids, dim_m
+        L = int(getattr(self.clf, 'n_layers', 1))
+        h_ctx = h_m0
+        for _ in range(max(1, L)):
+            if dir_src is None:
+                h_ctx = h_ctx
+                continue
+            nbr_sum = scatter(h_ctx[dir_dst], dir_src, dim=0, dim_size=dim_m, reduce='sum')
+            nbr_cnt = scatter(
+                torch.ones(dir_src.size(0), dtype=h_ctx.dtype, device=h_ctx.device),
+                dir_src, dim=0, dim_size=dim_m, reduce='sum',
+            )
+            h_ctx = (nbr_sum + h_ctx) / (nbr_cnt + 1.0).unsqueeze(-1)
+
+        motif_att_log_logits = self.raw_motif_local_scorer(h_ctx)
+        return motif_att_log_logits, h_ctx, inverse_indices, motif_batch, motif_ids, dim_m
 
     def _factored_motif_prepare(self, data):
         """
@@ -2661,20 +2676,28 @@ class GSAT(nn.Module):
         elif self.motif_method == 'raw_local':
             (
                 motif_att_log_logits,
-                motif_feat,
+                motif_ctx,
                 inverse_indices,
                 motif_batch,
                 motif_ids,
                 dim_m,
             ) = self._raw_local_motif_logits(data)
             motif_att_soft = motif_att_log_logits.sigmoid()
-            node_att = lift_motif_att_to_node_att(motif_att_soft, inverse_indices)
-            att = motif_att_soft if self.motif_level_info_loss else node_att
-            raw_att_for_loss = att
+            motif_att = self.sampling(motif_att_log_logits, epoch, training)
+            node_att = lift_motif_att_to_node_att(motif_att, inverse_indices)
+            att = motif_att if self.motif_level_info_loss else node_att
+            if self.use_raw_score_loss:
+                raw_att_for_loss = (
+                    motif_att_soft if self.motif_level_info_loss
+                    else lift_motif_att_to_node_att(motif_att_soft, inverse_indices)
+                )
+            else:
+                raw_att_for_loss = None
             edge_att = self.lift_node_att_to_edge_att(node_att, data.edge_index)
             clf_logits = forward_clf_with_node_attention_injection(
                 self.clf, data, node_att, edge_att, self.learn_edge_att,
                 self.w_feat, self.w_message, self.w_readout, edge_attr=data.edge_attr,
+                normalize_readout_weights=True,
             )
             self._loss_ctx = {
                 'node_att': node_att,
@@ -2685,7 +2708,7 @@ class GSAT(nn.Module):
                 'dim_m': dim_m,
                 'motif_logit': motif_att_log_logits.squeeze(-1),
                 'motif_logit_raw': motif_att_log_logits,
-                'motif_emb': motif_feat,
+                'motif_emb': motif_ctx,
                 'motif_att_soft': motif_att_soft.squeeze(-1),
                 'motif_interp_logits': None,
             }
