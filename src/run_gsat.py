@@ -3941,6 +3941,9 @@ class GSAT(nn.Module):
                             emb = self._get_emb_for_motif_readout(data)
 
                             motif_score_node = None
+                            motif_logit_node = None
+                            node_logit_node = None
+                            delta_node = None
 
                             # Use the correct attention extraction path based on method
                             if self.motif_method == 'readout':
@@ -4035,6 +4038,9 @@ class GSAT(nn.Module):
                                 att = self.sampling(node_logit, epoch, training=False)
                                 motif_soft = motif_att_log_logits.sigmoid()
                                 motif_score_node = lift_motif_att_to_node_att(motif_soft, inverse_indices).squeeze(-1)
+                                motif_logit_node = motif_att_log_logits[inverse_indices].squeeze(-1)
+                                node_logit_node = node_logit.squeeze(-1)
+                                delta_node = (node_logit - motif_att_log_logits[inverse_indices]).squeeze(-1)
                             else:
                                 att_log_logits = self.extractor(emb, data.edge_index, batch)
                                 att = self.sampling(att_log_logits, epoch, training=False)
@@ -4053,6 +4059,18 @@ class GSAT(nn.Module):
                                 sample_results['motif_score_node'] = (
                                     motif_score_node.detach().cpu().numpy()
                                     if motif_score_node is not None else None
+                                )
+                                sample_results['motif_logit_node'] = (
+                                    motif_logit_node.detach().cpu().numpy()
+                                    if motif_logit_node is not None else None
+                                )
+                                sample_results['node_logit_node'] = (
+                                    node_logit_node.detach().cpu().numpy()
+                                    if node_logit_node is not None else None
+                                )
+                                sample_results['delta_node'] = (
+                                    delta_node.detach().cpu().numpy()
+                                    if delta_node is not None else None
                                 )
 
                                 # ── Individual node/edge masking impact ──
@@ -4577,6 +4595,9 @@ class GSAT(nn.Module):
         node_att = sample_result['node_att']
         edge_att = sample_result['edge_att']
         motif_score_node = sample_result.get('motif_score_node')
+        motif_logit_node = sample_result.get('motif_logit_node')
+        node_logit_node = sample_result.get('node_logit_node')
+        delta_node = sample_result.get('delta_node')
         
         # Save node scores
         if node_att is not None:
@@ -4591,6 +4612,12 @@ class GSAT(nn.Module):
                 }
                 if motif_score_node is not None:
                     node_record['motif_score'] = float(motif_score_node[local_node_idx])
+                if motif_logit_node is not None:
+                    node_record['motif_logit'] = float(motif_logit_node[local_node_idx])
+                if node_logit_node is not None:
+                    node_record['node_logit'] = float(node_logit_node[local_node_idx])
+                if delta_node is not None:
+                    node_record['delta_v'] = float(delta_node[local_node_idx])
                 node_f.write(json.dumps(node_record) + '\n')
         
         # Save edge scores
