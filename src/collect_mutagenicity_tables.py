@@ -909,6 +909,17 @@ def compute_posthoc_correlation(seed_dir: Path, split: str = 'test'):
     if not node_scores_path.exists() or not impact_path.exists():
         return np.nan, np.nan, 0
 
+    score_key = 'score'
+    summary_path = seed_dir / 'experiment_summary.json'
+    if summary_path.exists():
+        try:
+            summary = _read_json(summary_path)
+            method = ((summary.get('motif_incorporation') or {}).get('method')) if summary else None
+            if method == 'factored_between_within':
+                score_key = 'motif_score'
+        except Exception:
+            pass
+
     scores = defaultdict(list)
     for rec in _read_jsonl(node_scores_path):
         if rec.get('split') != split:
@@ -916,7 +927,12 @@ def compute_posthoc_correlation(seed_dir: Path, split: str = 'test'):
         motif_idx = rec.get('motif_index', rec.get('motif_idx'))
         if motif_idx is None or motif_idx < 0:
             continue
-        scores[motif_idx].append(rec['score'])
+        score_val = rec.get(score_key)
+        if score_val is None:
+            score_val = rec.get('score')
+        if score_val is None:
+            continue
+        scores[motif_idx].append(float(score_val))
 
     impacts = defaultdict(list)
     for rec in _read_jsonl(impact_path):

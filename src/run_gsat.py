@@ -3940,6 +3940,8 @@ class GSAT(nn.Module):
                             batch = torch.zeros(data.x.size(0), dtype=torch.long, device=data.x.device)
                             emb = self._get_emb_for_motif_readout(data)
 
+                            motif_score_node = None
+
                             # Use the correct attention extraction path based on method
                             if self.motif_method == 'readout':
                                 n2m = getattr(data, 'nodes_to_motifs', None)
@@ -3991,6 +3993,8 @@ class GSAT(nn.Module):
                                         motif_emb, motif_batch, inv_idx, _ = self._motif_level_pool(
                                             emb, n2m, batch)
                                         motif_logits = self.extractor(motif_emb, None, motif_batch)
+                                        motif_soft = motif_logits.sigmoid()
+                                        motif_score_node = lift_motif_att_to_node_att(motif_soft, inv_idx).squeeze(-1)
                                         if self.motif_prior_node_gate:
                                             att, _, _ = sample_motif_readout_with_prior_node_gate(
                                                 self.sampling,
@@ -4018,6 +4022,19 @@ class GSAT(nn.Module):
                                 else:
                                     att_log_logits = self.extractor(emb, data.edge_index, batch)
                                     att = self.sampling(att_log_logits, epoch, training=False)
+                            elif self.motif_method == 'factored_between_within':
+                                (
+                                    motif_att_log_logits,
+                                    node_logit,
+                                    inverse_indices,
+                                    _motif_batch,
+                                    _motif_ids,
+                                    _dim_m,
+                                    _aux_factored,
+                                ) = self._factored_between_within_logits(data)
+                                att = self.sampling(node_logit, epoch, training=False)
+                                motif_soft = motif_att_log_logits.sigmoid()
+                                motif_score_node = lift_motif_att_to_node_att(motif_soft, inverse_indices).squeeze(-1)
                             else:
                                 att_log_logits = self.extractor(emb, data.edge_index, batch)
                                 att = self.sampling(att_log_logits, epoch, training=False)
@@ -4033,6 +4050,10 @@ class GSAT(nn.Module):
                                             data.edge_index.to(self.device)
                                         ).detach().cpu().numpy()
                                 sample_results['sample'] = data 
+                                sample_results['motif_score_node'] = (
+                                    motif_score_node.detach().cpu().numpy()
+                                    if motif_score_node is not None else None
+                                )
 
                                 # ── Individual node/edge masking impact ──
                                 old_prediction = self.clf.forward(data.x, data.edge_index, batch, edge_attr=data.edge_attr)
@@ -4555,6 +4576,7 @@ class GSAT(nn.Module):
         sample = sample_result['sample']
         node_att = sample_result['node_att']
         edge_att = sample_result['edge_att']
+        motif_score_node = sample_result.get('motif_score_node')
         
         # Save node scores
         if node_att is not None:
@@ -4567,6 +4589,8 @@ class GSAT(nn.Module):
                     'motif_index': int(sample.nodes_to_motifs[local_node_idx]),
                     'score': float(node_att[local_node_idx])
                 }
+                if motif_score_node is not None:
+                    node_record['motif_score'] = float(motif_score_node[local_node_idx])
                 node_f.write(json.dumps(node_record) + '\n')
         
         # Save edge scores

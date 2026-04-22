@@ -1015,6 +1015,20 @@ def get_motif_level_score_impact_points(seed_dir, split='test'):
     if not node_scores_path.exists() or not motif_impact_path.exists():
         return None, None
 
+    score_key = 'score'
+    summary_path = seed_dir / 'experiment_summary.json'
+    if summary_path.exists():
+        try:
+            with open(summary_path, 'r') as f:
+                summary = json.load(f)
+            method = ((summary.get('motif_incorporation') or {}).get('method'))
+            # For factored_between_within, motif-level plots should use plain sigma(ell_m)
+            # rather than mean sigma(ell_m + delta_v).
+            if method == 'factored_between_within':
+                score_key = 'motif_score'
+        except (json.JSONDecodeError, OSError, AttributeError):
+            pass
+
     node_recs = _read_jsonl(node_scores_path, split)
     impact_recs = _read_jsonl(motif_impact_path, split)
 
@@ -1023,7 +1037,12 @@ def get_motif_level_score_impact_points(seed_dir, split='test'):
         midx = rec.get('motif_index', rec.get('motif_idx', -1))
         if midx is None or midx < 0:
             continue
-        motif_scores[(rec['graph_idx'], midx)].append(float(rec['score']))
+        score_val = rec.get(score_key)
+        if score_val is None:
+            score_val = rec.get('score')
+        if score_val is None:
+            continue
+        motif_scores[(rec['graph_idx'], midx)].append(float(score_val))
 
     if not motif_scores:
         return None, None
