@@ -96,6 +96,7 @@ DEFAULT_EXPERIMENT_LABELS = {
     'simplified_motif_readout_maxmean_injection_ablation': 'Maxmean + no L_info warmup; sweep injection 010/101/011/111',
     'simplified_motif_readout_maxmean_info_loss_ablation': 'Maxmean + 010 + no warmup; sweep info_loss_coef 0.01/0.1/0.3',
     'test_gradient_info_coef0.2_tau2': 'Gradient probe readout baseline with tau=2 and info_coef=0.2',
+    'test_gradient_factored_between_within_tau2': 'Factored ell_m + delta_v (between/within), tau=2, motif-KL 0.15 + node-KL 0.05',
     'test_gradient_info_coef0.2_tau2_node_superset': 'Node-level superset leakage scorer (raw + detached GNN + leaked raw); tau=2, info_coef=0.2',
 }
 
@@ -849,6 +850,7 @@ def main():
             'simplified_motif_readout_maxmean_injection_ablation',
             'simplified_motif_readout_maxmean_info_loss_ablation',
             'test_gradient_info_coef0.2_tau2',
+            'test_gradient_factored_between_within_tau2',
             'test_gradient_info_coef0.2_tau2_node_superset',
         ]
 

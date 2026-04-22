@@ -375,6 +375,11 @@ EXPERIMENT_ROW_CONFIG = {
         'row_label_prefix': 'info_loss_coef',
         'path_extract': 'info_loss_coef',
     },
+    'test_gradient_factored_between_within_tau2': {
+        'summary_path': ('motif_incorporation', 'method'),
+        'row_label_prefix': 'variant',
+        'path_extract': 'variant',
+    },
 }
 
 
@@ -990,6 +995,37 @@ def build_posthoc_table(records, split='test'):
     return pivot_mean, pivot_std, pivot_count
 
 
+def build_node_posthoc_table(records, split='test'):
+    rows = []
+    for rec in records:
+        r, p, n = compute_node_score_impact_correlation(rec['seed_dir'], split=split)
+        rows.append({
+            'model': rec['model'],
+            'row': rec['row'],
+            'row_val': rec['row_val'],
+            'pearson_r': r,
+            'p_value': p,
+            'n_nodes': n,
+        })
+
+    if not rows:
+        return None, None, None
+
+    df = pd.DataFrame(rows)
+    agg = df.groupby(['row', 'row_val', 'model'])['pearson_r'].agg(['mean', 'std', 'count']).reset_index()
+    agg = _sort_agg_by_row_val(agg)
+
+    pivot_mean = agg.pivot(index='row', columns='model', values='mean')
+    pivot_std = agg.pivot(index='row', columns='model', values='std')
+    pivot_count = agg.pivot(index='row', columns='model', values='count')
+
+    row_order = agg.drop_duplicates('row')['row'].tolist()
+    pivot_mean = pivot_mean.reindex(row_order).dropna(how='all')
+    pivot_std = pivot_std.reindex(row_order).dropna(how='all')
+    pivot_count = pivot_count.reindex(row_order).dropna(how='all')
+    return pivot_mean, pivot_std, pivot_count
+
+
 def build_table(records, metric_key, verbose=False):
     if not records:
         return None, None, None
@@ -1241,6 +1277,10 @@ def main():
     exp_mean, exp_std, exp_count = build_table(records, metric_key='motif/att_impact_correlation', verbose=verbose)
     _print_and_save_table('Explainer (motif att-impact correlation, mean +/- std)',
                           exp_mean, exp_std, exp_count, prefix, 'explainer_correlation', output_dir)
+
+    node_mean, node_std, node_count = build_node_posthoc_table(records, split='test')
+    _print_and_save_table('Explainer (node score-impact correlation, test, mean +/- std)',
+                          node_mean, node_std, node_count, prefix, 'node_score_impact_correlation', output_dir)
 
     range_mean, range_std, range_count = build_table(records, metric_key='motif_edge_att/max_mean', verbose=verbose)
     _print_and_save_table('Motif edge att max (mean +/- std)',
