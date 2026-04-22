@@ -348,6 +348,22 @@ class RawLocalMotifScoringMLP(nn.Module):
         return self.net(x)
 
 
+class RawNodeDeltaScoringMLP(nn.Module):
+    """Node-level within-motif deviation scorer from raw features."""
+
+    def __init__(self, input_dim, hidden_size):
+        super().__init__()
+        hid = max(int(hidden_size), 32)
+        self.net = nn.Sequential(
+            nn.Linear(int(input_dim), hid),
+            nn.ReLU(),
+            nn.Linear(hid, 1),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
 class MotifPriorNodeGateMLP(nn.Module):
     """
     Local shift on top of motif-level extractor logits (readout + prior).
@@ -1280,12 +1296,13 @@ class GSAT(nn.Module):
                  method_config, shared_config, fold, task_type='classification', datasets=None, masked_data=None, motif_clf=None,
                  motif_list=None, intra_motif_pool=None, motif_prior_node_gate_module=None,
                  motif_interp_head=None, motif_logit_temperature=None, motif_gate_mult_scale=None,
-                 motif_scoring_mlp=None, raw_motif_local_scorer=None):
+                 motif_scoring_mlp=None, raw_motif_local_scorer=None, raw_node_delta_scorer=None):
         super().__init__()
         self.clf = clf
         self.extractor = extractor
         self.motif_scoring_mlp = motif_scoring_mlp  # factored_motif_regularized: LayerNorm motif MLP (not ExtractorMLP)
         self.raw_motif_local_scorer = raw_motif_local_scorer  # raw_local: score motifs from raw feature context
+        self.raw_node_delta_scorer = raw_node_delta_scorer  # factored_between_within: node-level delta scorer
         self.intra_motif_pool = intra_motif_pool  # Intra-motif attention pool (readout + intra_att only)
         self.motif_prior_node_gate_module = motif_prior_node_gate_module  # readout + motif_prior_node_gate only
         self.motif_interp_head = motif_interp_head  # E5 interpretability-only head
@@ -1329,6 +1346,8 @@ class GSAT(nn.Module):
         self.epochs = method_config['epochs']
         self.pred_loss_coef = method_config['pred_loss_coef']
         self.info_loss_coef = method_config['info_loss_coef']
+        self.between_motif_info_coef = float(method_config.get('between_motif_info_coef', 0.0))
+        self.within_node_info_coef = float(method_config.get('within_node_info_coef', 0.0))
         self.motif_loss_coef = method_config['motif_loss_coef']
         self.between_motif_coef = method_config.get('between_motif_coef', 0.0)
 
@@ -1450,8 +1469,10 @@ class GSAT(nn.Module):
                 raise ValueError("motif_pooling_method='intra_att' requires motif_incorporation_method='readout'")
             if intra_motif_pool is None:
                 raise ValueError("motif_pooling_method='intra_att' requires intra_motif_pool module (train_gsat_one_seed)")
-        if self.motif_method in ('raw_local', 'raw_node_superset') and self.raw_motif_local_scorer is None:
-            raise ValueError("motif_incorporation_method in {'raw_local','raw_node_superset'} requires raw_motif_local_scorer")
+        if self.motif_method in ('raw_local', 'raw_node_superset', 'factored_between_within') and self.raw_motif_local_scorer is None:
+            raise ValueError("motif_incorporation_method in {'raw_local','raw_node_superset','factored_between_within'} requires raw_motif_local_scorer")
+        if self.motif_method == 'factored_between_within' and self.raw_node_delta_scorer is None:
+            raise ValueError("motif_incorporation_method='factored_between_within' requires raw_node_delta_scorer")
 
         if self.factored_motif_attention and not self.factored_motif_regularized:
             if self.motif_method != 'readout':
@@ -1513,7 +1534,7 @@ class GSAT(nn.Module):
             self.between_motif_coef = 0.0
         # If method is 'readout' or 'graph', motif consistency loss is not applicable
         # (consistency is enforced structurally), so disable it
-        elif self.motif_method in ['readout', 'raw_local', 'graph']:
+        elif self.motif_method in ['readout', 'raw_local', 'raw_node_superset', 'factored_between_within', 'graph']:
             # For these methods, motif_loss_coef is used for auxiliary motif graph loss
             # when train_motif_graph=True (only applicable for 'graph' method)
             pass
@@ -1529,6 +1550,8 @@ class GSAT(nn.Module):
             print('[INFO] Raw-local motif scorer enabled (x_v -> h_m/h_nbr -> motif logits)')
         if self.motif_method == 'raw_node_superset':
             print('[INFO] Raw node-superset motif scorer enabled (raw + detached GNN + node-level leaked context)')
+        if self.motif_method == 'factored_between_within':
+            print('[INFO] Factored between/within scorer enabled (ell_m from GNN motifs, delta_v from raw intra-neighbors)')
         if self.motif_method == 'readout':
             print(
                 f'[INFO] Motif readout GNN emb_stop: raw={self.motif_readout_emb_stop_raw!r} '
@@ -1648,6 +1671,8 @@ class GSAT(nn.Module):
                 'motif_level_sampling': self.motif_level_sampling,
                 'use_raw_score_loss': self.use_raw_score_loss,
                 'attention_sampling_temp': self.attention_sampling_temp,
+                'between_motif_info_coef': self.between_motif_info_coef,
+                'within_node_info_coef': self.within_node_info_coef,
                 'info_warmup_epochs': self.info_warmup_epochs,
                 'ib_ramp_epochs': self.ib_ramp_epochs,
                 'w_feat': self.w_feat,
@@ -1940,6 +1965,54 @@ class GSAT(nn.Module):
         scorer_input = torch.cat([h_m_raw, h_m_gnn, h_m_leaked], dim=-1)
         motif_att_log_logits = self.raw_motif_local_scorer(scorer_input)
         return motif_att_log_logits, scorer_input, inverse_indices, motif_batch, motif_ids, dim_m
+
+    def _factored_between_within_logits(self, data):
+        """
+        Between-motif logit from GNN motif embeddings; within-motif delta from raw local features.
+        ell_v = ell_m[gather] + delta_v
+        """
+        nodes_to_motifs = getattr(data, 'nodes_to_motifs', None)
+        if nodes_to_motifs is None:
+            raise ValueError("'factored_between_within' method requires nodes_to_motifs attribute in data")
+        inverse_indices, motif_batch, motif_ids = compute_motif_inverse_indices(nodes_to_motifs, data.batch)
+        dim_m = int(inverse_indices.max().item()) + 1
+
+        # Step 1: unweighted GNN embeddings
+        h_v = self.clf.get_emb(
+            data.x, data.edge_index, batch=data.batch, edge_attr=data.edge_attr, edge_atten=None,
+        )
+        h_m_mean = scatter(h_v, inverse_indices, dim=0, dim_size=dim_m, reduce='mean')
+        h_m_max = scatter(h_v, inverse_indices, dim=0, dim_size=dim_m, reduce='max')
+        motif_in = torch.cat([h_m_mean, h_m_max], dim=-1)
+        motif_att_log_logits = self.raw_motif_local_scorer(motif_in)  # [M,1]
+
+        # Step 3: within-motif raw neighbor deviation
+        x_raw = data.x.float()
+        src, dst = data.edge_index
+        same_motif = inverse_indices[src] == inverse_indices[dst]
+        n_nodes = x_raw.size(0)
+        if same_motif.any():
+            sum_intra = scatter(x_raw[src[same_motif]], dst[same_motif], dim=0, dim_size=n_nodes, reduce='sum')
+            cnt_intra = scatter(
+                torch.ones(same_motif.sum().item(), dtype=x_raw.dtype, device=x_raw.device),
+                dst[same_motif], dim=0, dim_size=n_nodes, reduce='sum',
+            )
+            intra_raw = sum_intra / cnt_intra.clamp(min=1).unsqueeze(-1)
+            has_intra = cnt_intra > 0
+            intra_raw = torch.where(has_intra.unsqueeze(-1), intra_raw, x_raw)
+        else:
+            intra_raw = x_raw
+        delta_v = self.raw_node_delta_scorer(torch.cat([x_raw, intra_raw], dim=-1))  # [N,1]
+        node_logit = motif_att_log_logits[inverse_indices] + delta_v
+
+        aux = {
+            'h_v': h_v,
+            'h_m_mean': h_m_mean,
+            'h_m_max': h_m_max,
+            'delta_v': delta_v,
+            'node_logit': node_logit,
+        }
+        return motif_att_log_logits, node_logit, inverse_indices, motif_batch, motif_ids, dim_m, aux
 
     def _factored_motif_prepare(self, data):
         """
@@ -2277,15 +2350,36 @@ class GSAT(nn.Module):
             align_term = att.new_tensor(0.0)
             interp_distill_term = att.new_tensor(0.0)
 
+        motif_between_info_term = att.new_tensor(0.0)
+        node_within_info_term = att.new_tensor(0.0)
+        if self.motif_method == 'factored_between_within':
+            motif_logit_raw = ctx.get('motif_logit_raw')
+            node_logit_raw = ctx.get('node_logit_raw')
+            if motif_logit_raw is not None and self.between_motif_info_coef > 0:
+                pm = torch.sigmoid(motif_logit_raw)
+                motif_kl = (
+                    pm * torch.log(pm / r + 1e-6) +
+                    (1 - pm) * torch.log((1 - pm) / (1 - r + 1e-6) + 1e-6)
+                ).mean()
+                motif_between_info_term = self.between_motif_info_coef * motif_kl
+            if node_logit_raw is not None and self.within_node_info_coef > 0:
+                pv = torch.sigmoid(node_logit_raw)
+                node_kl = (
+                    pv * torch.log(pv / r + 1e-6) +
+                    (1 - pv) * torch.log((1 - pv) / (1 - r + 1e-6) + 1e-6)
+                ).mean()
+                node_within_info_term = self.within_node_info_coef * node_kl
+
         loss = (
             pred_loss + info_loss + within_term + between_term + diversity_term
             + entropy_term + motif_ib_term + align_term + interp_distill_term
+            + motif_between_info_term + node_within_info_term
         )
 
         loss_dict = {
             'loss': loss.item(),
             'pred': pred_loss.item(),
-            'info': info_loss.item(),
+            'info': (info_loss + motif_between_info_term + node_within_info_term).item(),
             'motif_within': within_term.item(),
             'motif_between': between_term.item(),
             'motif_consistency': motif_loss.item(),
@@ -2294,6 +2388,8 @@ class GSAT(nn.Module):
             'motif_ib': motif_ib_term.item(),
             'motif_align': align_term.item(),
             'motif_interp_distill': interp_distill_term.item(),
+            'between_motif_info': motif_between_info_term.item(),
+            'within_node_info': node_within_info_term.item(),
         }
 
         snap = getattr(self, '_factored_reg_diag_snapshot', None)
@@ -2337,7 +2433,7 @@ class GSAT(nn.Module):
         
         loss_terms = {
             'pred': pred_loss,
-            'info': info_loss,
+            'info': info_loss + motif_between_info_term + node_within_info_term,
             'total': loss,
         }
         return loss, loss_dict, loss_terms
@@ -2345,7 +2441,7 @@ class GSAT(nn.Module):
     def _should_probe_motif_grads(self, epoch, batch_idx):
         if not self.motif_grad_probe:
             return False
-        if self.motif_method not in ('readout', 'raw_local', 'raw_node_superset'):
+        if self.motif_method not in ('readout', 'raw_local', 'raw_node_superset', 'factored_between_within'):
             return False
         if epoch < self.motif_grad_probe_start_epoch:
             return False
@@ -2479,6 +2575,7 @@ class GSAT(nn.Module):
             'readout': Motif-level readout (pool embeddings, score motifs, broadcast to nodes)
             'raw_local': Raw-local motif gate from pooled raw atom features; broadcast motif gate to nodes
             'raw_node_superset': Raw+detached-GNN+node-superset leakage motif gate; broadcast motif gate to nodes
+            'factored_between_within': ell_m from motif pooled GNN embeddings + delta_v from raw intra-neighbors
             'graph': (commented out) Motif-level graph
         """
         # Vanilla GNN: bypass attention entirely
@@ -2498,7 +2595,7 @@ class GSAT(nn.Module):
             return edge_att, loss, loss_dict, clf_logits
 
         # Check for unmapped nodes if using motif incorporation methods
-        needs_motifs = self.motif_method in ['loss', 'readout', 'raw_local', 'raw_node_superset']
+        needs_motifs = self.motif_method in ['loss', 'readout', 'raw_local', 'raw_node_superset', 'factored_between_within']
         if needs_motifs:
             nodes_to_motifs = getattr(data, 'nodes_to_motifs', None)
             if nodes_to_motifs is None:
@@ -2823,6 +2920,41 @@ class GSAT(nn.Module):
                 'motif_interp_logits': None,
             }
 
+        elif self.motif_method == 'factored_between_within':
+            (
+                motif_att_log_logits,
+                node_logit,
+                inverse_indices,
+                motif_batch,
+                motif_ids,
+                dim_m,
+                aux_factored,
+            ) = self._factored_between_within_logits(data)
+            motif_att_soft = motif_att_log_logits.sigmoid()
+            node_att = self.sampling(node_logit, epoch, training)
+            att = node_att
+            raw_att_for_loss = node_logit.sigmoid() if self.use_raw_score_loss else None
+            edge_att = self.lift_node_att_to_edge_att(node_att, data.edge_index)
+            clf_logits = forward_clf_with_node_attention_injection(
+                self.clf, data, node_att, edge_att, self.learn_edge_att,
+                self.w_feat, self.w_message, self.w_readout, edge_attr=data.edge_attr,
+                normalize_readout_weights=True,
+            )
+            self._loss_ctx = {
+                'node_att': node_att,
+                'node_batch': data.batch,
+                'motif_batch': motif_batch,
+                'motif_ids': motif_ids,
+                'inverse_indices': inverse_indices,
+                'dim_m': dim_m,
+                'motif_logit': motif_att_log_logits.squeeze(-1),
+                'motif_logit_raw': motif_att_log_logits,
+                'node_logit_raw': node_logit.squeeze(-1),
+                'motif_emb': torch.cat([aux_factored['h_m_mean'], aux_factored['h_m_max']], dim=-1),
+                'motif_att_soft': motif_att_soft.squeeze(-1),
+                'motif_interp_logits': None,
+            }
+
         # # GRAPH METHOD (commented out for simplification)
         # elif self.motif_method == 'graph':
         #     nodes_to_motifs = getattr(data, 'nodes_to_motifs', None)
@@ -3107,6 +3239,31 @@ class GSAT(nn.Module):
             node_att = lift_motif_att_to_node_att(motif_att, inverse_indices)
             na = node_att.squeeze(-1)
             motif_imp = scatter(na, inverse_indices, dim=0, reduce='mean', dim_size=motif_feat.size(0))
+            return (
+                emb.detach().cpu(),
+                node_att.detach().cpu(),
+                motif_feat.detach().cpu(),
+                motif_imp.detach().cpu(),
+                data.batch.detach().cpu(),
+                motif_batch_vec.detach().cpu(),
+                motif_global_ids.detach().cpu(),
+            )
+
+        if self.motif_method == 'factored_between_within':
+            emb = self.clf.get_emb(data.x, data.edge_index, batch=data.batch, edge_attr=data.edge_attr, emb_stop=None)
+            (
+                motif_att_log_logits,
+                node_logit,
+                inverse_indices,
+                motif_batch_vec,
+                motif_global_ids,
+                _dim_m,
+                aux_factored,
+            ) = self._factored_between_within_logits(data)
+            node_att = torch.sigmoid(node_logit)
+            na = node_att.squeeze(-1)
+            motif_imp = scatter(na, inverse_indices, dim=0, reduce='mean', dim_size=aux_factored['h_m_mean'].size(0))
+            motif_feat = torch.cat([aux_factored['h_m_mean'], aux_factored['h_m_max']], dim=-1)
             return (
                 emb.detach().cpu(),
                 node_att.detach().cpu(),
@@ -4745,7 +4902,7 @@ def calculate_explainer_performance(
     Returns:
         Dictionary of metrics for wandb logging (empty dict when skipped for motif readout).
     """
-    if motif_incorporation_method == 'readout':
+    if motif_incorporation_method in ('readout', 'raw_local', 'raw_node_superset', 'factored_between_within'):
         # GSAT.train skips calling this for readout; keep guard for direct/API use.
         return {}
 
@@ -5392,6 +5549,7 @@ def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_nam
     motif_pool = method_config.get('motif_pooling_method', 'mean')
     motif_scoring_mlp = None
     raw_motif_local_scorer = None
+    raw_node_delta_scorer = None
     motif_method_cfg = method_config.get('motif_incorporation_method')
     if method_config.get('factored_motif_regularized', False):
         if method_config.get('factored_motif_attention', False):
@@ -5427,6 +5585,9 @@ def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_nam
     elif motif_method_cfg == 'raw_node_superset':
         raw_input_dim = int(x_dim) + int(hidden_size) + int(x_dim)
         raw_motif_local_scorer = RawLocalMotifScoringMLP(raw_input_dim, hidden_size).to(device)
+    elif motif_method_cfg == 'factored_between_within':
+        raw_motif_local_scorer = RawLocalMotifScoringMLP(int(hidden_size) * 2, hidden_size).to(device)
+        raw_node_delta_scorer = RawNodeDeltaScoringMLP(int(x_dim) * 2, hidden_size).to(device)
 
     intra_motif_pool = None
     if method_config.get('factored_motif_regularized', False):
@@ -5477,6 +5638,8 @@ def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_nam
         params_to_optimize += list(motif_scoring_mlp.parameters())
     if raw_motif_local_scorer is not None:
         params_to_optimize += list(raw_motif_local_scorer.parameters())
+    if raw_node_delta_scorer is not None:
+        params_to_optimize += list(raw_node_delta_scorer.parameters())
     if motif_prior_node_gate_module is not None:
         params_to_optimize += list(motif_prior_node_gate_module.parameters())
     if motif_interp_head is not None:
@@ -5513,6 +5676,7 @@ def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_nam
         motif_gate_mult_scale=motif_gate_mult_scale,
         motif_scoring_mlp=motif_scoring_mlp,
         raw_motif_local_scorer=raw_motif_local_scorer,
+        raw_node_delta_scorer=raw_node_delta_scorer,
     )
 
     # Save model_config to seed_dir for post-hoc analysis (hidden_size, n_layers, etc.)
@@ -5575,13 +5739,14 @@ def main():
     parser.add_argument('--no_learn_edge_att', action='store_true', default=False,
                         help='Force node-level attention (overrides config).')
     parser.add_argument('--motif_incorporation_method', type=str, default=None,
-                        choices=[None, 'loss', 'readout', 'raw_local', 'raw_node_superset', 'graph'],
+                        choices=[None, 'loss', 'readout', 'raw_local', 'raw_node_superset', 'factored_between_within', 'graph'],
                         help='Method for incorporating motif information: '
                              'None=baseline GSAT (no motif), '
                              'loss=motif consistency loss, '
                              'readout=motif-level attention readout, '
                              'raw_local=motif logits from pooled raw atom features, '
                              'raw_node_superset=motif logits from raw + detached-GNN + node-superset leakage context, '
+                             'factored_between_within=ell_m from motif pooled GNN + delta_v from raw intra-neighbors, '
                              'graph=motif-level graph construction')
     parser.add_argument('--train_motif_graph', action='store_true', default=False,
                         help='For graph method: also train classifier on motif graph (auxiliary loss)')
