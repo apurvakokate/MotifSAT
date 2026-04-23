@@ -34,6 +34,7 @@ Active groups (EXPERIMENT_GROUPS):
   simplified_motif_readout_maxmean_z1 — same as simplified_motif_readout_maxmean but motif MLP input z_k = LN(z^(1)) || LN(max||mean) (emb_stop=0 mean-pool per motif + max_mean)
   simplified_motif_readout_maxmean_injection_ablation — maxmean + no info warmup; sweep injection 010 / 101 / 011 / 111
   simplified_motif_readout_maxmean_info_loss_ablation — maxmean + 010 + no warmup; sweep info_loss_coef ∈ {0.01, 0.1, 0.3}
+  maxmean_clamped — maxmean + 010 + no warmup; clamped factored-regularized readout; sweep info_loss_coef ∈ {0.3, 0.0}
   no_info_loss — info_loss_coef=0, 011 injection; (1) base GSAT decay final_r=0.8, (2) motif readout max_mean + node sampling, (3) motif readout max_mean + motif sampling
   no_info_loss_deterministic_attn — same as no_info_loss intent but no_attention_sampling=True (σ(logits) only, no Concrete noise); (1) base GSAT, (2) motif readout max_mean (node-level motif sampling)
 
@@ -1223,6 +1224,30 @@ EXPERIMENT_GROUPS['simplified_motif_readout_maxmean_info_loss_ablation'] = {
     ],
 }
 
+# Repeat maxmean clamped setup with info-loss endpoints only.
+_MAXMEAN_CLAMPED_INFO_VARIANTS = (
+    ('info_coef_030', 0.3),
+    ('info_coef_000', 0.0),
+)
+
+EXPERIMENT_GROUPS['maxmean_clamped'] = {
+    'experiment_name': 'maxmean_clamped',
+    'variants': [
+        {
+            'variant_id': f'maxmean_clamped_{vid}',
+            'gsat_overrides': {
+                'tuning_id': f'maxmean_clamped_{vid}',
+                **_DECAY_R_BASE,
+                **_SIMPLIFIED_MOTIF_READOUT_MAXMEAN_NO_WARMUP_GSAT,
+                **INJECTION_PRESETS['010'],
+                'info_loss_coef': coef,
+            },
+            'learn_edge_att': False,
+        }
+        for vid, coef in _MAXMEAN_CLAMPED_INFO_VARIANTS
+    ],
+}
+
 EXPERIMENT_GROUPS['simplified_motif_readout_maxmean'] = {
     'experiment_name': 'simplified_motif_readout_maxmean',
     'variants': [
@@ -1392,6 +1417,7 @@ def main():
         'simplified_motif_readout_maxmean_z1',
         'simplified_motif_readout_maxmean_injection_ablation',
         'simplified_motif_readout_maxmean_info_loss_ablation',
+        'maxmean_clamped',
         'test_gradients',
         'test_gradient_info_coef0.2_tau2',
         'test_gradient_info_coef0.2_tau2_raw_local',
