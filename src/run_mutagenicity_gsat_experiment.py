@@ -35,6 +35,7 @@ Active groups (EXPERIMENT_GROUPS):
   simplified_motif_readout_maxmean_injection_ablation — maxmean + no info warmup; sweep injection 010 / 101 / 011 / 111
   simplified_motif_readout_maxmean_info_loss_ablation — maxmean + 010 + no warmup; sweep info_loss_coef ∈ {0.01, 0.1, 0.3}
   maxmean_clamped — maxmean + 010 + no warmup; clamped factored-regularized readout; sweep info_loss_coef ∈ {0.3, 0.0}
+  maxmean_clamped_111 — same as maxmean_clamped but injection 111; sweep info_loss_coef ∈ {0.3, 0.0}
   no_info_loss — info_loss_coef=0, 011 injection; (1) base GSAT decay final_r=0.8, (2) motif readout max_mean + node sampling, (3) motif readout max_mean + motif sampling
   no_info_loss_deterministic_attn — same as no_info_loss intent but no_attention_sampling=True (σ(logits) only, no Concrete noise); (1) base GSAT, (2) motif readout max_mean (node-level motif sampling)
 
@@ -1230,6 +1231,15 @@ _MAXMEAN_CLAMPED_INFO_VARIANTS = (
     ('info_coef_000', 0.0),
 )
 
+_MAXMEAN_CLAMPED_GRAD_PROBE = {
+    'motif_grad_probe': True,
+    'motif_grad_probe_every': 1,
+    'motif_grad_probe_max_batches': 1,
+    'motif_grad_probe_epochs': -1,
+    'motif_grad_probe_start_epoch': 10,
+    'motif_grad_probe_epoch_every': 10,
+}
+
 EXPERIMENT_GROUPS['maxmean_clamped'] = {
     'experiment_name': 'maxmean_clamped',
     'variants': [
@@ -1240,6 +1250,26 @@ EXPERIMENT_GROUPS['maxmean_clamped'] = {
                 **_DECAY_R_BASE,
                 **_SIMPLIFIED_MOTIF_READOUT_MAXMEAN_NO_WARMUP_GSAT,
                 **INJECTION_PRESETS['010'],
+                **_MAXMEAN_CLAMPED_GRAD_PROBE,
+                'info_loss_coef': coef,
+            },
+            'learn_edge_att': False,
+        }
+        for vid, coef in _MAXMEAN_CLAMPED_INFO_VARIANTS
+    ],
+}
+
+EXPERIMENT_GROUPS['maxmean_clamped_111'] = {
+    'experiment_name': 'maxmean_clamped_111',
+    'variants': [
+        {
+            'variant_id': f'maxmean_clamped_111_{vid}',
+            'gsat_overrides': {
+                'tuning_id': f'maxmean_clamped_111_{vid}',
+                **_DECAY_R_BASE,
+                **_SIMPLIFIED_MOTIF_READOUT_MAXMEAN_NO_WARMUP_GSAT,
+                **INJECTION_PRESETS['111'],
+                **_MAXMEAN_CLAMPED_GRAD_PROBE,
                 'info_loss_coef': coef,
             },
             'learn_edge_att': False,
@@ -1418,6 +1448,7 @@ def main():
         'simplified_motif_readout_maxmean_injection_ablation',
         'simplified_motif_readout_maxmean_info_loss_ablation',
         'maxmean_clamped',
+        'maxmean_clamped_111',
         'test_gradients',
         'test_gradient_info_coef0.2_tau2',
         'test_gradient_info_coef0.2_tau2_raw_local',
