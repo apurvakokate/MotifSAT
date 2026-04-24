@@ -36,6 +36,8 @@ Active groups (EXPERIMENT_GROUPS):
   simplified_motif_readout_maxmean_info_loss_ablation — maxmean + 010 + no warmup; sweep info_loss_coef ∈ {0.01, 0.1, 0.3}
   maxmean_clamped — maxmean + 010 + no warmup; clamped factored-regularized readout; sweep info_loss_coef ∈ {0.3, 0.0}
   maxmean_clamped_111 — same as maxmean_clamped but injection 111; sweep info_loss_coef ∈ {0.3, 0.0}
+  maxmean_clamped_size_norm — same as maxmean_clamped but motif-level info loss is size-normalized; sweep info_loss_coef ∈ {0.3, 0.0}
+  maxmean_unclamped_111 — same as maxmean_clamped_111 but node-logit clamp disabled; final_r=0.6, info_loss_coef=0.3
   no_info_loss — info_loss_coef=0, 011 injection; (1) base GSAT decay final_r=0.8, (2) motif readout max_mean + node sampling, (3) motif readout max_mean + motif sampling
   no_info_loss_deterministic_attn — same as no_info_loss intent but no_attention_sampling=True (σ(logits) only, no Concrete noise); (1) base GSAT, (2) motif readout max_mean (node-level motif sampling)
 
@@ -1278,6 +1280,47 @@ EXPERIMENT_GROUPS['maxmean_clamped_111'] = {
     ],
 }
 
+EXPERIMENT_GROUPS['maxmean_clamped_size_norm'] = {
+    'experiment_name': 'maxmean_clamped_size_norm',
+    'variants': [
+        {
+            'variant_id': f'maxmean_clamped_size_norm_{vid}',
+            'gsat_overrides': {
+                'tuning_id': f'maxmean_clamped_size_norm_{vid}',
+                **_DECAY_R_BASE,
+                **_SIMPLIFIED_MOTIF_READOUT_MAXMEAN_NO_WARMUP_GSAT,
+                **INJECTION_PRESETS['010'],
+                **_MAXMEAN_CLAMPED_GRAD_PROBE,
+                'motif_info_size_normalize': True,
+                'info_loss_coef': coef,
+            },
+            'learn_edge_att': False,
+        }
+        for vid, coef in _MAXMEAN_CLAMPED_INFO_VARIANTS
+    ],
+}
+
+EXPERIMENT_GROUPS['maxmean_unclamped_111'] = {
+    'experiment_name': 'maxmean_unclamped_111',
+    'variants': [
+        {
+            'variant_id': 'maxmean_unclamped_111_info_coef_030_final_r06',
+            'gsat_overrides': {
+                'tuning_id': 'maxmean_unclamped_111_info_coef_030_final_r06',
+                **_DECAY_R_BASE,
+                **_SIMPLIFIED_MOTIF_READOUT_MAXMEAN_NO_WARMUP_GSAT,
+                **INJECTION_PRESETS['111'],
+                **_MAXMEAN_CLAMPED_GRAD_PROBE,
+                'motif_info_size_normalize': True,
+                'factored_motif_node_logit_clamp': None,
+                'final_r': 0.6,
+                'info_loss_coef': 0.3,
+            },
+            'learn_edge_att': False,
+        },
+    ],
+}
+
 EXPERIMENT_GROUPS['simplified_motif_readout_maxmean'] = {
     'experiment_name': 'simplified_motif_readout_maxmean',
     'variants': [
@@ -1449,6 +1492,8 @@ def main():
         'simplified_motif_readout_maxmean_info_loss_ablation',
         'maxmean_clamped',
         'maxmean_clamped_111',
+        'maxmean_clamped_size_norm',
+        'maxmean_unclamped_111',
         'test_gradients',
         'test_gradient_info_coef0.2_tau2',
         'test_gradient_info_coef0.2_tau2_raw_local',

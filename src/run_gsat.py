@@ -1374,6 +1374,7 @@ class GSAT(nn.Module):
         self.motif_level_info_loss = method_config.get('motif_level_info_loss', False)
         self.motif_level_sampling = method_config.get('motif_level_sampling', False)
         self.use_raw_score_loss = method_config.get('use_raw_score_loss', False)
+        self.motif_info_size_normalize = bool(method_config.get('motif_info_size_normalize', False))
         self.motif_pooling_method = method_config.get('motif_pooling_method', 'mean')
         self.motif_prior_node_gate = bool(method_config.get('motif_prior_node_gate', False))
         self.motif_prior_detach_alpha = bool(method_config.get('motif_prior_detach_alpha', False))
@@ -1545,6 +1546,7 @@ class GSAT(nn.Module):
         print(f'[INFO] Separate motif model: {self.separate_motif_model}')
         print(f'[INFO] Motif-level info loss: {self.motif_level_info_loss}')
         print(f'[INFO] Motif-level sampling: {self.motif_level_sampling}')
+        print(f'[INFO] Motif info size normalize: {self.motif_info_size_normalize}')
         print(f'[INFO] Motif pooling method: {self.motif_pooling_method}')
         if self.motif_method == 'raw_local':
             print('[INFO] Raw-local motif scorer enabled (x_v -> h_m/h_nbr -> motif logits)')
@@ -1670,6 +1672,7 @@ class GSAT(nn.Module):
                 'motif_level_info_loss': self.motif_level_info_loss,
                 'motif_level_sampling': self.motif_level_sampling,
                 'use_raw_score_loss': self.use_raw_score_loss,
+                'motif_info_size_normalize': self.motif_info_size_normalize,
                 'attention_sampling_temp': self.attention_sampling_temp,
                 'between_motif_info_coef': self.between_motif_info_coef,
                 'within_node_info_coef': self.within_node_info_coef,
@@ -2223,6 +2226,7 @@ class GSAT(nn.Module):
         #     r_per_motif = self.target_k / motifs_per_graph[motif_batch]
         #     r = r_per_motif.clamp(min=0.01, max=0.99).unsqueeze(-1)
         # else:
+        ctx = getattr(self, '_loss_ctx', None) or {}
         r = self.fix_r if self.fix_r else self.get_r(self.decay_interval, self.decay_r, epoch, final_r=self.final_r, init_r=self.init_r)
         # Factored attention: no L_info here. Factored regularized: L_info only if motif_level_info_loss
         # (forward_pass passes motif-level att / raw for that case).
@@ -2232,8 +2236,27 @@ class GSAT(nn.Module):
             info_loss = att.new_tensor(0.0)
         else:
             att_for_loss = raw_att_for_loss if raw_att_for_loss is not None else att
-            info_loss = (att_for_loss * torch.log(att_for_loss / r + 1e-6) +
-                         (1 - att_for_loss) * torch.log((1 - att_for_loss) / (1 - r + 1e-6) + 1e-6)).mean()
+            info_kl = (
+                att_for_loss * torch.log(att_for_loss / r + 1e-6)
+                + (1 - att_for_loss) * torch.log((1 - att_for_loss) / (1 - r + 1e-6) + 1e-6)
+            )
+            if self.motif_info_size_normalize and self.motif_method == 'readout' and self.motif_level_info_loss:
+                motif_sizes = ctx.get('motif_sizes')
+                if motif_sizes is None and ctx.get('inverse_indices') is not None and ctx.get('dim_m') is not None:
+                    inv = ctx['inverse_indices']
+                    dim_m_ctx = int(ctx['dim_m'])
+                    ones = torch.ones(inv.size(0), dtype=info_kl.dtype, device=info_kl.device)
+                    motif_sizes = scatter(ones, inv, dim=0, dim_size=dim_m_ctx, reduce='sum')
+                motif_sizes = None if motif_sizes is None else motif_sizes.view(-1).to(info_kl.dtype)
+                info_kl_flat = info_kl.view(-1)
+                if motif_sizes is not None and motif_sizes.numel() == info_kl_flat.numel():
+                    motif_sizes = motif_sizes.clamp(min=1.0)
+                    n_total = motif_sizes.sum().clamp(min=1.0)
+                    info_loss = (info_kl_flat / motif_sizes).sum() / n_total
+                else:
+                    info_loss = info_kl.mean()
+            else:
+                info_loss = info_kl.mean()
 
         # <LOSS> Tunable coefficients: pred_loss_coef, info_loss_coef, motif_loss_coef (within-motif), between_motif_coef (spread across motifs)
         pred_loss = pred_loss * self.pred_loss_coef
@@ -2272,8 +2295,6 @@ class GSAT(nn.Module):
         motif_ib_term = att.new_tensor(0.0)
         align_term = att.new_tensor(0.0)
         interp_distill_term = att.new_tensor(0.0)
-        ctx = getattr(self, '_loss_ctx', None) or {}
-
         if self.motif_entropy_coef > 0 and self.motif_method == 'readout' and ctx.get('node_att') is not None:
             na = ctx['node_att'].squeeze(-1)
             nb = ctx['node_batch']
@@ -5805,6 +5826,9 @@ def main():
                         help='For graph method: use separate GNN for motif graph processing (vs shared parameters)')
     parser.add_argument('--motif_level_info_loss', action='store_true', default=False,
                         help='Compute info_loss at motif level (1 term per motif) instead of node level (avoids size-weighting bias)')
+    parser.add_argument('--motif_info_size_normalize', action='store_true', default=False,
+                        help='With motif-level info loss, use size-normalized motif KL: '
+                             '(1/N_total) * sum_m (KL_m / |M_m|).')
     parser.add_argument('--motif_level_sampling', action='store_true', default=False,
                         help='For motif_method=readout: sample at motif level then broadcast to nodes. '
                              'Default (False): lift motif logits to nodes, sample per-node like base GSAT.')
@@ -5955,6 +5979,10 @@ def main():
         local_config['GSAT_config']['motif_level_info_loss'] = True
     elif 'motif_level_info_loss' not in local_config['GSAT_config']:
         local_config['GSAT_config']['motif_level_info_loss'] = False
+    if args.motif_info_size_normalize:
+        local_config['GSAT_config']['motif_info_size_normalize'] = True
+    elif 'motif_info_size_normalize' not in local_config['GSAT_config']:
+        local_config['GSAT_config']['motif_info_size_normalize'] = False
     
     if args.motif_level_sampling:
         local_config['GSAT_config']['motif_level_sampling'] = True
@@ -6065,6 +6093,7 @@ def main():
     print(f'[INFO] Train motif graph: {local_config["GSAT_config"].get("train_motif_graph", False)}')
     print(f'[INFO] Separate motif model: {local_config["GSAT_config"].get("separate_motif_model", False)}')
     print(f'[INFO] Motif-level info loss: {local_config["GSAT_config"].get("motif_level_info_loss", False)}')
+    print(f'[INFO] Motif info size normalize: {local_config["GSAT_config"].get("motif_info_size_normalize", False)}')
     print(f'[INFO] Motif-level sampling: {local_config["GSAT_config"].get("motif_level_sampling", False)}')
     print(f'[INFO] Motif pooling method: {local_config["GSAT_config"].get("motif_pooling_method", "mean")}')
     print(f'[INFO] Motif weight diversity coef: {local_config["GSAT_config"].get("motif_weight_diversity_coef", 0.0)}')

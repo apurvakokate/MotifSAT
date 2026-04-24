@@ -64,6 +64,8 @@ EXPERIMENTS=(
   simplified_motif_readout_maxmean_z1
   simplified_motif_readout_maxmean_injection_ablation
   simplified_motif_readout_maxmean_info_loss_ablation
+  maxmean_clamped_size_norm
+  maxmean_unclamped_111
   test_gradient_info_coef0.2_tau2
   test_gradient_factored_between_within_tau2
   test_gradient_info_coef0.2_tau2_node_superset

@@ -75,6 +75,8 @@ EXPERIMENTS=(
   simplified_motif_readout_maxmean_z1
   simplified_motif_readout_maxmean_injection_ablation
   simplified_motif_readout_maxmean_info_loss_ablation
+  maxmean_clamped_size_norm
+  maxmean_unclamped_111
 )
 
 # Subset or reorder for load balancing. Full SUPPORTED_DATASETS order in driver: molecular + OGB + PAPER_DATASETS (deduped).
