@@ -1428,6 +1428,7 @@ class GSAT(nn.Module):
         self.factored_motif_zk_dropout_p = float(method_config.get('factored_motif_zk_dropout_p', 0.3))
         _clamp = method_config.get('factored_motif_node_logit_clamp', None)
         self.factored_motif_node_logit_clamp = None if _clamp is None else float(_clamp)
+        self.motif_readout_beta_r07 = bool(method_config.get('motif_readout_beta_r07', False))
 
         self.factored_motif_attention = bool(method_config.get('factored_motif_attention', False))
         self.factored_motif_zk_axis = str(method_config.get('factored_motif_zk_axis', 'M4')).upper()
@@ -1453,6 +1454,13 @@ class GSAT(nn.Module):
                 raise ValueError('factored_motif_regularized (max_mean) requires motif_scoring_mlp (train_gsat_one_seed)')
             if self.motif_prior_node_gate:
                 raise ValueError('factored_motif_regularized is incompatible with motif_prior_node_gate=True')
+        if self.motif_readout_beta_r07:
+            if not self.factored_motif_regularized:
+                raise ValueError('motif_readout_beta_r07 requires factored_motif_regularized=True')
+            if self.motif_method != 'readout':
+                raise ValueError('motif_readout_beta_r07 requires motif_incorporation_method=readout')
+            if self.motif_pooling_method != 'max_mean':
+                raise ValueError("motif_readout_beta_r07 requires motif_pooling_method='max_mean'")
 
         if self.motif_readout_no_gate and self.motif_prior_node_gate:
             raise ValueError('motif_readout_no_gate=True is incompatible with motif_prior_node_gate=True')
@@ -1559,6 +1567,11 @@ class GSAT(nn.Module):
                 f'[INFO] Motif readout GNN emb_stop: raw={self.motif_readout_emb_stop_raw!r} '
                 f'-> resolved={self.motif_readout_emb_stop!r}'
             )
+            if self.motif_readout_beta_r07:
+                print(
+                    '[INFO] Motif readout beta-r0.7 path: z=max||mean, LN+Dropout(0.3), '
+                    'alpha_v from motif logits, alpha_uv=alpha_u*alpha_v, normalized weighted readout.'
+                )
         if self.factored_motif_regularized:
             print(
                 f'[INFO] Factored motif regularized: zk_dropout_p={self.factored_motif_zk_dropout_p}, '
@@ -2171,6 +2184,53 @@ class GSAT(nn.Module):
             delta_node,
         )
 
+    def _motif_readout_beta_r07_prepare(self, data, epoch, training):
+        """
+        Specialized readout branch:
+          h_v = GNN(x, edge_index)
+          z_m = [max(h_v)||mean(h_v)] -> LN -> Dropout(0.3)
+          logit_m = MLP(z_m), logit_v = broadcast(logit_m)
+          alpha_v = sigma(logit_v + Logistic(0,1)) in training, sigma(logit_v) in eval/deterministic
+          alpha_uv = alpha_u * alpha_v, where alpha_u is baseline GSAT node attention
+        """
+        nodes_to_motifs = getattr(data, 'nodes_to_motifs', None)
+        if nodes_to_motifs is None:
+            raise ValueError('motif_readout_beta_r07 requires nodes_to_motifs on data')
+        h_v = self.clf.get_emb(
+            data.x, data.edge_index, batch=data.batch, edge_attr=data.edge_attr, emb_stop=None, edge_atten=None,
+        )
+        motif_emb, motif_batch, inverse_indices, motif_ids = motif_pooling(
+            h_v, nodes_to_motifs, data.batch, reduce='max_mean',
+        )
+        z_m = F.layer_norm(motif_emb, (motif_emb.shape[-1],))
+        z_m = F.dropout(z_m, p=0.3, training=self.training)
+        motif_att_log_logits = self.motif_scoring_mlp(z_m)
+        node_logit = motif_att_log_logits[inverse_indices]
+        if training and not self.no_attention_sampling:
+            alpha_v = self.concrete_sample(node_logit, temp=1.0, training=True)
+        else:
+            alpha_v = node_logit.sigmoid()
+        alpha_u_logits = self.extractor(h_v, data.edge_index, data.batch)
+        alpha_u = self.sampling(alpha_u_logits, epoch, training)
+        alpha_uv = alpha_u * alpha_v
+        edge_att = self.lift_node_att_to_edge_att(alpha_uv, data.edge_index)
+        ones = torch.ones(data.x.size(0), dtype=h_v.dtype, device=h_v.device)
+        motif_sizes = scatter(ones, inverse_indices, dim=0, dim_size=motif_emb.size(0), reduce='sum')
+        return (
+            alpha_v,
+            edge_att,
+            motif_att_log_logits,
+            motif_att_log_logits.sigmoid(),
+            motif_emb,
+            motif_batch,
+            motif_ids,
+            inverse_indices,
+            motif_sizes,
+            node_logit,
+            alpha_u,
+            alpha_uv,
+        )
+
     @staticmethod
     def _calculate_entropy(weights, num_bins=20):
         """Calculate entropy of weight distribution."""
@@ -2240,7 +2300,17 @@ class GSAT(nn.Module):
                 att_for_loss * torch.log(att_for_loss / r + 1e-6)
                 + (1 - att_for_loss) * torch.log((1 - att_for_loss) / (1 - r + 1e-6) + 1e-6)
             )
-            if self.motif_info_size_normalize and self.motif_method == 'readout' and self.motif_level_info_loss:
+            if ctx.get('motif_info_mean_over_motifs', False):
+                motif_sizes = ctx.get('motif_sizes')
+                info_kl_flat = info_kl.view(-1)
+                if motif_sizes is not None:
+                    motif_sizes = motif_sizes.view(-1).to(info_kl.dtype)
+                if motif_sizes is not None and motif_sizes.numel() == info_kl_flat.numel():
+                    motif_sizes = motif_sizes.clamp(min=1.0)
+                    info_loss = (info_kl_flat / motif_sizes).mean()
+                else:
+                    info_loss = info_kl.mean()
+            elif self.motif_info_size_normalize and self.motif_method == 'readout' and self.motif_level_info_loss:
                 motif_sizes = ctx.get('motif_sizes')
                 if motif_sizes is None and ctx.get('inverse_indices') is not None and ctx.get('dim_m') is not None:
                     inv = ctx['inverse_indices']
@@ -2664,7 +2734,47 @@ class GSAT(nn.Module):
             # =================================================================
             # READOUT METHOD: Pool node embeddings to motif level, score motifs
             # =================================================================
-            if self.factored_motif_regularized:
+            if self.motif_readout_beta_r07:
+                (
+                    node_att,
+                    edge_att,
+                    motif_att_log_logits,
+                    motif_att_soft,
+                    motif_emb,
+                    motif_batch,
+                    motif_ids,
+                    inverse_indices,
+                    motif_sizes,
+                    node_logit,
+                    alpha_u,
+                    alpha_uv,
+                ) = self._motif_readout_beta_r07_prepare(data, epoch, training)
+                att = motif_att_soft
+                raw_att_for_loss = motif_att_soft
+                self._loss_ctx = {
+                    'node_att': node_att,
+                    'node_batch': data.batch,
+                    'motif_batch': motif_batch,
+                    'motif_ids': motif_ids,
+                    'inverse_indices': inverse_indices,
+                    'dim_m': motif_emb.size(0),
+                    'motif_logit': motif_att_log_logits.squeeze(-1),
+                    'motif_logit_raw': motif_att_log_logits,
+                    'node_logit_raw': node_logit.squeeze(-1),
+                    'motif_emb': motif_emb,
+                    'motif_sizes': motif_sizes,
+                    'motif_att_soft': motif_att_soft.squeeze(-1),
+                    'motif_interp_logits': None,
+                    'motif_info_mean_over_motifs': True,
+                    'alpha_u': alpha_u.squeeze(-1),
+                    'alpha_uv': alpha_uv.squeeze(-1),
+                }
+                clf_logits = forward_clf_with_node_attention_injection(
+                    self.clf, data, node_att, edge_att, self.learn_edge_att,
+                    self.w_feat, self.w_message, self.w_readout, edge_attr=data.edge_attr,
+                    normalize_readout_weights=True,
+                )
+            elif self.factored_motif_regularized:
                 (
                     _z_k,
                     inverse_indices,
@@ -3086,6 +3196,34 @@ class GSAT(nn.Module):
             nodes_to_motifs = getattr(data, 'nodes_to_motifs', None)
             if nodes_to_motifs is None:
                 return None
+            if self.motif_readout_beta_r07:
+                (
+                    node_att,
+                    _edge_att,
+                    _motif_att_log_logits,
+                    motif_att_soft,
+                    motif_emb,
+                    motif_batch_vec,
+                    motif_ids,
+                    inverse_indices,
+                    _motif_sizes,
+                    _node_logit,
+                    _alpha_u,
+                    _alpha_uv,
+                ) = self._motif_readout_beta_r07_prepare(data, epoch, training=False)
+                motif_imp = motif_att_soft.squeeze(-1)
+                emb_viz = self.clf.get_emb(
+                    data.x, data.edge_index, batch=data.batch, edge_attr=data.edge_attr, emb_stop=None,
+                )
+                return (
+                    emb_viz.detach().cpu(),
+                    node_att.detach().cpu(),
+                    motif_emb.detach().cpu(),
+                    motif_imp.detach().cpu(),
+                    data.batch.detach().cpu(),
+                    motif_batch_vec.detach().cpu(),
+                    motif_ids.detach().cpu(),
+                )
             if self.factored_motif_regularized:
                 (
                     motif_emb,

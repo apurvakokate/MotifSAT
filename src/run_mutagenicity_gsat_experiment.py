@@ -32,6 +32,8 @@ Active groups (EXPERIMENT_GROUPS):
   simplified_motif_readout — same as simplified_factored_motif_additive but node logit = ℓ_k only (no intra-motif δ); motif score broadcast to all nodes in motif
   simplified_motif_readout_maxmean — same as simplified_motif_readout but motif embedding = concat(max, mean) over nodes per motif (no intra-attention pool for z_k)
   simplified_motif_readout_maxmean_z1 — same as simplified_motif_readout_maxmean but motif MLP input z_k = LN(z^(1)) || LN(max||mean) (emb_stop=0 mean-pool per motif + max_mean)
+  motif_readout_beta0.2_r0.7 — unweighted max+mean motif readout with LN+dropout(0.3), node gate alpha_v, message gate alpha_u*alpha_v, KL on deterministic motif alpha_m; L = L_pred + 0.2*L_info (fix_r=0.7, injection=111)
+  motif_readout_beta0.2_r0.7_deterministic — same as motif_readout_beta0.2_r0.7 but no sampling noise (alpha_v = sigma(logit_v))
   simplified_motif_readout_maxmean_injection_ablation — maxmean + no info warmup; sweep injection 010 / 101 / 011 / 111
   simplified_motif_readout_maxmean_info_loss_ablation — maxmean + 010 + no warmup; sweep info_loss_coef ∈ {0.01, 0.1, 0.3}
   maxmean_clamped — maxmean + 010 + no warmup; clamped factored-regularized readout; sweep info_loss_coef ∈ {0.3, 0.0}
@@ -1357,6 +1359,52 @@ EXPERIMENT_GROUPS['simplified_motif_readout_maxmean_z1'] = {
     ],
 }
 
+_MOTIF_READOUT_BETA02_R07_GSAT = {
+    **_DECAY_R_BASE,
+    'fix_r': 0.7,
+    'motif_incorporation_method': 'readout',
+    'motif_pooling_method': 'max_mean',
+    'factored_motif_regularized': True,
+    'factored_motif_zk_zatt_only': True,
+    'factored_motif_no_intra_delta': True,
+    'factored_motif_zk_dropout_p': 0.0,
+    'motif_readout_beta_r07': True,
+    'motif_level_info_loss': True,
+    'use_raw_score_loss': True,
+    'info_loss_coef': 0.2,
+    'info_warmup_epochs': 0,
+    **INJECTION_PRESETS['111'],
+}
+
+EXPERIMENT_GROUPS['motif_readout_beta0.2_r0.7'] = {
+    'experiment_name': 'motif_readout_beta0.2_r0.7',
+    'variants': [
+        {
+            'variant_id': 'motif_readout_beta0.2_r0.7',
+            'gsat_overrides': {
+                'tuning_id': 'motif_readout_beta0.2_r0.7',
+                **_MOTIF_READOUT_BETA02_R07_GSAT,
+            },
+            'learn_edge_att': False,
+        },
+    ],
+}
+
+EXPERIMENT_GROUPS['motif_readout_beta0.2_r0.7_deterministic'] = {
+    'experiment_name': 'motif_readout_beta0.2_r0.7_deterministic',
+    'variants': [
+        {
+            'variant_id': 'motif_readout_beta0.2_r0.7_deterministic',
+            'gsat_overrides': {
+                'tuning_id': 'motif_readout_beta0.2_r0.7_deterministic',
+                **_MOTIF_READOUT_BETA02_R07_GSAT,
+                'no_attention_sampling': True,
+            },
+            'learn_edge_att': False,
+        },
+    ],
+}
+
 EXPERIMENT_GROUPS['factored_motif_attention_grid'] = {
     'experiment_name': 'factored_motif_attention_grid',
     'variants': [
@@ -1488,6 +1536,8 @@ def main():
         'simplified_motif_readout',
         'simplified_motif_readout_maxmean',
         'simplified_motif_readout_maxmean_z1',
+        'motif_readout_beta0.2_r0.7',
+        'motif_readout_beta0.2_r0.7_deterministic',
         'simplified_motif_readout_maxmean_injection_ablation',
         'simplified_motif_readout_maxmean_info_loss_ablation',
         'maxmean_clamped',
