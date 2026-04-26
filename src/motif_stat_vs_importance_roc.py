@@ -251,6 +251,12 @@ def main():
     p.add_argument('--association_csv', type=str, required=True, help='*_motif_class_association.csv from compute_motif_class_association')
     p.add_argument('--results_dir', type=str, default=os.environ.get('RESULTS_DIR', '../tuning_results'))
     p.add_argument('--dataset', type=str, default=os.environ.get('DATASET', 'Mutagenicity'))
+    p.add_argument(
+        '--experiments',
+        nargs='*',
+        default=None,
+        help='Optional experiment-name filter (values from path segment experiment_<name>).',
+    )
     p.add_argument('--split', type=str, default='test', help='Which split in node_scores.jsonl')
     p.add_argument(
         '--label_mode',
@@ -293,13 +299,20 @@ def main():
         print(f'[WARN] No results dir {results_root}')
         return
 
+    exp_filter = set(args.experiments) if args.experiments else None
+    if exp_filter:
+        print(f'[INFO] Filtering experiments: {sorted(exp_filter)}')
+
     rows = []
     for jsonl in sorted(results_root.glob('**/node_scores.jsonl')):
         seed_dir = jsonl.parent
+        meta = parse_result_path(seed_dir)
+        exp_name = meta.get('experiment')
+        if exp_filter is not None and exp_name not in exp_filter:
+            continue
         mean_score = mean_abs_score_per_motif_name(jsonl, motif_id_to_name, split=args.split)
         if not mean_score:
             continue
-        meta = parse_result_path(seed_dir)
         scores, deltas, qvals = paired_score_and_stats(assoc_by_name, mean_score)
         if args.label_mode == 'fisher_q':
             auc_d, n_m_auc, thr = auc_vs_fisher_q(
