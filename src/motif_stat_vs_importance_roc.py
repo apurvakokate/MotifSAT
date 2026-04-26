@@ -5,10 +5,11 @@ Compare model attention-derived motif importance with motif-class statistics.
 For each node_scores.jsonl under RESULTS_DIR:
 1) aggregate mean |score| per motif *name* on a split,
 2) join with precomputed association CSV by motif name,
-3) compute ROC AUC and Spearman diagnostics.
+3) compute score-vs-stat diagnostics (top/bottom-k precision for fisher_q mode) and Spearman.
 
-Labeling modes for ROC:
-- fisher_q (default): positive motif iff fisher_q_bh <= alpha
+Labeling modes:
+- fisher_q (default): top/bottom-k precision against sign(delta) among statistically significant motifs
+  (q < alpha), excluding ambiguous motifs (q >= alpha) from denominators.
 - abs_delta_topq: positive motif iff |delta| >= quantile(|delta|, q)
 
 Writes a CSV table (e.g. motif_importance_vs_fisher_roc.csv).
@@ -214,6 +215,117 @@ def auc_vs_fisher_q(
     return float(roc_auc_score(y, scores)), int(len(y)), fisher_q_alpha
 
 
+def precision_top_bottom_vs_fisher_q(
+    scores: np.ndarray,
+    deltas: np.ndarray,
+    qvals: np.ndarray,
+    *,
+    fisher_q_alpha: float,
+    top_k: int,
+) -> dict[str, float | int]:
+    """
+    Rank motifs by descending score. Evaluate:
+      - top-k correctness:   delta > 0 and q < alpha
+      - bottom-k correctness: delta < 0 and q < alpha
+      - ambiguous motifs: q >= alpha (or non-finite q), excluded from denominators
+    """
+    if top_k <= 0:
+        return {
+            'precision_top': float('nan'),
+            'precision_bottom': float('nan'),
+            'precision_combined': float('nan'),
+            'k_used': 0,
+            'n_ranked': 0,
+            'ambiguous_top': 0,
+            'ambiguous_bottom': 0,
+            'ambiguous_total': 0,
+            'correct_top': 0,
+            'correct_bottom': 0,
+            'den_top': 0,
+            'den_bottom': 0,
+            'den_combined': 0,
+        }
+
+    mask = np.isfinite(scores) & np.isfinite(deltas)
+    if mask.sum() == 0:
+        return {
+            'precision_top': float('nan'),
+            'precision_bottom': float('nan'),
+            'precision_combined': float('nan'),
+            'k_used': 0,
+            'n_ranked': 0,
+            'ambiguous_top': 0,
+            'ambiguous_bottom': 0,
+            'ambiguous_total': 0,
+            'correct_top': 0,
+            'correct_bottom': 0,
+            'den_top': 0,
+            'den_bottom': 0,
+            'den_combined': 0,
+        }
+
+    s = scores[mask]
+    d = deltas[mask]
+    q = qvals[mask]
+    n_ranked = int(s.size)
+    k_used = int(min(top_k, n_ranked))
+    if k_used == 0:
+        return {
+            'precision_top': float('nan'),
+            'precision_bottom': float('nan'),
+            'precision_combined': float('nan'),
+            'k_used': 0,
+            'n_ranked': n_ranked,
+            'ambiguous_top': 0,
+            'ambiguous_bottom': 0,
+            'ambiguous_total': 0,
+            'correct_top': 0,
+            'correct_bottom': 0,
+            'den_top': 0,
+            'den_bottom': 0,
+            'den_combined': 0,
+        }
+
+    ranked_idx = np.argsort(-s)
+    top_idx = ranked_idx[:k_used]
+    bot_idx = ranked_idx[-k_used:]
+
+    is_sig = np.isfinite(q) & (q < fisher_q_alpha)
+
+    ambiguous_top = int((~is_sig[top_idx]).sum())
+    ambiguous_bottom = int((~is_sig[bot_idx]).sum())
+    ambiguous_total = ambiguous_top + ambiguous_bottom
+
+    correct_top = int(((d[top_idx] > 0) & is_sig[top_idx]).sum())
+    correct_bottom = int(((d[bot_idx] < 0) & is_sig[bot_idx]).sum())
+
+    den_top = int(k_used - ambiguous_top)
+    den_bottom = int(k_used - ambiguous_bottom)
+    den_combined = int(2 * k_used - ambiguous_total)
+
+    precision_top = (correct_top / den_top) if den_top > 0 else float('nan')
+    precision_bottom = (correct_bottom / den_bottom) if den_bottom > 0 else float('nan')
+    precision_combined = (
+        (correct_top + correct_bottom) / den_combined if den_combined > 0 else float('nan')
+    )
+
+    return {
+        'precision_top': float(precision_top),
+        'precision_bottom': float(precision_bottom),
+        'precision_combined': float(precision_combined),
+        'k_used': k_used,
+        'n_ranked': n_ranked,
+        'ambiguous_top': ambiguous_top,
+        'ambiguous_bottom': ambiguous_bottom,
+        'ambiguous_total': ambiguous_total,
+        'correct_top': correct_top,
+        'correct_bottom': correct_bottom,
+        'den_top': den_top,
+        'den_bottom': den_bottom,
+        'den_combined': den_combined,
+    }
+
+
 def auc_vs_delta_top_quantile(
     scores: np.ndarray,
     deltas: np.ndarray,
@@ -272,6 +384,12 @@ def main():
         help='Positive motif threshold for fisher_q mode: fisher_q_bh <= alpha.',
     )
     p.add_argument(
+        '--top_k',
+        type=int,
+        default=50,
+        help='For fisher_q mode: evaluate top-k and bottom-k motifs by score.',
+    )
+    p.add_argument(
         '--delta_label_quantile',
         type=float,
         default=0.75,
@@ -315,17 +433,25 @@ def main():
             continue
         scores, deltas, qvals = paired_score_and_stats(assoc_by_name, mean_score)
         if args.label_mode == 'fisher_q':
-            auc_d, n_m_auc, thr = auc_vs_fisher_q(
+            fisher_prec = precision_top_bottom_vs_fisher_q(
                 scores,
+                deltas,
                 qvals,
                 fisher_q_alpha=args.fisher_q_alpha,
+                top_k=args.top_k,
             )
+            stat_metric = fisher_prec['precision_combined']
+            n_m_stat = fisher_prec['n_ranked']
+            thr = args.fisher_q_alpha
         else:
             auc_d, n_m_auc, thr = auc_vs_delta_top_quantile(
                 scores,
                 deltas,
                 delta_label_quantile=args.delta_label_quantile,
             )
+            fisher_prec = None
+            stat_metric = auc_d
+            n_m_stat = n_m_auc
         rho_d, rho_p, n_m_corr = spearman_score_vs_delta(scores, deltas)
         row = {
             **meta,
@@ -333,14 +459,31 @@ def main():
             'n_motifs_with_scores': len(mean_score),
             'label_mode': args.label_mode,
             'fisher_q_alpha': float(args.fisher_q_alpha),
+            'top_k': int(args.top_k),
             'delta_label_quantile': float(args.delta_label_quantile),
             'label_threshold_value': thr,
-            'auc_score_vs_stat_label': auc_d,
-            'n_motifs_used_auc_delta': n_m_auc,
+            'auc_score_vs_stat_label': stat_metric,
+            'n_motifs_used_auc_delta': n_m_stat,
             'spearman_score_vs_abs_delta': rho_d,
             'spearman_pvalue_score_vs_abs_delta': rho_p,
             'n_motifs_used_spearman': n_m_corr,
         }
+        if fisher_prec is not None:
+            row.update({
+                'precision_top': fisher_prec['precision_top'],
+                'precision_bottom': fisher_prec['precision_bottom'],
+                'precision_combined': fisher_prec['precision_combined'],
+                'k_used': fisher_prec['k_used'],
+                'n_ranked': fisher_prec['n_ranked'],
+                'ambiguous_top': fisher_prec['ambiguous_top'],
+                'ambiguous_bottom': fisher_prec['ambiguous_bottom'],
+                'ambiguous_total': fisher_prec['ambiguous_total'],
+                'correct_top': fisher_prec['correct_top'],
+                'correct_bottom': fisher_prec['correct_bottom'],
+                'den_top': fisher_prec['den_top'],
+                'den_bottom': fisher_prec['den_bottom'],
+                'den_combined': fisher_prec['den_combined'],
+            })
         rows.append(row)
 
     if not rows:
