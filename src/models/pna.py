@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from torch.nn import ModuleList
 from torch.nn import Sequential, ReLU, Linear
 from ogb.graphproppred.mol_encoder import AtomEncoder, BondEncoder
-from torch_geometric.nn import BatchNorm, global_mean_pool
+from torch_geometric.nn import BatchNorm, global_add_pool, global_mean_pool
 from .conv_layers import PNAConvSimple
 
 
@@ -45,7 +45,13 @@ class PNA(torch.nn.Module):
             self.convs.append(conv)
             self.batch_norms.append(BatchNorm(hidden_size))
 
-        self.pool = global_mean_pool
+        pool_name = str(model_config.get('graph_pooling', 'mean')).lower()
+        if pool_name == 'add':
+            self.pool = global_add_pool
+        elif pool_name == 'mean':
+            self.pool = global_mean_pool
+        else:
+            raise ValueError(f"Unsupported graph_pooling for PNA: {pool_name!r} (expected 'add' or 'mean')")
         self.fc_out = Sequential(Linear(hidden_size, hidden_size//2), ReLU(),
                                  Linear(hidden_size//2, hidden_size//4), ReLU(),
                                  Linear(hidden_size//4, 1 if num_class == 2 and not multi_label else num_class))

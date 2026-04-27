@@ -3,7 +3,7 @@
 import torch.nn as nn
 from torch.nn import Linear
 import torch.nn.functional as F
-from torch_geometric.nn import global_add_pool
+from torch_geometric.nn import global_add_pool, global_mean_pool
 from ogb.graphproppred.mol_encoder import AtomEncoder, BondEncoder
 
 from .conv_layers import GINConv, GINEConv
@@ -31,7 +31,13 @@ class GIN(nn.Module):
 
         self.convs = nn.ModuleList()
         self.relu = nn.ReLU()
-        self.pool = global_add_pool
+        pool_name = str(model_config.get('graph_pooling', 'add')).lower()
+        if pool_name == 'add':
+            self.pool = global_add_pool
+        elif pool_name == 'mean':
+            self.pool = global_mean_pool
+        else:
+            raise ValueError(f"Unsupported graph_pooling for GIN: {pool_name!r} (expected 'add' or 'mean')")
 
         for _ in range(self.n_layers):
             if edge_attr_dim != 0 and self.use_edge_attr:

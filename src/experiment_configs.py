@@ -228,6 +228,10 @@ def get_base_config(model_name, dataset_name, gsat_overrides=None):
     model_config = {
         'model_name': model_name,
         **model_defaults[model_name],
+        # Graph-level readout pooling:
+        # - historical defaults: add for GIN/GAT/GCN/SAGE, mean for PNA
+        # - override via model_overrides / config to force all models to add or mean
+        'graph_pooling': 'mean' if model_name == 'PNA' else 'add',
         'atom_encoder': use_atom_encoder,
         'use_edge_attr': use_edge_attr,
         'pretrain_lr': 1e-3,
