@@ -341,7 +341,7 @@ def main() -> None:
     rows_df.to_csv(output_dir / "full_report_all_rows.csv", index=False)
     write_split_tables(rows_df, output_dir)
 
-    plot_rows = build_plot_rows(rows_df, experiments, by_experiment_records)
+    plot_rows = build_plot_rows(rows_df, by_experiment_records)
     for split in ("train", "validation", "test"):
         _plot_grid_for_split(split, plot_rows, output_dir / f"motif_level_score_vs_impact_grid_{split}_all_rows.png")
 
