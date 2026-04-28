@@ -2210,6 +2210,12 @@ class GSAT(nn.Module):
         # Single explicit dropout site for this branch (keep score head dropout at 0.0).
         z_m = F.dropout(z_m, p=0.3, training=training)
         motif_att_log_logits = self.motif_scoring_mlp(z_m, motif_batch)
+        ell_m = torch.clamp(
+            motif_att_log_logits.squeeze(-1),
+            -FACTORED_MOTIF_LOGIT_CLAMP,
+            FACTORED_MOTIF_LOGIT_CLAMP,
+        )
+        motif_att_log_logits = ell_m.unsqueeze(-1)
         node_logit = motif_att_log_logits[inverse_indices]
         alpha_v = self.sampling(node_logit, epoch, training)
         edge_att = self.lift_node_att_to_edge_att(alpha_v, data.edge_index)
