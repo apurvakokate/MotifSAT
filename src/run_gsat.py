@@ -2764,7 +2764,6 @@ class GSAT(nn.Module):
                 clf_logits = forward_clf_with_node_attention_injection(
                     self.clf, data, node_att, edge_att, self.learn_edge_att,
                     self.w_feat, self.w_message, self.w_readout, edge_attr=data.edge_attr,
-                    normalize_readout_weights=True,
                 )
             elif self.factored_motif_regularized:
                 (
