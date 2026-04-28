@@ -1361,14 +1361,16 @@ EXPERIMENT_GROUPS['simplified_motif_readout_maxmean_z1'] = {
 
 _MOTIF_READOUT_BETA02_R07_GSAT = {
     **_DECAY_R_BASE,
-    'fix_r': 0.7,
+    'fix_r': False,
     'motif_incorporation_method': 'readout',
     'motif_pooling_method': 'max_mean',
     'motif_readout_beta_r07': True,
     'motif_level_info_loss': True,
     'use_raw_score_loss': True,
-    'info_loss_coef': 0.2,
+    'motif_info_size_normalize': True,
+    'info_loss_coef': 0.3,
     'info_warmup_epochs': 0,
+    'final_r': 0.6,
     **INJECTION_PRESETS['111'],
 }
 
@@ -1382,6 +1384,9 @@ EXPERIMENT_GROUPS['motif_readout_beta0.2_r0.7'] = {
                 **_MOTIF_READOUT_BETA02_R07_GSAT,
             },
             'learn_edge_att': False,
+            'model_overrides': {
+                'graph_pooling': 'add',
+            },
         },
     ],
 }
@@ -1397,6 +1402,9 @@ EXPERIMENT_GROUPS['motif_readout_beta0.2_r0.7_deterministic'] = {
                 'no_attention_sampling': True,
             },
             'learn_edge_att': False,
+            'model_overrides': {
+                'graph_pooling': 'add',
+            },
         },
     ],
 }

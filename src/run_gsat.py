@@ -2760,7 +2760,6 @@ class GSAT(nn.Module):
                     'motif_sizes': motif_sizes,
                     'motif_att_soft': motif_att_soft.squeeze(-1),
                     'motif_interp_logits': None,
-                    'motif_info_mean_over_motifs': True,
                 }
                 clf_logits = forward_clf_with_node_attention_injection(
                     self.clf, data, node_att, edge_att, self.learn_edge_att,
