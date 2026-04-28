@@ -1367,7 +1367,7 @@ _MOTIF_READOUT_BETA02_R07_GSAT = {
     'motif_readout_beta_r07': True,
     'motif_level_info_loss': True,
     'use_raw_score_loss': True,
-    'motif_info_size_normalize': True,
+    'motif_info_size_normalize': False,
     'info_loss_coef': 0.3,
     'info_warmup_epochs': 0,
     'final_r': 0.6,

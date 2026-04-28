@@ -2207,7 +2207,7 @@ class GSAT(nn.Module):
             h_v, nodes_to_motifs, data.batch, reduce='max_mean',
         )
         z_m = F.layer_norm(motif_emb, (motif_emb.shape[-1],))
-        # Single explicit dropout site for this branch (keep score head dropout at 0.0).
+        # Explicit z_m dropout + motif MLP internal dropout (configured in train_gsat_one_seed).
         z_m = F.dropout(z_m, p=0.3, training=training)
         motif_att_log_logits = self.motif_scoring_mlp(z_m, motif_batch)
         ell_m = torch.clamp(
@@ -5814,10 +5814,10 @@ def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_nam
         if fp == 'intra_att':
             intra_motif_pool = IntraMotifAttentionLinear(hidden_size).to(device)
     elif use_motif_readout_beta_r07:
-        # Beta-r0.7 branch already applies Dropout(0.3) on z_m before motif MLP.
-        # Keep a single dropout site by disabling internal MLP dropout here.
+        # Beta-r0.7 branch: keep z_m dropout and use internal motif-MLP dropout (p=0.3)
+        # to match factored maxmean regularization behavior.
         motif_scoring_mlp = RegularizedMotifScoringMLP(
-            2 * int(hidden_size), hidden_size, shared_config, dropout_p=0.0
+            2 * int(hidden_size), hidden_size, shared_config, dropout_p=0.3
         ).to(device)
         nn.init.xavier_uniform_(motif_scoring_mlp.final_layer.weight, gain=0.01)
         nn.init.zeros_(motif_scoring_mlp.final_layer.bias)
