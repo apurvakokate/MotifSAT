@@ -34,6 +34,7 @@ Active groups (EXPERIMENT_GROUPS):
   simplified_motif_readout_maxmean_z1 — same as simplified_motif_readout_maxmean but motif MLP input z_k = LN(z^(1)) || LN(max||mean) (emb_stop=0 mean-pool per motif + max_mean)
   motif_readout_beta0.2_r0.7 — unweighted max+mean motif readout with LN+dropout(0.3), node gate alpha_v, message gate alpha_u*alpha_v, KL on deterministic motif alpha_m; L = L_pred + 0.2*L_info (fix_r=0.7, injection=111)
   motif_readout_beta0.2_r0.7_deterministic — same as motif_readout_beta0.2_r0.7 but no sampling noise (alpha_v = sigma(logit_v))
+  motif_readout_beta0.3_r0.6_mean — same as motif_readout_beta0.2_r0.7 config family but with graph_pooling forced to mean for all backbones
   simplified_motif_readout_maxmean_injection_ablation — maxmean + no info warmup; sweep injection 010 / 101 / 011 / 111
   simplified_motif_readout_maxmean_info_loss_ablation — maxmean + 010 + no warmup; sweep info_loss_coef ∈ {0.01, 0.1, 0.3}
   maxmean_clamped — maxmean + 010 + no warmup; clamped factored-regularized readout; sweep info_loss_coef ∈ {0.3, 0.0}
@@ -1409,6 +1410,23 @@ EXPERIMENT_GROUPS['motif_readout_beta0.2_r0.7_deterministic'] = {
     ],
 }
 
+EXPERIMENT_GROUPS['motif_readout_beta0.3_r0.6_mean'] = {
+    'experiment_name': 'motif_readout_beta0.3_r0.6_mean',
+    'variants': [
+        {
+            'variant_id': 'motif_readout_beta0.3_r0.6_mean',
+            'gsat_overrides': {
+                'tuning_id': 'motif_readout_beta0.3_r0.6_mean',
+                **_MOTIF_READOUT_BETA02_R07_GSAT,
+            },
+            'learn_edge_att': False,
+            'model_overrides': {
+                'graph_pooling': 'mean',
+            },
+        },
+    ],
+}
+
 EXPERIMENT_GROUPS['factored_motif_attention_grid'] = {
     'experiment_name': 'factored_motif_attention_grid',
     'variants': [
@@ -1542,6 +1560,7 @@ def main():
         'simplified_motif_readout_maxmean_z1',
         'motif_readout_beta0.2_r0.7',
         'motif_readout_beta0.2_r0.7_deterministic',
+        'motif_readout_beta0.3_r0.6_mean',
         'simplified_motif_readout_maxmean_injection_ablation',
         'simplified_motif_readout_maxmean_info_loss_ablation',
         'maxmean_clamped',

@@ -375,6 +375,11 @@ EXPERIMENT_ROW_CONFIG = {
         'row_label_prefix': 'fix_r',
         'path_extract': 'fix_r',
     },
+    'motif_readout_beta0.3_r0.6_mean': {
+        'summary_path': ('weight_distribution_params', 'fix_r'),
+        'row_label_prefix': 'fix_r',
+        'path_extract': 'fix_r',
+    },
     'simplified_motif_readout_maxmean_injection_ablation': {
         'summary_path': None,
         'row_label_prefix': 'injection',

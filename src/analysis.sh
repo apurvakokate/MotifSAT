@@ -64,6 +64,7 @@ EXPERIMENTS=(
   simplified_motif_readout_maxmean_z1
   motif_readout_beta0.2_r0.7
   motif_readout_beta0.2_r0.7_deterministic
+  motif_readout_beta0.3_r0.6_mean
   simplified_motif_readout_maxmean_injection_ablation
   simplified_motif_readout_maxmean_info_loss_ablation
   maxmean_clamped_size_norm
