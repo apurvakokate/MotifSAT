@@ -3717,6 +3717,7 @@ class GSAT(nn.Module):
     @torch.no_grad()
     def compute_motif_readout_correlation_metrics(
         self, valid_loader, epoch, use_edge_attr, max_batches=6, include_wandb_histogram=True,
+        split_name='valid', save_points_path=None,
     ):
         """
         Motif readout: Pearson / Spearman between σ(ℓ_m) (and optional interp head) vs motif-level impact,
@@ -3732,6 +3733,7 @@ class GSAT(nn.Module):
         motif_impacts = []
         interp_scores = []
         sigma_m_vals = []
+        point_rows = []
         for bi, data in enumerate(valid_loader):
             if bi >= max_batches:
                 break
@@ -3798,6 +3800,18 @@ class GSAT(nn.Module):
                 impact = abs(orig_probs[graph_id].item() - masked_prob)
                 motif_scores.append(float(ms_np[m]))
                 motif_impacts.append(impact)
+                point_rows.append(
+                    {
+                        'split': str(split_name),
+                        'epoch': int(epoch),
+                        'batch_idx': int(bi),
+                        'graph_id': int(graph_id),
+                        'graph_motif_id': int(gm_id.item()) if hasattr(gm_id, 'item') else int(gm_id),
+                        'motif_row_idx': int(m),
+                        'motif_score': float(ms_np[m]),
+                        'motif_impact': float(impact),
+                    }
+                )
                 if has_interp and mi is not None and m < mi.numel():
                     interp_scores.append(float(torch.sigmoid(mi.view(-1)[m]).item()))
 
@@ -3844,6 +3858,15 @@ class GSAT(nn.Module):
                 counts, edges = np.histogram(sigma_cat, bins=50, range=(0.0, 1.0))
                 out['motif_readout/sigma_m_hist_counts'] = counts.tolist()
                 out['motif_readout/sigma_m_hist_bin_edges'] = edges.tolist()
+        if save_points_path is not None:
+            try:
+                p = Path(save_points_path)
+                p.parent.mkdir(parents=True, exist_ok=True)
+                with open(p, 'w') as f:
+                    for r in point_rows:
+                        f.write(json.dumps(r) + '\n')
+            except Exception as e:
+                print(f"[WARNING] Failed to save motif readout per-instance correlation points: {e}")
         return out
 
     def _save_post_training_analysis_artifacts(self, valid_loader, use_edge_attr, last_epoch):
@@ -3863,7 +3886,13 @@ class GSAT(nn.Module):
 
         if self.motif_method == 'readout':
             mrm = self.compute_motif_readout_correlation_metrics(
-                valid_loader, last_epoch, use_edge_attr, max_batches=48, include_wandb_histogram=False,
+                valid_loader,
+                last_epoch,
+                use_edge_attr,
+                max_batches=48,
+                include_wandb_histogram=False,
+                split_name='valid',
+                save_points_path=Path(self.seed_dir) / 'motif_readout_corr_points_valid.jsonl',
             )
             serial = {}
             for k, v in mrm.items():
@@ -4100,6 +4129,8 @@ class GSAT(nn.Module):
                             w_feat=self.w_feat,
                             w_message=self.w_message,
                             w_readout=self.w_readout,
+                            split_name='valid',
+                            save_points_path=Path(self.seed_dir) / 'explainer_corr_points_valid.jsonl',
                         )
                         if explainer_metrics:
                             wandb_log_maybe(explainer_metrics, step=epoch, force=True)
@@ -4121,7 +4152,11 @@ class GSAT(nn.Module):
             if epoch % 10 == 0 and epoch > 0 and self.motif_method == 'readout':
                 try:
                     mrm = self.compute_motif_readout_correlation_metrics(
-                        loaders['valid'], epoch, use_edge_attr,
+                        loaders['valid'],
+                        epoch,
+                        use_edge_attr,
+                        split_name='valid',
+                        save_points_path=Path(self.seed_dir) / 'motif_readout_corr_points_valid.jsonl',
                     )
                     if mrm:
                         wandb_log_maybe(mrm, step=epoch, force=True)
@@ -5235,6 +5270,8 @@ def calculate_explainer_performance(
     w_feat=False,
     w_message=True,
     w_readout=False,
+    split_name='valid',
+    save_points_path=None,
 ):
     """
     Calculate explainer performance using edge masking approach.
@@ -5284,6 +5321,7 @@ def calculate_explainer_performance(
     # Motif attention vs impact correlation (sampled for efficiency)
     motif_att_scores = []
     motif_impact_scores = []
+    motif_point_rows = []
     max_batches_for_correlation = 3  # Only sample first N batches for correlation
     
     top_k_ratio = 0.2  # Consider top 20% as "important"
@@ -5390,6 +5428,17 @@ def calculate_explainer_performance(
                                 impact = abs(orig_probs[graph_id].item() - masked_prob)
                                 motif_att_scores.append(motif_mean_att)
                                 motif_impact_scores.append(impact)
+                                motif_point_rows.append(
+                                    {
+                                        'split': str(split_name),
+                                        'epoch': int(epoch),
+                                        'batch_idx': int(batch_idx),
+                                        'graph_id': int(graph_id),
+                                        'graph_motif_id': int(gm_id.item()) if hasattr(gm_id, 'item') else int(gm_id),
+                                        'motif_att_score': float(motif_mean_att),
+                                        'motif_impact': float(impact),
+                                    }
+                                )
                 except Exception as exc:
                     import traceback
                     print(f"[WARN] Motif analysis failed on batch {batch_idx}: {exc}")
@@ -5569,6 +5618,16 @@ def calculate_explainer_performance(
                 metrics['motif/att_impact_n_samples'] = len(motif_att_scores)
         except Exception:
             pass
+
+    if save_points_path is not None:
+        try:
+            p = Path(save_points_path)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            with open(p, 'w') as f:
+                for r in motif_point_rows:
+                    f.write(json.dumps(r) + '\n')
+        except Exception as e:
+            print(f"[WARNING] Failed to save explainer per-instance correlation points: {e}")
     
     return metrics
 
