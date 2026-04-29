@@ -4082,6 +4082,7 @@ class GSAT(nn.Module):
             if epoch == self.epochs - 1 and self.datasets is not None:
                 
                 print(f"[INFO] Computing attention scores using small batch processing")
+                beta_export_log_once = False
                 
                 # Export node and edge scores to jsonl files using small batch processing
                 node_jsonl_path = os.path.join(self.seed_dir, 'node_scores.jsonl')
@@ -4109,7 +4110,36 @@ class GSAT(nn.Module):
                             if self.motif_method == 'readout':
                                 n2m = getattr(data, 'nodes_to_motifs', None)
                                 if n2m is not None:
-                                    if self.factored_motif_regularized:
+                                    if self.motif_readout_beta_r07:
+                                        if not beta_export_log_once:
+                                            print(
+                                                "[INFO] Export path: using beta-specific motif readout "
+                                                "(motif_readout_beta_r07) for score extraction"
+                                            )
+                                            beta_export_log_once = True
+                                        # Keep export/eval score extraction aligned with beta training/eval path.
+                                        (
+                                            node_att,
+                                            _edge_att,
+                                            motif_att_log_logits,
+                                            motif_att_soft,
+                                            _motif_emb,
+                                            _motif_batch,
+                                            _motif_ids,
+                                            inverse_indices,
+                                            _motif_sizes,
+                                            node_logit,
+                                        ) = self._motif_readout_beta_r07_prepare(data, epoch, training=False)
+                                        att = node_att
+                                        motif_score_node = lift_motif_att_to_node_att(
+                                            motif_att_soft, inverse_indices
+                                        ).squeeze(-1)
+                                        motif_logit_node = motif_att_log_logits[inverse_indices].squeeze(-1)
+                                        node_logit_node = node_logit.squeeze(-1)
+                                        delta_node = (
+                                            node_logit - motif_att_log_logits[inverse_indices]
+                                        ).squeeze(-1)
+                                    elif self.factored_motif_regularized:
                                         (
                                             _z_k,
                                             inverse_indices,
