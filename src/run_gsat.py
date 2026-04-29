@@ -618,6 +618,67 @@ def forward_clf_with_node_attention_injection(
     return clf.get_pred_from_emb(clf_emb, data.batch)
 
 
+def predict_with_injection_synced_mask(
+    clf,
+    data,
+    learn_edge_att,
+    w_feat,
+    w_message,
+    w_readout,
+    base_node_att=None,
+    base_edge_att=None,
+    node_mask=None,
+    edge_mask=None,
+):
+    """
+    Counterfactual prediction where masking semantics follow enabled injection points.
+    """
+    n_nodes = int(data.x.size(0))
+    device = data.x.device
+    dtype = data.x.dtype
+
+    if base_node_att is None:
+        node_att = torch.ones(n_nodes, 1, device=device, dtype=dtype)
+    else:
+        node_att = base_node_att
+        if node_att.dim() == 1:
+            node_att = node_att.unsqueeze(-1)
+        node_att = node_att.clone()
+
+    if base_edge_att is None:
+        src, dst = data.edge_index
+        edge_att = (node_att[src] * node_att[dst]).view(-1)
+    else:
+        edge_att = base_edge_att
+        if edge_att.dim() > 1:
+            edge_att = edge_att.view(-1)
+        edge_att = edge_att.clone()
+
+    if node_mask is not None and (w_feat or w_readout):
+        nm = node_mask.bool()
+        if nm.dim() > 1:
+            nm = nm.view(-1)
+        node_att[nm] = 0.0
+
+    if edge_mask is not None and (w_message or learn_edge_att):
+        em = edge_mask.bool()
+        if em.dim() > 1:
+            em = em.view(-1)
+        edge_att[em] = 0.0
+
+    return forward_clf_with_node_attention_injection(
+        clf,
+        data,
+        node_att,
+        edge_att,
+        learn_edge_att,
+        w_feat,
+        w_message,
+        w_readout,
+        edge_attr=data.edge_attr,
+    )
+
+
 def sample_node_level_gsat(sampling_fn, att_log_logits, epoch, training, use_raw_score_loss):
     """
     <SAMPLING> Node-level Concrete / sigmoid sampling (baseline GSAT path).
@@ -3679,9 +3740,9 @@ class GSAT(nn.Module):
             mi = ctx.get('motif_interp_logits')
             has_interp = mi is not None
 
-            node_att = ctx['node_att'].squeeze(-1)
+            node_att = ctx['node_att']
             src, dst = data.edge_index
-            edge_att = node_att[src] * node_att[dst]
+            edge_att = (node_att[src] * node_att[dst]).view(-1)
 
             nodes_to_motifs = data.nodes_to_motifs
             graph_batch = data.batch
@@ -3689,7 +3750,16 @@ class GSAT(nn.Module):
             graph_motif_id = graph_batch * max_motif_id + nodes_to_motifs
             unique_graph_motifs = graph_motif_id.unique()
 
-            orig_output = self.clf(data.x, data.edge_index, graph_batch, edge_attr=data.edge_attr, edge_atten=None)
+            orig_output = predict_with_injection_synced_mask(
+                self.clf,
+                data,
+                self.learn_edge_att,
+                self.w_feat,
+                self.w_message,
+                self.w_readout,
+                base_node_att=node_att,
+                base_edge_att=edge_att,
+            )
             orig_probs = torch.sigmoid(orig_output).squeeze()
 
             ms_np = ms.detach().cpu().numpy().reshape(-1)
@@ -3707,11 +3777,17 @@ class GSAT(nn.Module):
                 motif_edge_mask = src_in & dst_in
                 if motif_edge_mask.sum() == 0:
                     continue
-                masked_edge_att = edge_att.clone()
-                masked_edge_att[motif_edge_mask] = 0.0
-                masked_output = self.clf(
-                    data.x, data.edge_index, graph_batch,
-                    edge_attr=data.edge_attr, edge_atten=masked_edge_att.unsqueeze(-1),
+                masked_output = predict_with_injection_synced_mask(
+                    self.clf,
+                    data,
+                    self.learn_edge_att,
+                    self.w_feat,
+                    self.w_message,
+                    self.w_readout,
+                    base_node_att=node_att,
+                    base_edge_att=edge_att,
+                    node_mask=node_mask,
+                    edge_mask=motif_edge_mask,
                 )
                 masked_prob = torch.sigmoid(masked_output[graph_id]).item()
                 impact = abs(orig_probs[graph_id].item() - masked_prob)
@@ -4016,6 +4092,9 @@ class GSAT(nn.Module):
                             epoch,
                             self.learn_edge_att,
                             motif_incorporation_method=self.motif_method,
+                            w_feat=self.w_feat,
+                            w_message=self.w_message,
+                            w_readout=self.w_readout,
                         )
                         if explainer_metrics:
                             wandb_log_maybe(explainer_metrics, step=epoch, force=True)
@@ -4263,24 +4342,41 @@ class GSAT(nn.Module):
                                     if delta_node is not None else None
                                 )
 
-                                # ── Individual node/edge masking impact ──
-                                old_prediction = self.clf.forward(data.x, data.edge_index, batch, edge_attr=data.edge_attr)
+                                # ── Individual node/edge masking impact (synced to active injection points) ──
+                                base_node_att_cf = torch.ones(data.x.size(0), 1, device=data.x.device, dtype=data.x.dtype)
+                                base_edge_att_cf = torch.ones(data.edge_index.size(1), device=data.x.device, dtype=data.x.dtype)
+                                old_prediction = predict_with_injection_synced_mask(
+                                    self.clf,
+                                    data,
+                                    self.learn_edge_att,
+                                    self.w_feat,
+                                    self.w_message,
+                                    self.w_readout,
+                                    base_node_att=base_node_att_cf,
+                                    base_edge_att=base_edge_att_cf,
+                                )
                                 old_pred_val = float(old_prediction.squeeze().detach().cpu().item())
                                 nodes_to_motifs = getattr(data, 'nodes_to_motifs', None)
                                 smiles_val = getattr(data, 'smiles', None)
 
-                                # 1) Individual_node: zero node features + remove edges touching that node
+                                # 1) Individual_node: mask node channel; message mask on incident edges.
                                 for node_idx in range(data.x.size(0)):
-                                    masked_x = data.x.clone()
-                                    masked_x[node_idx] = 0.0
                                     node_mask = torch.zeros(data.x.size(0), dtype=torch.bool, device=data.x.device)
                                     node_mask[node_idx] = True
                                     src, dst = data.edge_index
-                                    keep = ~(node_mask[src] | node_mask[dst])
-                                    filt_ei = data.edge_index[:, keep]
-                                    filt_ea = data.edge_attr[keep] if data.edge_attr is not None else None
-
-                                    new_pred = self.clf.forward(masked_x, filt_ei, batch, edge_attr=filt_ea)
+                                    incident_edge_mask = node_mask[src] | node_mask[dst]
+                                    new_pred = predict_with_injection_synced_mask(
+                                        self.clf,
+                                        data,
+                                        self.learn_edge_att,
+                                        self.w_feat,
+                                        self.w_message,
+                                        self.w_readout,
+                                        base_node_att=base_node_att_cf,
+                                        base_edge_att=base_edge_att_cf,
+                                        node_mask=node_mask,
+                                        edge_mask=incident_edge_mask,
+                                    )
                                     rec = {
                                         'split': split_name, 'graph_idx': di, 'smiles': smiles_val,
                                         'node_index': node_idx,
@@ -4293,7 +4389,7 @@ class GSAT(nn.Module):
                                         self._indiv_node_f = open(os.path.join(self.seed_dir, 'Individual_node_node_masking_impact.jsonl'), 'w')
                                     self._indiv_node_f.write(json.dumps(rec) + '\n')
 
-                                # 2) Individual_edge: remove one undirected edge at a time
+                                # 2) Individual_edge: message-mask one undirected edge at a time.
                                 ei = data.edge_index
                                 seen_edges = set()
                                 for e_idx in range(ei.size(1)):
@@ -4303,11 +4399,18 @@ class GSAT(nn.Module):
                                         continue
                                     seen_edges.add(canon)
 
-                                    drop = ~((ei[0] == u) & (ei[1] == v)) & ~((ei[0] == v) & (ei[1] == u))
-                                    filt_ei = ei[:, drop]
-                                    filt_ea = data.edge_attr[drop] if data.edge_attr is not None else None
-
-                                    new_pred_e = self.clf.forward(data.x, filt_ei, batch, edge_attr=filt_ea)
+                                    edge_pair_mask = ((ei[0] == u) & (ei[1] == v)) | ((ei[0] == v) & (ei[1] == u))
+                                    new_pred_e = predict_with_injection_synced_mask(
+                                        self.clf,
+                                        data,
+                                        self.learn_edge_att,
+                                        self.w_feat,
+                                        self.w_message,
+                                        self.w_readout,
+                                        base_node_att=base_node_att_cf,
+                                        base_edge_att=base_edge_att_cf,
+                                        edge_mask=edge_pair_mask,
+                                    )
                                     rec_e = {
                                         'split': split_name, 'graph_idx': di, 'smiles': smiles_val,
                                         'edge_src': u, 'edge_dst': v,
@@ -4319,30 +4422,29 @@ class GSAT(nn.Module):
                                     self._indiv_edge_f.write(json.dumps(rec_e) + '\n')
 
                                 # ── Motif-level masking impact ──
-                                if nodes_to_motifs is not None and self.masked_data_features is not None:
+                                if nodes_to_motifs is not None:
                                     for local_motif in nodes_to_motifs.unique():
                                         local_motif_key = int(local_motif.item()) if hasattr(local_motif, 'item') else int(local_motif)
-
-                                        if local_motif_key not in self.masked_data_features[split_name]:
-                                            if local_motif in self.masked_data_features[split_name]:
-                                                local_motif_key = local_motif
-                                            else:
-                                                continue
-
-                                        if di not in self.masked_data_features[split_name][local_motif_key]:
+                                        motif_node_mask = nodes_to_motifs == local_motif
+                                        if motif_node_mask.sum() < 1:
                                             continue
+                                        src, dst = data.edge_index
+                                        motif_edge_mask = motif_node_mask[src] & motif_node_mask[dst]
 
-                                        masked_feature_graph = self.masked_data_features[split_name][local_motif_key][di]
-                                        masked_feature_graph = masked_feature_graph.to(self.device)
+                                        old_pv = old_pred_val
 
-                                        if masked_feature_graph.numel() == 0:
-                                            continue
-
-                                        old_prediction_motif = self.clf.forward(data.x, data.edge_index, batch, edge_attr=data.edge_attr)
-                                        old_pv = float(old_prediction_motif.squeeze().detach().cpu().item())
-
-                                        # 3) Motif_level_node_masking: zero motif features only
-                                        new_prediction = self.clf.forward(masked_feature_graph, data.edge_index, batch, edge_attr=data.edge_attr)
+                                        # 3) Motif_level_node_masking: mask motif nodes only.
+                                        new_prediction = predict_with_injection_synced_mask(
+                                            self.clf,
+                                            data,
+                                            self.learn_edge_att,
+                                            self.w_feat,
+                                            self.w_message,
+                                            self.w_readout,
+                                            base_node_att=base_node_att_cf,
+                                            base_edge_att=base_edge_att_cf,
+                                            node_mask=motif_node_mask,
+                                        )
                                         new_pv = float(new_prediction.squeeze().detach().cpu().item())
                                         motif_rec = {
                                             'split': split_name, 'graph_idx': di,
@@ -4353,14 +4455,19 @@ class GSAT(nn.Module):
                                             self._motif_node_f = open(os.path.join(self.seed_dir, 'Motif_level_node_masking_impact.jsonl'), 'w')
                                         self._motif_node_f.write(json.dumps(motif_rec) + '\n')
 
-                                        # 4) Motif_level_node_and_edge_masking: zero features + remove edges between masked nodes
-                                        masked_nodes = (masked_feature_graph.abs().sum(dim=1) == 0) & (data.x.abs().sum(dim=1) > 0)
-                                        src, dst = data.edge_index
-                                        keep_edge_mask = ~(masked_nodes[src] & masked_nodes[dst])
-                                        filtered_edge_index = data.edge_index[:, keep_edge_mask]
-                                        filtered_edge_attr = data.edge_attr[keep_edge_mask] if data.edge_attr is not None else None
-
-                                        new_pred_edge = self.clf.forward(masked_feature_graph, filtered_edge_index, batch, edge_attr=filtered_edge_attr)
+                                        # 4) Motif_level_node_and_edge_masking: mask motif nodes + intra-motif message edges.
+                                        new_pred_edge = predict_with_injection_synced_mask(
+                                            self.clf,
+                                            data,
+                                            self.learn_edge_att,
+                                            self.w_feat,
+                                            self.w_message,
+                                            self.w_readout,
+                                            base_node_att=base_node_att_cf,
+                                            base_edge_att=base_edge_att_cf,
+                                            node_mask=motif_node_mask,
+                                            edge_mask=motif_edge_mask,
+                                        )
                                         new_pv_e = float(new_pred_edge.squeeze().detach().cpu().item())
                                         motif_edge_rec = {
                                             'split': split_name, 'graph_idx': di,
@@ -5120,6 +5227,9 @@ def calculate_explainer_performance(
     epoch,
     learn_edge_att=False,
     motif_incorporation_method=None,
+    w_feat=False,
+    w_message=True,
+    w_readout=False,
 ):
     """
     Calculate explainer performance using edge masking approach.
@@ -5237,8 +5347,16 @@ def calculate_explainer_performance(
                         
                         # Motif attention vs impact correlation (sampled)
                         if batch_idx < max_batches_for_correlation:
-                            orig_output = model(batch_data.x, batch_data.edge_index, graph_batch,
-                                               edge_attr=edge_attr, edge_atten=None)
+                            orig_output = predict_with_injection_synced_mask(
+                                model,
+                                batch_data,
+                                learn_edge_att,
+                                w_feat,
+                                w_message,
+                                w_readout,
+                                base_node_att=att,
+                                base_edge_att=edge_att,
+                            )
                             orig_probs = torch.sigmoid(orig_output).squeeze()
                             for gm_id in unique_graph_motifs:
                                 node_mask = (graph_motif_id == gm_id)
@@ -5251,11 +5369,18 @@ def calculate_explainer_performance(
                                 motif_edge_mask = src_in_motif & dst_in_motif
                                 if motif_edge_mask.sum() == 0:
                                     continue
-                                masked_edge_att = edge_att.clone()
-                                masked_edge_att[motif_edge_mask] = 0.0
-                                masked_output = model(batch_data.x, batch_data.edge_index, graph_batch,
-                                                     edge_attr=edge_attr,
-                                                     edge_atten=masked_edge_att.unsqueeze(-1))
+                                masked_output = predict_with_injection_synced_mask(
+                                    model,
+                                    batch_data,
+                                    learn_edge_att,
+                                    w_feat,
+                                    w_message,
+                                    w_readout,
+                                    base_node_att=att,
+                                    base_edge_att=edge_att,
+                                    node_mask=node_mask,
+                                    edge_mask=motif_edge_mask,
+                                )
                                 masked_prob = torch.sigmoid(masked_output[graph_id]).item()
                                 impact = abs(orig_probs[graph_id].item() - masked_prob)
                                 motif_att_scores.append(motif_mean_att)
@@ -5268,9 +5393,17 @@ def calculate_explainer_performance(
             edge_att = edge_att.squeeze()
             all_att_values.append(edge_att.cpu().numpy())
             
-            # Get original prediction (with full attention)
-            orig_output = model(batch_data.x, batch_data.edge_index, batch_data.batch, 
-                               edge_attr=edge_attr, edge_atten=None)
+            # Get original prediction with baseline attention and active injection points.
+            orig_output = predict_with_injection_synced_mask(
+                model,
+                batch_data,
+                learn_edge_att,
+                w_feat,
+                w_message,
+                w_readout,
+                base_node_att=att,
+                base_edge_att=edge_att,
+            )
             
             # Process each graph in the batch
             num_graphs = batch_data.batch.max().item() + 1
@@ -5324,10 +5457,28 @@ def calculate_explainer_performance(
                     )
                     
                     # Get predictions with masked attention
-                    output_minus = model(batch_data.x, batch_data.edge_index, batch_data.batch,
-                                        edge_attr=edge_attr, edge_atten=fid_minus_att.unsqueeze(-1))
-                    output_plus = model(batch_data.x, batch_data.edge_index, batch_data.batch,
-                                       edge_attr=edge_attr, edge_atten=fid_plus_att.unsqueeze(-1))
+                    output_minus = forward_clf_with_node_attention_injection(
+                        model,
+                        batch_data,
+                        att if att.dim() > 1 else att.unsqueeze(-1),
+                        fid_minus_att,
+                        learn_edge_att,
+                        w_feat,
+                        w_message,
+                        w_readout,
+                        edge_attr=edge_attr,
+                    )
+                    output_plus = forward_clf_with_node_attention_injection(
+                        model,
+                        batch_data,
+                        att if att.dim() > 1 else att.unsqueeze(-1),
+                        fid_plus_att,
+                        learn_edge_att,
+                        w_feat,
+                        w_message,
+                        w_readout,
+                        edge_attr=edge_attr,
+                    )
                     
                     pred_minus = torch.sigmoid(output_minus[graph_idx])
                     pred_plus = torch.sigmoid(output_plus[graph_idx])
