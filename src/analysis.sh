@@ -65,8 +65,10 @@ EXPERIMENTS=(
   motif_readout_beta0.2_r0.7
   motif_readout_beta0.2_r0.7_deterministic
   motif_readout_beta0.3_r0.6_mean
+  motif_readout_beta0.3_r0.8
   simplified_motif_readout_maxmean_injection_ablation
   simplified_motif_readout_maxmean_info_loss_ablation
+  maxmean_clamped_111_eval_fixed
   maxmean_clamped_size_norm
   maxmean_unclamped_111
   test_gradient_info_coef0.2_tau2

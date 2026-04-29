@@ -2086,7 +2086,7 @@ class GSAT(nn.Module):
             return self.fix_r
         return self.get_r(self.decay_interval, self.decay_r, epoch, final_r=fr, init_r=ir)
 
-    def _factored_motif_regularized_prepare(self, data, epoch):
+    def _factored_motif_regularized_prepare(self, data, epoch, training):
         """
         z_k from motif-level pooled features: intra-attention r_m (intra_att) or concat(max, mean) (max_mean).
         Optionally z_k = [LN(z^(1)) || LN(z^att)] or z_k = LN(z^att) only (factored_motif_zk_zatt_only).
@@ -2138,7 +2138,7 @@ class GSAT(nn.Module):
                 z_k = torch.cat([z1_norm, zatt_norm], dim=-1)
             ones_m = torch.ones(data.x.size(0), device=data.x.device, dtype=data.x.dtype)
             counts = scatter(ones_m, inverse_indices, dim=0, dim_size=dim_m, reduce='sum')
-        z_k = F.dropout(z_k, p=self.factored_motif_zk_dropout_p, training=self.training)
+        z_k = F.dropout(z_k, p=self.factored_motif_zk_dropout_p, training=training)
         motif_att_log_logits = self.motif_scoring_mlp(z_k, motif_batch)
         ell_k = torch.clamp(motif_att_log_logits.squeeze(-1), -FACTORED_MOTIF_LOGIT_CLAMP, FACTORED_MOTIF_LOGIT_CLAMP)
         motif_att_log_logits = ell_k.unsqueeze(-1)
@@ -2783,7 +2783,7 @@ class GSAT(nn.Module):
                     alpha_intra,
                     counts,
                     delta_node,
-                ) = self._factored_motif_regularized_prepare(data, epoch)
+                ) = self._factored_motif_regularized_prepare(data, epoch, training)
                 ell_k_node = motif_att_log_logits[inverse_indices]
                 node_logit = ell_k_node + delta_node.unsqueeze(-1)
                 if self.factored_motif_node_logit_clamp is not None:
@@ -3231,7 +3231,7 @@ class GSAT(nn.Module):
                     alpha_intra,
                     counts,
                     delta_node,
-                ) = self._factored_motif_regularized_prepare(data, epoch)
+                ) = self._factored_motif_regularized_prepare(data, epoch, training=False)
                 ell_k_node = motif_att_log_logits[inverse_indices]
                 node_logit = ell_k_node + delta_node.unsqueeze(-1)
                 if self.factored_motif_node_logit_clamp is not None:
@@ -3819,8 +3819,11 @@ class GSAT(nn.Module):
 
     @torch.no_grad()
     def eval_one_batch(self, data, epoch):
+        self.eval()
         self.extractor.eval()
         self.clf.eval()
+        if self.motif_scoring_mlp is not None:
+            self.motif_scoring_mlp.eval()
         if self.motif_clf is not None:
             self.motif_clf.eval()
         if self.motif_interp_head is not None:
@@ -3830,8 +3833,11 @@ class GSAT(nn.Module):
         return att.data.cpu().reshape(-1), loss_dict, clf_logits.data.cpu()
 
     def train_one_batch(self, data, epoch, batch_idx=0):
+        self.train()
         self.extractor.train()
         self.clf.train()
+        if self.motif_scoring_mlp is not None:
+            self.motif_scoring_mlp.train()
         if self.motif_clf is not None:
             self.motif_clf.train()
         if self.motif_interp_head is not None:
@@ -4115,7 +4121,7 @@ class GSAT(nn.Module):
                                             alpha_intra,
                                             counts,
                                             delta_node,
-                                        ) = self._factored_motif_regularized_prepare(data, epoch)
+                                        ) = self._factored_motif_regularized_prepare(data, epoch, training=False)
                                         ell_k_node = motif_att_log_logits[inverse_indices]
                                         node_logit = ell_k_node + delta_node.unsqueeze(-1)
                                         if self.factored_motif_node_logit_clamp is not None:

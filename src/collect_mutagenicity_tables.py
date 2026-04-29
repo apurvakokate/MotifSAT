@@ -380,6 +380,16 @@ EXPERIMENT_ROW_CONFIG = {
         'row_label_prefix': 'fix_r',
         'path_extract': 'fix_r',
     },
+    'motif_readout_beta0.3_r0.8': {
+        'summary_path': ('weight_distribution_params', 'fix_r'),
+        'row_label_prefix': 'fix_r',
+        'path_extract': 'fix_r',
+    },
+    'maxmean_clamped_111_eval_fixed': {
+        'summary_path': ('loss_coefficients', 'info_loss_coef'),
+        'row_label_prefix': 'info_loss_coef',
+        'path_extract': 'info_loss_coef',
+    },
     'simplified_motif_readout_maxmean_injection_ablation': {
         'summary_path': None,
         'row_label_prefix': 'injection',

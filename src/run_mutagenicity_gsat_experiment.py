@@ -35,10 +35,12 @@ Active groups (EXPERIMENT_GROUPS):
   motif_readout_beta0.2_r0.7 — unweighted max+mean motif readout with LN+dropout(0.3), node gate alpha_v, message gate alpha_u*alpha_v, KL on deterministic motif alpha_m; L = L_pred + 0.2*L_info (fix_r=0.7, injection=111)
   motif_readout_beta0.2_r0.7_deterministic — same as motif_readout_beta0.2_r0.7 but no sampling noise (alpha_v = sigma(logit_v))
   motif_readout_beta0.3_r0.6_mean — same as motif_readout_beta0.2_r0.7 config family but with graph_pooling forced to mean for all backbones
+  motif_readout_beta0.3_r0.8 — beta readout with final_r=0.8 (and add graph pooling, as in original beta add variant)
   simplified_motif_readout_maxmean_injection_ablation — maxmean + no info warmup; sweep injection 010 / 101 / 011 / 111
   simplified_motif_readout_maxmean_info_loss_ablation — maxmean + 010 + no warmup; sweep info_loss_coef ∈ {0.01, 0.1, 0.3}
   maxmean_clamped — maxmean + 010 + no warmup; clamped factored-regularized readout; sweep info_loss_coef ∈ {0.3, 0.0}
   maxmean_clamped_111 — same as maxmean_clamped but injection 111; sweep info_loss_coef ∈ {0.3, 0.0}
+  maxmean_clamped_111_eval_fixed — same settings as maxmean_clamped_111, intended for post eval-mode fix reruns
   maxmean_clamped_size_norm — same as maxmean_clamped but motif-level info loss is size-normalized and injection 111; sweep info_loss_coef ∈ {0.3, 0.0}
   maxmean_unclamped_111 — same as maxmean_clamped_111 but node-logit clamp disabled; final_r=0.6, info_loss_coef=0.3
   no_info_loss — info_loss_coef=0, 011 injection; (1) base GSAT decay final_r=0.8, (2) motif readout max_mean + node sampling, (3) motif readout max_mean + motif sampling
@@ -1283,6 +1285,25 @@ EXPERIMENT_GROUPS['maxmean_clamped_111'] = {
     ],
 }
 
+EXPERIMENT_GROUPS['maxmean_clamped_111_eval_fixed'] = {
+    'experiment_name': 'maxmean_clamped_111_eval_fixed',
+    'variants': [
+        {
+            'variant_id': f'maxmean_clamped_111_eval_fixed_{vid}',
+            'gsat_overrides': {
+                'tuning_id': f'maxmean_clamped_111_eval_fixed_{vid}',
+                **_DECAY_R_BASE,
+                **_SIMPLIFIED_MOTIF_READOUT_MAXMEAN_NO_WARMUP_GSAT,
+                **INJECTION_PRESETS['111'],
+                **_MAXMEAN_CLAMPED_GRAD_PROBE,
+                'info_loss_coef': coef,
+            },
+            'learn_edge_att': False,
+        }
+        for vid, coef in _MAXMEAN_CLAMPED_INFO_VARIANTS
+    ],
+}
+
 EXPERIMENT_GROUPS['maxmean_clamped_size_norm'] = {
     'experiment_name': 'maxmean_clamped_size_norm',
     'variants': [
@@ -1427,6 +1448,24 @@ EXPERIMENT_GROUPS['motif_readout_beta0.3_r0.6_mean'] = {
     ],
 }
 
+EXPERIMENT_GROUPS['motif_readout_beta0.3_r0.8'] = {
+    'experiment_name': 'motif_readout_beta0.3_r0.8',
+    'variants': [
+        {
+            'variant_id': 'motif_readout_beta0.3_r0.8',
+            'gsat_overrides': {
+                'tuning_id': 'motif_readout_beta0.3_r0.8',
+                **_MOTIF_READOUT_BETA02_R07_GSAT,
+                'final_r': 0.8,
+            },
+            'learn_edge_att': False,
+            'model_overrides': {
+                'graph_pooling': 'add',
+            },
+        },
+    ],
+}
+
 EXPERIMENT_GROUPS['factored_motif_attention_grid'] = {
     'experiment_name': 'factored_motif_attention_grid',
     'variants': [
@@ -1561,10 +1600,12 @@ def main():
         'motif_readout_beta0.2_r0.7',
         'motif_readout_beta0.2_r0.7_deterministic',
         'motif_readout_beta0.3_r0.6_mean',
+        'motif_readout_beta0.3_r0.8',
         'simplified_motif_readout_maxmean_injection_ablation',
         'simplified_motif_readout_maxmean_info_loss_ablation',
         'maxmean_clamped',
         'maxmean_clamped_111',
+        'maxmean_clamped_111_eval_fixed',
         'maxmean_clamped_size_norm',
         'maxmean_unclamped_111',
         'test_gradients',
