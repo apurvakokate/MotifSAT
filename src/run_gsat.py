@@ -3819,7 +3819,7 @@ class GSAT(nn.Module):
 
     @torch.no_grad()
     def eval_one_batch(self, data, epoch):
-        self.eval()
+        nn.Module.train(self, mode=False)
         self.extractor.eval()
         self.clf.eval()
         if self.motif_scoring_mlp is not None:
@@ -3833,7 +3833,7 @@ class GSAT(nn.Module):
         return att.data.cpu().reshape(-1), loss_dict, clf_logits.data.cpu()
 
     def train_one_batch(self, data, epoch, batch_idx=0):
-        self.train()
+        nn.Module.train(self, mode=True)
         self.extractor.train()
         self.clf.train()
         if self.motif_scoring_mlp is not None:
