@@ -385,6 +385,11 @@ EXPERIMENT_ROW_CONFIG = {
         'row_label_prefix': 'fix_r',
         'path_extract': 'fix_r',
     },
+    'motif_readout_beta0.3_r0.8_info0_sweep': {
+        'summary_path': None,
+        'row_label_prefix': 'cfg',
+        'path_extract': 'beta_info0_sweep',
+    },
     'maxmean_clamped_111_eval_fixed': {
         'summary_path': ('loss_coefficients', 'info_loss_coef'),
         'row_label_prefix': 'info_loss_coef',
@@ -639,6 +644,16 @@ def _extract_value_from_parts(parts, mode):
             m = re.search(r'pred[0-9.]+_info([0-9.]+)_motif', p)
             if m:
                 return _coerce_number(m.group(1))
+        return None
+
+    elif mode == 'beta_info0_sweep':
+        joined = '/'.join(parts)
+        m = re.search(r'beta030_r08_info0_(node|motif)_pool(add|mean)_temp([0-9p]+)', joined)
+        if m:
+            pert = m.group(1)
+            pool = m.group(2)
+            temp = m.group(3).replace('p', '.')
+            return f'pert={pert},pool={pool},temp={temp}'
         return None
 
     return None

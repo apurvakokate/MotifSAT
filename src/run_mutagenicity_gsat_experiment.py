@@ -36,6 +36,7 @@ Active groups (EXPERIMENT_GROUPS):
   motif_readout_beta0.2_r0.7_deterministic — same as motif_readout_beta0.2_r0.7 but no sampling noise (alpha_v = sigma(logit_v))
   motif_readout_beta0.3_r0.6_mean — same as motif_readout_beta0.2_r0.7 config family but with graph_pooling forced to mean for all backbones
   motif_readout_beta0.3_r0.8 — beta readout with final_r=0.8 (and add graph pooling, as in original beta add variant)
+  motif_readout_beta0.3_r0.8_info0_sweep — beta readout with final_r=0.8 and info_loss_coef=0; sweep perturbation granularity (node vs motif), graph pooling (add vs mean), and sampling temperature
   simplified_motif_readout_maxmean_injection_ablation — maxmean + no info warmup; sweep injection 010 / 101 / 011 / 111
   simplified_motif_readout_maxmean_info_loss_ablation — maxmean + 010 + no warmup; sweep info_loss_coef ∈ {0.01, 0.1, 0.3}
   maxmean_clamped — maxmean + 010 + no warmup; clamped factored-regularized readout; sweep info_loss_coef ∈ {0.3, 0.0}
@@ -1466,6 +1467,37 @@ EXPERIMENT_GROUPS['motif_readout_beta0.3_r0.8'] = {
     ],
 }
 
+_BETA_INFO0_PERTURB = (
+    ('node', False),
+    ('motif', True),
+)
+_BETA_INFO0_POOL = ('add', 'mean')
+_BETA_INFO0_TEMP = (0.5, 1.0, 2.0)
+
+EXPERIMENT_GROUPS['motif_readout_beta0.3_r0.8_info0_sweep'] = {
+    'experiment_name': 'motif_readout_beta0.3_r0.8_info0_sweep',
+    'variants': [
+        {
+            'variant_id': f'beta030_r08_info0_{pert_tag}_pool{pool}_temp{str(temp).replace(".", "p")}',
+            'gsat_overrides': {
+                'tuning_id': f'beta030_r08_info0_{pert_tag}_pool{pool}_temp{str(temp).replace(".", "p")}',
+                **_MOTIF_READOUT_BETA02_R07_GSAT,
+                'final_r': 0.8,
+                'info_loss_coef': 0.0,
+                'motif_level_sampling': motif_level_sampling,
+                'attention_sampling_temp': temp,
+            },
+            'learn_edge_att': False,
+            'model_overrides': {
+                'graph_pooling': pool,
+            },
+        }
+        for pert_tag, motif_level_sampling in _BETA_INFO0_PERTURB
+        for pool in _BETA_INFO0_POOL
+        for temp in _BETA_INFO0_TEMP
+    ],
+}
+
 EXPERIMENT_GROUPS['factored_motif_attention_grid'] = {
     'experiment_name': 'factored_motif_attention_grid',
     'variants': [
@@ -1601,6 +1633,7 @@ def main():
         'motif_readout_beta0.2_r0.7_deterministic',
         'motif_readout_beta0.3_r0.6_mean',
         'motif_readout_beta0.3_r0.8',
+        'motif_readout_beta0.3_r0.8_info0_sweep',
         'simplified_motif_readout_maxmean_injection_ablation',
         'simplified_motif_readout_maxmean_info_loss_ablation',
         'maxmean_clamped',

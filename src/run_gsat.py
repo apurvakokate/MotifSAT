@@ -2278,7 +2278,12 @@ class GSAT(nn.Module):
         )
         motif_att_log_logits = ell_m.unsqueeze(-1)
         node_logit = motif_att_log_logits[inverse_indices]
-        alpha_v = self.sampling(node_logit, epoch, training)
+        if self.motif_level_sampling:
+            # Sample at motif level, then broadcast to nodes (matched with readout branch semantics).
+            motif_att = self.sampling(motif_att_log_logits, epoch, training)
+            alpha_v = motif_att[inverse_indices]
+        else:
+            alpha_v = self.sampling(node_logit, epoch, training)
         edge_att = self.lift_node_att_to_edge_att(alpha_v, data.edge_index)
         ones = torch.ones(data.x.size(0), dtype=h_v.dtype, device=h_v.device)
         motif_sizes = scatter(ones, inverse_indices, dim=0, dim_size=motif_emb.size(0), reduce='sum')
