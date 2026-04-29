@@ -37,6 +37,14 @@ from collect_mutagenicity_tables import (
     compute_posthoc_correlation,
     find_results,
 )
+from motif_stat_vs_importance_roc import (
+    _motif_id_to_name_map,
+    _prepare_association_by_motif_name,
+    auc_vs_delta_top_quantile,
+    auc_vs_fisher_q,
+    mean_abs_score_per_motif_name,
+    paired_score_and_stats,
+)
 
 
 MODEL_ORDER = ["GAT", "GCN", "GIN", "PNA", "SAGE"]
@@ -90,10 +98,80 @@ def _split_keys(split_name: str) -> tuple[str, str]:
     return "metric/best_clf_roc_test", "metric/best_x_roc_test"
 
 
+def _default_association_csv(dataset: str) -> Path:
+    return (Path("../data") / "motif_association" / f"{dataset}_fold0_all_motif_class_association.csv").resolve()
+
+
+def _build_xroc_fallback_context(
+    dataset: str,
+    association_csv: str | None,
+    label_mode: str,
+    fisher_q_alpha: float,
+    delta_label_quantile: float,
+) -> dict[str, Any] | None:
+    assoc_path = Path(association_csv).expanduser().resolve() if association_csv else _default_association_csv(dataset)
+    if not assoc_path.exists():
+        return None
+    try:
+        assoc = pd.read_csv(assoc_path)
+    except Exception:
+        return None
+    if assoc.empty:
+        return None
+    assoc_by_name = _prepare_association_by_motif_name(assoc)
+    motif_id_to_name = _motif_id_to_name_map(assoc)
+    if assoc_by_name.empty or not motif_id_to_name:
+        return None
+    return {
+        "assoc_path": str(assoc_path),
+        "assoc_by_name": assoc_by_name,
+        "motif_id_to_name": motif_id_to_name,
+        "label_mode": label_mode,
+        "fisher_q_alpha": float(fisher_q_alpha),
+        "delta_label_quantile": float(delta_label_quantile),
+        "cache": {},
+        "hits": 0,
+    }
+
+
+def _compute_xroc_fallback(
+    seed_dir: Path,
+    split: str,
+    ctx: dict[str, Any] | None,
+) -> float:
+    if ctx is None:
+        return float("nan")
+    key = (str(seed_dir), split)
+    cache: dict[tuple[str, str], float] = ctx["cache"]
+    if key in cache:
+        return cache[key]
+    node_scores = seed_dir / "node_scores.jsonl"
+    if not node_scores.exists():
+        cache[key] = float("nan")
+        return cache[key]
+    mean_score = mean_abs_score_per_motif_name(node_scores, ctx["motif_id_to_name"], split=split)
+    if not mean_score:
+        cache[key] = float("nan")
+        return cache[key]
+    scores, deltas, qvals = paired_score_and_stats(ctx["assoc_by_name"], mean_score)
+    if ctx["label_mode"] == "fisher_q":
+        auc, _, _ = auc_vs_fisher_q(scores, qvals, fisher_q_alpha=ctx["fisher_q_alpha"])
+    else:
+        auc, _, _ = auc_vs_delta_top_quantile(
+            scores,
+            deltas,
+            delta_label_quantile=ctx["delta_label_quantile"],
+        )
+    out = float(auc) if auc is not None and np.isfinite(auc) else float("nan")
+    cache[key] = out
+    return out
+
+
 def build_group_rows(
     results_dir: Path,
     dataset: str,
     experiments: list[str],
+    xroc_fallback_ctx: dict[str, Any] | None = None,
     verbose: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, list[dict[str, Any]]]]:
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
@@ -149,8 +227,14 @@ def build_group_rows(
                 for split in ("train", "validation", "test"):
                     clf_key, x_key = _split_keys(split)
                     clf = metrics.get(clf_key, np.nan)
-                    xroc = metrics.get(x_key, np.nan)
                     corr_split = "valid" if split == "validation" else split
+                    xroc_raw = metrics.get(x_key, np.nan)
+                    xroc = float(xroc_raw) if np.isfinite(xroc_raw) else np.nan
+                    if (not np.isfinite(xroc) or xroc == 0.0) and xroc_fallback_ctx is not None:
+                        xroc_fb = _compute_xroc_fallback(Path(sd), corr_split, xroc_fallback_ctx)
+                        if np.isfinite(xroc_fb):
+                            xroc = float(xroc_fb)
+                            xroc_fallback_ctx["hits"] += 1
                     motif_r, _, motif_n = compute_posthoc_correlation(sd, split=corr_split)
                     node_r, _, node_n = compute_node_score_impact_correlation(sd, split=corr_split)
                     split_metric_buckets[split].append(
@@ -315,6 +399,31 @@ def main() -> None:
     parser.add_argument("--results_dir", type=str, default=str(Path("../tuning_results")))
     parser.add_argument("--output_dir", type=str, default=str(Path("../full_experiment_report")))
     parser.add_argument("--experiments", nargs="*", default=None, help="Defaults to ALL_EXPERIMENT_NAMES")
+    parser.add_argument(
+        "--association_csv",
+        type=str,
+        default=None,
+        help="Optional motif association CSV for x_roc fallback (default: ../data/motif_association/<dataset>_fold0_all_motif_class_association.csv).",
+    )
+    parser.add_argument(
+        "--xroc_label_mode",
+        type=str,
+        default="fisher_q",
+        choices=["fisher_q", "abs_delta_topq"],
+        help="Label mode for fallback x_roc computation (mirrors motif_stat_vs_importance_roc.py).",
+    )
+    parser.add_argument(
+        "--fisher_q_alpha",
+        type=float,
+        default=0.05,
+        help="Positive motif threshold for fisher_q fallback mode.",
+    )
+    parser.add_argument(
+        "--delta_label_quantile",
+        type=float,
+        default=0.75,
+        help="Positive motif threshold quantile for abs_delta_topq fallback mode.",
+    )
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -331,8 +440,25 @@ def main() -> None:
     results_dir = Path(args.results_dir).resolve()
     output_dir = Path(args.output_dir).resolve() / args.dataset
     output_dir.mkdir(parents=True, exist_ok=True)
+    xroc_fallback_ctx = _build_xroc_fallback_context(
+        dataset=args.dataset,
+        association_csv=args.association_csv,
+        label_mode=args.xroc_label_mode,
+        fisher_q_alpha=args.fisher_q_alpha,
+        delta_label_quantile=args.delta_label_quantile,
+    )
+    if xroc_fallback_ctx is None:
+        print("[INFO] x_roc fallback disabled (association CSV unavailable/invalid).")
+    else:
+        print(f"[INFO] x_roc fallback enabled using: {xroc_fallback_ctx['assoc_path']}")
 
-    rows, by_experiment_records = build_group_rows(results_dir, args.dataset, experiments, verbose=args.verbose)
+    rows, by_experiment_records = build_group_rows(
+        results_dir,
+        args.dataset,
+        experiments,
+        xroc_fallback_ctx=xroc_fallback_ctx,
+        verbose=args.verbose,
+    )
     if not rows:
         print("[WARN] No rows generated. Check dataset/results_dir/experiments.")
         return
@@ -354,6 +480,8 @@ def main() -> None:
     print("  - motif_level_score_vs_impact_grid_train_all_rows.png")
     print("  - motif_level_score_vs_impact_grid_validation_all_rows.png")
     print("  - motif_level_score_vs_impact_grid_test_all_rows.png")
+    if xroc_fallback_ctx is not None:
+        print(f"[INFO] x_roc fallback substitutions: {xroc_fallback_ctx['hits']}")
 
 
 if __name__ == "__main__":
