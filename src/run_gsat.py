@@ -601,6 +601,11 @@ def forward_clf_with_node_attention_injection(
     Matches the node-attention branch in forward_pass (previously duplicated at ~1266–1273 and ~1311–1318).
     When learn_edge_att is True, uses full-graph forward with edge_atten (motif readout lifts node att to edges).
     """
+    # Message passing layers multiply [E, hidden] by edge attention and expect
+    # attention to be broadcastable as [E, 1]. Guard against accidental [E].
+    if edge_att is not None and edge_att.dim() == 1:
+        edge_att = edge_att.unsqueeze(-1)
+
     if learn_edge_att:
         return clf(data.x, data.edge_index, data.batch, edge_attr=edge_attr, edge_atten=edge_att)
     x_clf = data.x * node_att if w_feat else data.x
@@ -647,11 +652,11 @@ def predict_with_injection_synced_mask(
 
     if base_edge_att is None:
         src, dst = data.edge_index
-        edge_att = (node_att[src] * node_att[dst]).view(-1)
+        edge_att = node_att[src] * node_att[dst]
     else:
         edge_att = base_edge_att
-        if edge_att.dim() > 1:
-            edge_att = edge_att.view(-1)
+        if edge_att.dim() == 1:
+            edge_att = edge_att.unsqueeze(-1)
         edge_att = edge_att.clone()
 
     if node_mask is not None and (w_feat or w_readout):
