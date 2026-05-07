@@ -1498,6 +1498,29 @@ EXPERIMENT_GROUPS['motif_readout_beta0.3_r0.8_info0_sweep'] = {
     ],
 }
 
+EXPERIMENT_GROUPS['motif_readout_info0_motif_noise_add_temp1_diag'] = {
+    'experiment_name': 'motif_readout_info0_motif_noise_add_temp1_diag',
+    'variants': [
+        {
+            'variant_id': 'info0_motif_pooladd_temp1p0_diag',
+            'gsat_overrides': {
+                'tuning_id': 'info0_motif_pooladd_temp1p0_diag',
+                **_MOTIF_READOUT_BETA02_R07_GSAT,
+                'final_r': 0.8,
+                'info_loss_coef': 0.0,
+                'motif_level_sampling': True,
+                'attention_sampling_temp': 1.0,
+                'log_motif_sampling_diagnostics': True,
+                'save_motif_logits_posthoc': True,
+            },
+            'learn_edge_att': False,
+            'model_overrides': {
+                'graph_pooling': 'add',
+            },
+        },
+    ],
+}
+
 EXPERIMENT_GROUPS['factored_motif_attention_grid'] = {
     'experiment_name': 'factored_motif_attention_grid',
     'variants': [
@@ -1634,6 +1657,7 @@ def main():
         'motif_readout_beta0.3_r0.6_mean',
         'motif_readout_beta0.3_r0.8',
         'motif_readout_beta0.3_r0.8_info0_sweep',
+        'motif_readout_info0_motif_noise_add_temp1_diag',
         'simplified_motif_readout_maxmean_injection_ablation',
         'simplified_motif_readout_maxmean_info_loss_ablation',
         'maxmean_clamped',

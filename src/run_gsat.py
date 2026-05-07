@@ -1574,6 +1574,9 @@ class GSAT(nn.Module):
             raise ValueError('attention_sampling_temp must be > 0')
         # If True: always use σ(logits) for attention (no Concrete / Gumbel-style sampling in training)
         self.no_attention_sampling = bool(method_config.get('no_attention_sampling', False))
+        # Optional diagnostics for motif-level sampling runs.
+        self.log_motif_sampling_diagnostics = bool(method_config.get('log_motif_sampling_diagnostics', False))
+        self.save_motif_logits_posthoc = bool(method_config.get('save_motif_logits_posthoc', False))
         # Motif IB: linear ramp of loss weight 0→1 over ib_ramp_epochs after warmup; r_ib linear init→final
         self.ib_ramp_epochs = int(method_config.get('ib_ramp_epochs', 0))
         
@@ -1785,6 +1788,8 @@ class GSAT(nn.Module):
                 'motif_grad_probe_epochs': self.motif_grad_probe_epochs,
                 'motif_grad_probe_start_epoch': self.motif_grad_probe_start_epoch,
                 'motif_grad_probe_epoch_every': self.motif_grad_probe_epoch_every,
+                'log_motif_sampling_diagnostics': self.log_motif_sampling_diagnostics,
+                'save_motif_logits_posthoc': self.save_motif_logits_posthoc,
             },
             'loss_coefficients': {
                 'pred_loss_coef': self.pred_loss_coef,
@@ -1894,6 +1899,86 @@ class GSAT(nn.Module):
 
         with open(dist_path, 'a') as f:
             f.write(json.dumps(dist_record) + '\n')
+
+    def _collect_motif_sampling_batch_arrays(self, ctx, epoch, training_mode):
+        """
+        Build motif-level arrays for diagnostics:
+        - motif_logit
+        - sigma_no_noise = sigmoid(motif_logit)
+        - sigma_with_noise = sampled motif attention (when motif-level sampling is active)
+        - logistic_noise (recovered from sampled sigma, in logit space)
+        """
+        if (
+            not self.log_motif_sampling_diagnostics
+            or self.motif_method != 'readout'
+            or not self.motif_level_sampling
+            or not isinstance(ctx, dict)
+        ):
+            return None
+
+        motif_logit_raw = ctx.get('motif_logit_raw')
+        inverse_indices = ctx.get('inverse_indices')
+        node_att = ctx.get('node_att')
+        if motif_logit_raw is None or inverse_indices is None or node_att is None:
+            return None
+
+        motif_logit = motif_logit_raw.view(-1).detach()
+        if motif_logit.numel() == 0:
+            return None
+
+        node_att_vec = node_att.view(-1)
+        dim_m = int(motif_logit.numel())
+        motif_sigma_with_noise = scatter(
+            node_att_vec,
+            inverse_indices,
+            dim=0,
+            dim_size=dim_m,
+            reduce='mean',
+        ).detach()
+        motif_sigma_no_noise = torch.sigmoid(motif_logit).detach()
+
+        if training_mode and (not self.no_attention_sampling) and epoch >= self.info_warmup_epochs:
+            eps = 1e-8
+            s = motif_sigma_with_noise.clamp(min=eps, max=1.0 - eps)
+            recovered = torch.log(s) - torch.log(1.0 - s)
+            motif_noise = self.attention_sampling_temp * recovered - motif_logit
+        else:
+            motif_noise = torch.zeros_like(motif_logit)
+
+        return {
+            'motif_logit': motif_logit.cpu().numpy(),
+            'sigma_no_noise': motif_sigma_no_noise.cpu().numpy(),
+            'sigma_with_noise': motif_sigma_with_noise.cpu().numpy(),
+            'motif_noise': motif_noise.cpu().numpy(),
+        }
+
+    @staticmethod
+    def _merge_motif_sampling_epoch_arrays(epoch_arrays):
+        if not epoch_arrays:
+            return None
+        keys = ('motif_logit', 'sigma_no_noise', 'sigma_with_noise', 'motif_noise')
+        merged = {}
+        for k in keys:
+            chunks = [a[k] for a in epoch_arrays if k in a and a[k] is not None and len(a[k]) > 0]
+            if chunks:
+                merged[k] = np.concatenate(chunks, axis=0)
+        return merged if merged else None
+
+    @staticmethod
+    def _add_motif_sampling_diag_to_wandb(wandb_metrics, phase, merged_diag):
+        if not merged_diag:
+            return
+        for key, arr in merged_diag.items():
+            if arr is None or len(arr) == 0:
+                continue
+            base = f'{phase}/motif_sampling/{key}'
+            wandb_metrics[f'{base}_mean'] = float(np.mean(arr))
+            wandb_metrics[f'{base}_std'] = float(np.std(arr))
+            wandb_metrics[f'{base}_min'] = float(np.min(arr))
+            wandb_metrics[f'{base}_max'] = float(np.max(arr))
+            h = _wandb_histogram_safe(arr, num_bins=50)
+            if h is not None:
+                wandb_metrics[f'{base}_distribution'] = h
 
     def save_final_metrics(self, metric_dict):
         """Save final best metrics after training completes."""
@@ -3874,7 +3959,7 @@ class GSAT(nn.Module):
                 print(f"[WARNING] Failed to save motif readout per-instance correlation points: {e}")
         return out
 
-    def _save_post_training_analysis_artifacts(self, valid_loader, use_edge_attr, last_epoch):
+    def _save_post_training_analysis_artifacts(self, loaders, use_edge_attr, last_epoch):
         """
         Disk artifacts for offline analysis: final learned scalar params, JSON-safe motif readout metrics.
         Does not replace check_artifacts_exist markers (node_scores.jsonl / edge_scores.jsonl).
@@ -3890,27 +3975,95 @@ class GSAT(nn.Module):
             torch.save(lp, sd / 'gsat_learned_scalars.pt')
 
         if self.motif_method == 'readout':
-            mrm = self.compute_motif_readout_correlation_metrics(
-                valid_loader,
-                last_epoch,
-                use_edge_attr,
-                max_batches=48,
-                include_wandb_histogram=False,
-                split_name='valid',
-                save_points_path=Path(self.seed_dir) / 'motif_readout_corr_points_valid.jsonl',
-            )
-            serial = {}
-            for k, v in mrm.items():
-                if isinstance(v, (int, float, bool, str, type(None))):
-                    serial[k] = v
-                elif isinstance(v, list):
-                    serial[k] = v
-            with open(sd / 'motif_readout_analysis.json', 'w') as f:
-                json.dump(serial, f, indent=2)
-            payload = {k: v for k, v in serial.items() if isinstance(v, (int, float))}
+            valid_loader = loaders.get('valid')
+            if valid_loader is not None:
+                mrm = self.compute_motif_readout_correlation_metrics(
+                    valid_loader,
+                    last_epoch,
+                    use_edge_attr,
+                    max_batches=48,
+                    include_wandb_histogram=False,
+                    split_name='valid',
+                    save_points_path=Path(self.seed_dir) / 'motif_readout_corr_points_valid.jsonl',
+                )
+                serial = {}
+                for k, v in mrm.items():
+                    if isinstance(v, (int, float, bool, str, type(None))):
+                        serial[k] = v
+                    elif isinstance(v, list):
+                        serial[k] = v
+                with open(sd / 'motif_readout_analysis.json', 'w') as f:
+                    json.dump(serial, f, indent=2)
+                payload = {k: v for k, v in serial.items() if isinstance(v, (int, float))}
+            if self.save_motif_logits_posthoc:
+                if valid_loader is not None:
+                    self._save_motif_logits_snapshot(
+                        valid_loader,
+                        use_edge_attr,
+                        last_epoch,
+                        split_name='valid',
+                        out_path=sd / 'motif_logits_last_epoch_valid.jsonl',
+                    )
+                test_loader = loaders.get('test')
+                if test_loader is not None:
+                    self._save_motif_logits_snapshot(
+                        test_loader,
+                        use_edge_attr,
+                        last_epoch,
+                        split_name='test',
+                        out_path=sd / 'motif_logits_last_epoch_test.jsonl',
+                    )
 
         self._merge_experiment_summary_artifact_paths()
         return payload
+
+    @torch.no_grad()
+    def _save_motif_logits_snapshot(self, data_loader, use_edge_attr, epoch, split_name, out_path):
+        """
+        Save motif logits at the end of training for post-hoc analysis.
+        One row per motif instance in loader order.
+        """
+        out_path = Path(out_path)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        graph_offset = 0
+        wrote = 0
+
+        self.clf.eval()
+        self.extractor.eval()
+        if self.motif_scoring_mlp is not None:
+            self.motif_scoring_mlp.eval()
+
+        with open(out_path, 'w') as f:
+            for data in data_loader:
+                data = process_data(data, use_edge_attr).to(self.device)
+                _ = self.forward_pass(data, epoch, training=False)
+                ctx = getattr(self, '_loss_ctx', None) or {}
+                motif_logit_raw = ctx.get('motif_logit_raw')
+                motif_batch = ctx.get('motif_batch')
+                motif_ids = ctx.get('motif_ids')
+                if motif_logit_raw is None or motif_batch is None:
+                    graph_offset += int(data.num_graphs)
+                    continue
+
+                logits = motif_logit_raw.view(-1).detach().cpu()
+                sigma = torch.sigmoid(logits)
+                m_batch = motif_batch.detach().cpu().view(-1)
+                m_ids = motif_ids.detach().cpu().view(-1) if motif_ids is not None else None
+                for i in range(logits.numel()):
+                    rec = {
+                        'split': split_name,
+                        'epoch': int(epoch),
+                        'graph_idx': int(graph_offset + int(m_batch[i].item())),
+                        'motif_row_idx': int(i),
+                        'motif_logit': float(logits[i].item()),
+                        'motif_sigmoid': float(sigma[i].item()),
+                    }
+                    if m_ids is not None and i < m_ids.numel():
+                        rec['motif_id'] = int(m_ids[i].item())
+                    f.write(json.dumps(rec) + '\n')
+                    wrote += 1
+                graph_offset += int(data.num_graphs)
+        print(f'[INFO] Saved motif logits snapshot ({split_name}): {out_path} rows={wrote}')
 
     def _merge_experiment_summary_artifact_paths(self):
         """Record paths to post-training analysis files in experiment_summary.json."""
@@ -3925,6 +4078,10 @@ class GSAT(nn.Module):
                 pt['motif_readout_analysis_json'] = 'motif_readout_analysis.json'
             if (Path(self.seed_dir) / 'gsat_learned_scalars.pt').exists():
                 pt['gsat_learned_scalars_pt'] = 'gsat_learned_scalars.pt'
+            if (Path(self.seed_dir) / 'motif_logits_last_epoch_valid.jsonl').exists():
+                pt['motif_logits_last_epoch_valid_jsonl'] = 'motif_logits_last_epoch_valid.jsonl'
+            if (Path(self.seed_dir) / 'motif_logits_last_epoch_test.jsonl').exists():
+                pt['motif_logits_last_epoch_test_jsonl'] = 'motif_logits_last_epoch_test.jsonl'
             if pt:
                 summary['post_training_analysis'] = pt
             with open(p, 'w') as f:
@@ -3971,6 +4128,7 @@ class GSAT(nn.Module):
 
         all_loss_dict = {}
         all_exp_labels, all_att, all_clf_labels, all_clf_logits, all_precision_at_k = ([] for i in range(5))
+        motif_diag_batches = []
         pbar = tqdm(data_loader)
         for idx, data in enumerate(pbar):
             data = process_data(data, use_edge_attr)
@@ -3978,6 +4136,14 @@ class GSAT(nn.Module):
                 att, loss_dict, clf_logits = run_one_batch(data.to(self.device), epoch, idx)
             else:
                 att, loss_dict, clf_logits = run_one_batch(data.to(self.device), epoch)
+
+            diag = self._collect_motif_sampling_batch_arrays(
+                getattr(self, '_loss_ctx', None),
+                epoch=epoch,
+                training_mode=(phase.strip() == 'train'),
+            )
+            if diag is not None:
+                motif_diag_batches.append(diag)
 
             exp_labels = data.edge_label.data.cpu()
             precision_at_k = self.get_precision_at_k(att, exp_labels, self.k, data.batch, data.edge_index)
@@ -3995,8 +4161,10 @@ class GSAT(nn.Module):
 
                 for k, v in all_loss_dict.items():
                     all_loss_dict[k] = v / loader_len
+                motif_diag_epoch = self._merge_motif_sampling_epoch_arrays(motif_diag_batches)
                 desc, att_auroc, precision, clf_acc, clf_roc, avg_loss = self.log_epoch(epoch, phase, all_loss_dict, all_exp_labels, all_att,
-                                                                                        all_precision_at_k, all_clf_labels, all_clf_logits, batch=False)
+                                                                                        all_precision_at_k, all_clf_labels, all_clf_logits, batch=False,
+                                                                                        motif_sampling_diag=motif_diag_epoch)
                 self.save_epoch_metrics(epoch, phase.strip(), all_loss_dict, att_auroc, precision, clf_acc, clf_roc)
                 self.save_attention_distributions(epoch, phase.strip(), all_att)
             pbar.set_description(desc)
@@ -4558,7 +4726,7 @@ class GSAT(nn.Module):
             print('====================================')
         try:
             extra_m = self._save_post_training_analysis_artifacts(
-                loaders['valid'], use_edge_attr, max(0, self.epochs - 1),
+                loaders, use_edge_attr, max(0, self.epochs - 1),
             )
             if extra_m:
                 metric_dict.update(extra_m)
@@ -4567,7 +4735,7 @@ class GSAT(nn.Module):
         self.save_final_metrics(metric_dict)
         return metric_dict
 
-    def log_epoch(self, epoch, phase, loss_dict, exp_labels, att, precision_at_k, clf_labels, clf_logits, batch):
+    def log_epoch(self, epoch, phase, loss_dict, exp_labels, att, precision_at_k, clf_labels, clf_logits, batch, motif_sampling_diag=None):
         desc = f'[Seed {self.random_state}, Epoch: {epoch}]: gsat_{phase}........., ' if batch else f'[Seed {self.random_state}, Epoch: {epoch}]: gsat_{phase} finished, '
         for k, v in loss_dict.items():
             if not batch:
@@ -4611,6 +4779,8 @@ class GSAT(nn.Module):
                 # Compute attention quality metrics
                 att_quality = self._compute_attention_quality_metrics(att)
                 wandb_metrics.update({f'{phase}/{k}': v for k, v in att_quality.items()})
+                if self.log_motif_sampling_diagnostics:
+                    self._add_motif_sampling_diag_to_wandb(wandb_metrics, phase, motif_sampling_diag)
                 
                 # Per-edge attention histogram (`att` is flattened edge_att from forward_pass)
                 h_edge = _wandb_histogram_safe(att)
