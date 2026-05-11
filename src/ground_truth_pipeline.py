@@ -44,14 +44,16 @@ def _normalize_binary_y(y_values: np.ndarray) -> np.ndarray:
     return (y > 0).astype(int)
 
 
-def _records_from_splits(split_data_lists: dict[str, list]) -> list[dict[str, Any]]:
+def _records_from_splits(split_data_lists: dict[str, list], motif_list: list[Any] | None) -> list[dict[str, Any]]:
     rows = []
     for split_name in ("train", "valid", "test"):
         for split_idx, data in enumerate(split_data_lists[split_name]):
             n2m = getattr(data, "nodes_to_motifs", None)
             motifs = []
+            motif_names = []
             if n2m is not None:
                 motifs = sorted({int(v) for v in n2m.detach().cpu().tolist() if int(v) >= 0})
+                motif_names = sorted({_motif_name(int(v), motif_list) for v in motifs})
             y0 = float(torch.as_tensor(getattr(data, "y")).view(-1)[0].item())
             rows.append(
                 {
@@ -59,18 +61,19 @@ def _records_from_splits(split_data_lists: dict[str, list]) -> list[dict[str, An
                     "split_idx": int(split_idx),
                     "smiles": str(getattr(data, "smiles", "")),
                     "motif_ids": motifs,
+                    "motif_names": motif_names,
                     "y_orig": y0,
                 }
             )
     return rows
 
 
-def _presence(records: list[dict[str, Any]]) -> tuple[np.ndarray, np.ndarray, dict[int, int]]:
-    motif_ids = sorted({m for r in records for m in r["motif_ids"]})
-    motif_to_col = {m: j for j, m in enumerate(motif_ids)}
-    X = np.zeros((len(records), len(motif_ids)), dtype=np.uint8)
+def _presence(records: list[dict[str, Any]]) -> tuple[np.ndarray, np.ndarray, dict[int, str]]:
+    motif_names = sorted({m for r in records for m in r["motif_names"]})
+    motif_to_col = {m: j for j, m in enumerate(motif_names)}
+    X = np.zeros((len(records), len(motif_names)), dtype=np.uint8)
     for i, row in enumerate(records):
-        for m in row["motif_ids"]:
+        for m in row["motif_names"]:
             X[i, motif_to_col[m]] = 1
     y = _normalize_binary_y(np.array([r["y_orig"] for r in records], dtype=float))
     col_to_motif = {j: m for m, j in motif_to_col.items()}
@@ -123,7 +126,7 @@ def _greedy(cands: list[dict[str, Any]], covered: np.ndarray, target_cov: float 
 
 def _fit_rules(records: list[dict[str, Any]], dataset_name: str) -> dict[str, Any]:
     cfg = DNF_RULE_CONFIGS.get(dataset_name, DNF_RULE_DEFAULT)
-    X, y, col_to_motif = _presence(records)
+    X, y, col_to_motif_name = _presence(records)
     covered = np.zeros((X.shape[0],), dtype=bool)
     fa, ff, sup_lo = float(cfg["floor_anchor"]), float(cfg["floor_fill"]), float(cfg["sup_lo"])
     anchor_pool = _candidate_pool(X, y, fa, 2.0, sup_lo)
@@ -132,11 +135,12 @@ def _fit_rules(records: list[dict[str, Any]], dataset_name: str) -> dict[str, An
     f_sel, covered = _greedy(fill_pool, covered, 0.50)
     clauses = [{**c, "tier": "anchor"} for c in a_sel] + [{**c, "tier": "fill"} for c in f_sel]
     for c in clauses:
-        c["motif_ids"] = [int(col_to_motif[j]) for j in c["motif_cols"]]
+        # Canonicalized by motif names (fold-invariant where vocab names match).
+        c["motif_names"] = sorted([str(col_to_motif_name[j]) for j in c["motif_cols"]])
     return {
         "X": X,
         "clauses": clauses,
-        "col_to_motif": col_to_motif,
+        "col_to_motif_name": col_to_motif_name,
         "n_rows": int(X.shape[0]),
         "n_motifs": int(X.shape[1]),
         "n_anchor_candidates": int(len(anchor_pool)),
@@ -144,17 +148,17 @@ def _fit_rules(records: list[dict[str, Any]], dataset_name: str) -> dict[str, An
     }
 
 
-def _fired(row_x: np.ndarray, clauses: list[dict[str, Any]], col_to_motif: dict[int, int]) -> tuple[list[int], list[int]]:
+def _fired(row_x: np.ndarray, clauses: list[dict[str, Any]], col_to_motif_name: dict[int, str]) -> tuple[list[int], list[str]]:
     fired_idx = []
-    active_motifs = set()
+    active_motif_names = set()
     for ci, c in enumerate(clauses):
         cols = c["motif_cols"]
         ok = bool(row_x[cols[0]]) if len(cols) == 1 else bool(row_x[cols[0]] and row_x[cols[1]])
         if ok:
             fired_idx.append(int(ci))
             for cc in cols:
-                active_motifs.add(int(col_to_motif[int(cc)]))
-    return fired_idx, sorted(active_motifs)
+                active_motif_names.add(str(col_to_motif_name[int(cc)]))
+    return fired_idx, sorted(active_motif_names)
 
 
 def _edge_label(data, active_motifs: set[int]) -> tuple[torch.Tensor, int]:
@@ -243,9 +247,9 @@ def load_or_build_ground_truth_splits(
 
     split_data_lists = {s: _as_data_list(split_datasets[s]) for s in ("train", "valid", "test")}
     motif_name_to_ids = _motif_name_to_ids(motif_list)
-    records = _records_from_splits(split_data_lists)
+    records = _records_from_splits(split_data_lists, motif_list=motif_list)
     model = _fit_rules(records, dataset_name)
-    X, clauses, col_to_motif = model["X"], model["clauses"], model["col_to_motif"]
+    X, clauses, col_to_motif_name = model["X"], model["clauses"], model["col_to_motif_name"]
     with open(rules_json, "w") as f:
         json.dump(
             {
@@ -260,9 +264,15 @@ def load_or_build_ground_truth_splits(
                     {
                         "tier": c["tier"],
                         "k": int(c["k"]),
-                        "motif_names": [_motif_name(int(v), motif_list) for v in c["motif_ids"]],
+                        "motif_names": [str(v) for v in c["motif_names"]],
                         # Backward-compatible metadata for existing analysis scripts.
-                        "motif_ids": [int(v) for v in c["motif_ids"]],
+                        "motif_ids": sorted(
+                            {
+                                int(mid)
+                                for name in c["motif_names"]
+                                for mid in motif_name_to_ids.get(str(name), set())
+                            }
+                        ),
                         "prec": float(c["prec"]),
                         "score": float(c["score"]),
                         "gain": int(c["gain"]),
@@ -293,9 +303,9 @@ def load_or_build_ground_truth_splits(
             "cache_file": str(cache_files[split_name]),
         }
         for data in split_data_lists[split_name]:
-            fired_idx, active_motifs = _fired(X[cursor], clauses, col_to_motif)
-            active_motif_names = {_motif_name(int(v), motif_list) for v in active_motifs}
-            active_motif_ids_resolved = _resolve_active_ids(set(active_motifs), active_motif_names, motif_name_to_ids)
+            fired_idx, active_motif_names_list = _fired(X[cursor], clauses, col_to_motif_name)
+            active_motif_names = set(active_motif_names_list)
+            active_motif_ids_resolved = _resolve_active_ids(set(), active_motif_names, motif_name_to_ids)
             gt_y = 1.0 if fired_idx else 0.0
             edge_label, n_pos = _edge_label(data, active_motif_ids_resolved)
             data.edge_label = edge_label
