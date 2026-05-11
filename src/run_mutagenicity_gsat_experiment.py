@@ -1543,7 +1543,21 @@ EXPERIMENT_GROUPS['factored_motif_attention_grid'] = {
 ALL_EXPERIMENT_NAMES = list(EXPERIMENT_GROUPS.keys())
 
 
-def run_one(model_name, fold, variant, experiment_name, seed, cuda_id, data_dir, dataset_name, embedding_viz_every=10):
+def run_one(
+    model_name,
+    fold,
+    variant,
+    experiment_name,
+    seed,
+    cuda_id,
+    data_dir,
+    dataset_name,
+    embedding_viz_every=10,
+    use_ground_truth_cache=True,
+    ground_truth_cache_root=None,
+    ground_truth_force_rebuild=False,
+    ground_truth_relabel_graphs=True,
+):
     """Run a single experiment: one model, one fold, one variant, one seed."""
     config = get_base_config(model_name, dataset_name, gsat_overrides=variant['gsat_overrides'])
     config['model_config']['use_edge_attr'] = False
@@ -1554,6 +1568,10 @@ def run_one(model_name, fold, variant, experiment_name, seed, cuda_id, data_dir,
         config['shared_config'].update(variant['shared_overrides'])
     if 'data_overrides' in variant:
         config['data_config'].update(variant['data_overrides'])
+    config['data_config']['use_ground_truth_cache'] = bool(use_ground_truth_cache)
+    config['data_config']['ground_truth_cache_root'] = ground_truth_cache_root
+    config['data_config']['ground_truth_force_rebuild'] = bool(ground_truth_force_rebuild)
+    config['data_config']['ground_truth_relabel_graphs'] = bool(ground_truth_relabel_graphs)
     config['GSAT_config']['experiment_name'] = experiment_name
     # Log variant identity on W&B with full GSAT config (train_gsat_one_seed run_config.gsat).
     config['GSAT_config']['variant_id'] = variant['variant_id']
@@ -1607,6 +1625,30 @@ def main():
                         help='Set MOTIFSAT_WANDB_LITE=1: smaller local W&B run directory (see run_gsat wandb helpers).')
     parser.add_argument('--wandb_log_every', type=int, default=None,
                         help='Set MOTIFSAT_WANDB_LOG_EVERY (throttle wandb.log; default 50 with --wandb_lite).')
+    parser.add_argument(
+        '--no_ground_truth_cache',
+        action='store_true',
+        default=False,
+        help='Disable cached edge-level explainer ground-truth integration for molecular binary datasets.',
+    )
+    parser.add_argument(
+        '--ground_truth_cache_root',
+        type=str,
+        default=None,
+        help='Directory for cached split datasets with edge ground truth (default: <data_dir>/ground_truth_cache).',
+    )
+    parser.add_argument(
+        '--ground_truth_force_rebuild',
+        action='store_true',
+        default=False,
+        help='Rebuild cached ground-truth split datasets even if cache files exist.',
+    )
+    parser.add_argument(
+        '--no_ground_truth_relabel_graphs',
+        action='store_true',
+        default=False,
+        help='When GT cache is enabled, keep original graph labels instead of relabeling from GT motif presence.',
+    )
     args = parser.parse_args()
 
     if args.wandb_lite:
@@ -1691,6 +1733,12 @@ def main():
     print(f'\n[INFO] Dataset: {dataset_name}')
     print(f'[INFO] Folds: {folds}')
     print(f'[INFO] embedding_viz_every={args.embedding_viz_every} (W&B PCA panels; use 0 to disable)')
+    print(
+        f"[INFO] use_ground_truth_cache={not args.no_ground_truth_cache}, "
+        f"ground_truth_cache_root={args.ground_truth_cache_root}, "
+        f"ground_truth_force_rebuild={args.ground_truth_force_rebuild}, "
+        f"ground_truth_relabel_graphs={not args.no_ground_truth_relabel_graphs}"
+    )
 
     for exp_key in args.experiments:
         group = EXPERIMENT_GROUPS[exp_key]
@@ -1712,6 +1760,10 @@ def main():
                             run_one(
                                 model_name, fold, variant, experiment_name, seed, args.cuda, data_dir, dataset_name,
                                 embedding_viz_every=args.embedding_viz_every,
+                                use_ground_truth_cache=not args.no_ground_truth_cache,
+                                ground_truth_cache_root=args.ground_truth_cache_root,
+                                ground_truth_force_rebuild=args.ground_truth_force_rebuild,
+                                ground_truth_relabel_graphs=not args.no_ground_truth_relabel_graphs,
                             )
                         except Exception as e:
                             print(f'[ERROR] {e}')

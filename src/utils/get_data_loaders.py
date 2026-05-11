@@ -96,6 +96,10 @@ def get_data_loaders(
     fold=None,
     path=None,
     dictionary_fold_variant="nofilter",
+    use_ground_truth_cache=True,
+    ground_truth_cache_root=None,
+    ground_truth_force_rebuild=False,
+    ground_truth_relabel_graphs=True,
 ):
     if path is None:
         path = _DEFAULT_MOTIF_DICTIONARY_PATH
@@ -240,6 +244,64 @@ def get_data_loaders(
             "valid": DataLoader(valid_set, batch_size=batch_size, shuffle=False),
             "test": DataLoader(test_set, batch_size=batch_size, shuffle=False)
         }
+
+        # Attach edge-level GT labels for molecular splits from masked pickle artifacts.
+        # This enables meaningful explainer ROC (att_auroc / best_x_roc_*), and caches
+        # split datasets to avoid repeated recomputation.
+        if (
+            use_ground_truth_cache
+            and DATASET_TYPE[dataset_name] == 'BinaryClass'
+            and fold is not None
+        ):
+            try:
+                from ground_truth_pipeline import load_or_build_ground_truth_split
+
+                gt_cache_root = (
+                    Path(ground_truth_cache_root)
+                    if ground_truth_cache_root is not None
+                    else Path(data_dir) / 'ground_truth_cache'
+                )
+                split_to_dataset = {'train': train_set, 'valid': valid_set, 'test': test_set}
+                split_to_masks = {
+                    'train': train_mask_data,
+                    'valid': val_mask_data,
+                    'test': test_mask_data,
+                }
+                gt_debug = {}
+                for split_name in ('train', 'valid', 'test'):
+                    split_to_dataset[split_name], dbg = load_or_build_ground_truth_split(
+                        dataset_name=dataset_name,
+                        fold=int(fold),
+                        split_name=split_name,
+                        dataset=split_to_dataset[split_name],
+                        mask_data=split_to_masks[split_name],
+                        cache_root=gt_cache_root,
+                        dictionary_fold_variant=dictionary_fold_variant,
+                        force_rebuild=bool(ground_truth_force_rebuild),
+                        relabel_graphs_with_ground_truth=bool(ground_truth_relabel_graphs),
+                    )
+                    gt_debug[split_name] = dbg
+
+                train_set = split_to_dataset['train']
+                valid_set = split_to_dataset['valid']
+                test_set = split_to_dataset['test']
+
+                loaders = {
+                    "train": DataLoader(train_set, batch_size=batch_size, shuffle=True),
+                    "valid": DataLoader(valid_set, batch_size=batch_size, shuffle=False),
+                    "test": DataLoader(test_set, batch_size=batch_size, shuffle=False),
+                }
+                print(
+                    "[INFO] Ground-truth cache ready: "
+                    f"{dataset_name} fold={fold} "
+                    f"relabel_graphs={bool(ground_truth_relabel_graphs)} "
+                    f"train={gt_debug['train'].get('edge_positive_fraction_global', float('nan')):.4f}, "
+                    f"valid={gt_debug['valid'].get('edge_positive_fraction_global', float('nan')):.4f}, "
+                    f"test={gt_debug['test'].get('edge_positive_fraction_global', float('nan')):.4f}"
+                )
+            except Exception as e:
+                print(f"[WARN] Ground-truth cache integration failed, continuing without cached GT: {e}")
+
         # Also return original datasets for score saving
         datasets = {
             'train': train_set,

@@ -5867,6 +5867,10 @@ def train_vanilla_gnn_one_seed(local_config, data_dir, log_dir, model_name, data
         data_dir, dataset_name, batch_size, splits, random_state,
         data_config.get('mutag_x', False), fold, path=path,
         dictionary_fold_variant=data_config.get('dictionary_fold_variant', 'nofilter'),
+        use_ground_truth_cache=data_config.get('use_ground_truth_cache', True),
+        ground_truth_cache_root=data_config.get('ground_truth_cache_root', None),
+        ground_truth_force_rebuild=data_config.get('ground_truth_force_rebuild', False),
+        ground_truth_relabel_graphs=data_config.get('ground_truth_relabel_graphs', True),
     )
 
     if len(loader_result) == 9:
@@ -6140,6 +6144,10 @@ def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_nam
         data_dir, dataset_name, batch_size, splits, random_state,
         data_config.get('mutag_x', False), fold, path=path,
         dictionary_fold_variant=data_config.get('dictionary_fold_variant', 'nofilter'),
+        use_ground_truth_cache=data_config.get('use_ground_truth_cache', True),
+        ground_truth_cache_root=data_config.get('ground_truth_cache_root', None),
+        ground_truth_force_rebuild=data_config.get('ground_truth_force_rebuild', False),
+        ground_truth_relabel_graphs=data_config.get('ground_truth_relabel_graphs', True),
     )
     
     if len(loader_result) == 9:
