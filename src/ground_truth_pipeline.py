@@ -1,142 +1,180 @@
 #!/usr/bin/env python
-"""
-Build and cache molecular datasets with edge-level ground truth labels.
-
-Ground-truth generation is intentionally derived from existing masked-feature
-pickle artifacts (train/valid/test *_dataset_masked.pickle contents) without
-changing how masked features are produced.
-
-This module provides:
-  1) Reusable helpers to load/build cached split datasets for training pipeline
-  2) A CLI to precompute all requested datasets/folds and save debug artifacts
-"""
-
 from __future__ import annotations
 
 import argparse
 import json
 import os
-from collections import defaultdict
+from itertools import combinations
 from pathlib import Path
 from typing import Any
 
 import matplotlib
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import torch
 
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
+
+DNF_RULE_CONFIGS = {
+    "Mutagenicity": {"floor_anchor": 0.70, "floor_fill": 0.55, "sup_lo": 0.005},
+    "Benzene": {"floor_anchor": 0.90, "floor_fill": 0.60, "sup_lo": 0.003},
+    "BBBP": {"floor_anchor": 0.90, "floor_fill": 0.80, "sup_lo": 0.010},
+    "hERG": {"floor_anchor": 0.65, "floor_fill": 0.60, "sup_lo": 0.010},
+    "Alkane_Carbonyl": {"floor_anchor": 0.50, "floor_fill": 0.50, "sup_lo": 0.010},
+}
+DNF_RULE_DEFAULT = {"floor_anchor": 0.70, "floor_fill": 0.55, "sup_lo": 0.010}
 
 
 def _as_data_list(dataset) -> list:
-    """Materialize a split dataset into a plain Data list."""
     return [dataset[i].clone() for i in range(len(dataset))]
 
 
-def _extract_mask_index(mask_data: Any) -> tuple[dict[int, list[torch.Tensor]], dict[str, int]]:
-    """
-    Convert masked pickle payload into graph_idx -> list(masked_x tensors).
+def _normalize_binary_y(y_values: np.ndarray) -> np.ndarray:
+    y = np.asarray(y_values).reshape(-1).astype(float)
+    if y.size == 0:
+        return np.zeros((0,), dtype=int)
+    yn = y[~np.isnan(y)]
+    if yn.size == 0:
+        return np.zeros_like(y, dtype=int)
+    if yn.min() >= 0 and yn.max() <= 1:
+        return (y >= 0.5).astype(int)
+    if set(np.unique(yn).tolist()) == {-1.0, 1.0}:
+        return (y > 0).astype(int)
+    return (y > 0).astype(int)
 
-    Expected masked payload structure (unchanged upstream):
-      mask_data[0]: motif_idx -> graph_idx -> masked node-feature tensor
-      mask_data[1]: original graph list (optional, unused here)
-    """
-    stats = {
-        "n_mask_entries": 0,
-        "n_graphs_with_masks": 0,
-        "n_motif_keys": 0,
-    }
-    per_graph_masks: dict[int, list[torch.Tensor]] = defaultdict(list)
-    if not isinstance(mask_data, (list, tuple)) or len(mask_data) == 0:
-        return per_graph_masks, stats
 
-    motif_to_graph = mask_data[0]
-    if not isinstance(motif_to_graph, dict):
-        return per_graph_masks, stats
+def _records_from_splits(split_data_lists: dict[str, list]) -> list[dict[str, Any]]:
+    rows = []
+    for split_name in ("train", "valid", "test"):
+        for split_idx, data in enumerate(split_data_lists[split_name]):
+            n2m = getattr(data, "nodes_to_motifs", None)
+            motifs = []
+            if n2m is not None:
+                motifs = sorted({int(v) for v in n2m.detach().cpu().tolist() if int(v) >= 0})
+            y0 = float(torch.as_tensor(getattr(data, "y")).view(-1)[0].item())
+            rows.append(
+                {
+                    "split": split_name,
+                    "split_idx": int(split_idx),
+                    "smiles": str(getattr(data, "smiles", "")),
+                    "motif_ids": motifs,
+                    "y_orig": y0,
+                }
+            )
+    return rows
 
-    stats["n_motif_keys"] = int(len(motif_to_graph))
-    for _, graph_map in motif_to_graph.items():
-        if not isinstance(graph_map, dict):
+
+def _presence(records: list[dict[str, Any]]) -> tuple[np.ndarray, np.ndarray, dict[int, int]]:
+    motif_ids = sorted({m for r in records for m in r["motif_ids"]})
+    motif_to_col = {m: j for j, m in enumerate(motif_ids)}
+    X = np.zeros((len(records), len(motif_ids)), dtype=np.uint8)
+    for i, row in enumerate(records):
+        for m in row["motif_ids"]:
+            X[i, motif_to_col[m]] = 1
+    y = _normalize_binary_y(np.array([r["y_orig"] for r in records], dtype=float))
+    col_to_motif = {j: m for m, j in motif_to_col.items()}
+    return X, y, col_to_motif
+
+
+def _candidate_pool(X: np.ndarray, y: np.ndarray, floor_lo: float, floor_hi: float, sup_lo: float) -> list[dict[str, Any]]:
+    n, p = X.shape
+    if n == 0 or p == 0:
+        return []
+    cands = []
+    support = X.mean(axis=0)
+    usable = [int(j) for j in np.where((support >= sup_lo) & (support <= 0.99))[0]]
+    for j in usable:
+        mask = X[:, j].astype(bool)
+        cnt = int(mask.sum())
+        if cnt < 8:
             continue
-        for graph_idx, masked_x in graph_map.items():
-            try:
-                gi = int(graph_idx)
-            except Exception:
-                continue
-            if masked_x is None:
-                continue
-            if not torch.is_tensor(masked_x):
-                try:
-                    masked_x = torch.as_tensor(masked_x)
-                except Exception:
-                    continue
-            per_graph_masks[gi].append(masked_x)
-            stats["n_mask_entries"] += 1
+        prec = float((mask & (y == 1)).sum() / max(cnt, 1))
+        if floor_lo <= prec < floor_hi:
+            cands.append({"motif_cols": (j,), "k": 1, "mask": mask, "prec": prec, "score": float(mask.mean()) * prec})
 
-    stats["n_graphs_with_masks"] = int(len(per_graph_masks))
-    return per_graph_masks, stats
+    usable_pairs = [j for j in usable if support[j] >= 0.02]
+    usable_pairs = sorted(usable_pairs, key=lambda j: -support[j])[:120]
+    for j1, j2 in combinations(usable_pairs, 2):
+        mask = X[:, j1].astype(bool) & X[:, j2].astype(bool)
+        cnt = int(mask.sum())
+        if cnt < 15:
+            continue
+        prec = float((mask & (y == 1)).sum() / max(cnt, 1))
+        if floor_lo <= prec < floor_hi:
+            cands.append({"motif_cols": (j1, j2), "k": 2, "mask": mask, "prec": prec, "score": float(mask.mean()) * prec})
+    cands.sort(key=lambda c: -c["score"])
+    return cands
 
 
-def _edge_label_from_masked_features(data, masked_x_list: list[torch.Tensor]) -> tuple[torch.Tensor, dict[str, int]]:
-    """
-    Build edge ground truth from masked node-feature tensors.
+def _greedy(cands: list[dict[str, Any]], covered: np.ndarray, target_cov: float = 0.50) -> tuple[list[dict[str, Any]], np.ndarray]:
+    out = []
+    n = int(covered.size)
+    for c in cands:
+        if float(covered.mean()) >= target_cov:
+            break
+        gain = int((c["mask"] & ~covered).sum())
+        if gain < max(8, int(n * 0.002)):
+            continue
+        covered = covered | c["mask"]
+        out.append({**c, "gain": gain, "cumul_cov": float(covered.mean())})
+    return out, covered
 
-    Ground-truth derivation follows existing masking semantics:
-      - a node is treated as masked if its features become all-zero
-      - an edge is positive when both endpoints are masked in a motif mask
-      - final edge_label is union across motif masks for that graph
-    """
+
+def _fit_rules(records: list[dict[str, Any]], dataset_name: str) -> dict[str, Any]:
+    cfg = DNF_RULE_CONFIGS.get(dataset_name, DNF_RULE_DEFAULT)
+    X, y, col_to_motif = _presence(records)
+    covered = np.zeros((X.shape[0],), dtype=bool)
+    fa, ff, sup_lo = float(cfg["floor_anchor"]), float(cfg["floor_fill"]), float(cfg["sup_lo"])
+    anchor_pool = _candidate_pool(X, y, fa, 2.0, sup_lo)
+    fill_pool = _candidate_pool(X, y, ff, fa, sup_lo) if ff < fa else []
+    a_sel, covered = _greedy(anchor_pool, covered, 0.50)
+    f_sel, covered = _greedy(fill_pool, covered, 0.50)
+    clauses = [{**c, "tier": "anchor"} for c in a_sel] + [{**c, "tier": "fill"} for c in f_sel]
+    for c in clauses:
+        c["motif_ids"] = [int(col_to_motif[j]) for j in c["motif_cols"]]
+    return {
+        "X": X,
+        "clauses": clauses,
+        "col_to_motif": col_to_motif,
+        "n_rows": int(X.shape[0]),
+        "n_motifs": int(X.shape[1]),
+        "n_anchor_candidates": int(len(anchor_pool)),
+        "n_fill_candidates": int(len(fill_pool)),
+    }
+
+
+def _fired(row_x: np.ndarray, clauses: list[dict[str, Any]], col_to_motif: dict[int, int]) -> tuple[list[int], list[int]]:
+    fired_idx = []
+    active_motifs = set()
+    for ci, c in enumerate(clauses):
+        cols = c["motif_cols"]
+        ok = bool(row_x[cols[0]]) if len(cols) == 1 else bool(row_x[cols[0]] and row_x[cols[1]])
+        if ok:
+            fired_idx.append(int(ci))
+            for cc in cols:
+                active_motifs.add(int(col_to_motif[int(cc)]))
+    return fired_idx, sorted(active_motifs)
+
+
+def _edge_label(data, active_motifs: set[int]) -> tuple[torch.Tensor, int]:
     edge_label = torch.zeros(data.edge_index.size(1), dtype=torch.float32)
-    src, dst = data.edge_index
-
-    n_used_masks = 0
-    n_bad_shape = 0
-    n_no_masked_nodes = 0
-
-    data_x = data.x.detach().cpu()
-    for masked_x in masked_x_list:
-        mx = masked_x.detach().cpu()
-        if mx.shape != data_x.shape:
-            n_bad_shape += 1
-            continue
-        masked_nodes = (mx.abs().sum(dim=1) == 0) & (data_x.abs().sum(dim=1) > 0)
-        if int(masked_nodes.sum().item()) == 0:
-            n_no_masked_nodes += 1
-            continue
-        motif_edge_mask = masked_nodes[src] & masked_nodes[dst]
-        edge_label[motif_edge_mask] = 1.0
-        n_used_masks += 1
-
-    dbg = {
-        "n_used_masks": int(n_used_masks),
-        "n_bad_shape": int(n_bad_shape),
-        "n_no_masked_nodes": int(n_no_masked_nodes),
-    }
-    return edge_label, dbg
+    n2m = getattr(data, "nodes_to_motifs", None)
+    if n2m is None or not active_motifs:
+        return edge_label, 0
+    node_is_active = torch.tensor([int(v) in active_motifs for v in n2m.detach().cpu().tolist()], dtype=torch.bool)
+    src, dst = data.edge_index.detach().cpu().long()
+    pos = node_is_active[src] | node_is_active[dst]
+    edge_label[pos] = 1.0
+    return edge_label, int(pos.sum().item())
 
 
-def _debug_plot(split_df: pd.DataFrame, fig_path: Path, title: str):
-    """Save simple diagnostics figure for edge-label coverage."""
+def _debug_plot(df: pd.DataFrame, fig_path: Path, title: str):
     fig, axes = plt.subplots(1, 2, figsize=(10, 3.8))
-
-    pos_frac = split_df["edge_pos_frac"].to_numpy(dtype=float)
-    axes[0].hist(pos_frac, bins=30, color="#4c72b0", alpha=0.85)
+    axes[0].hist(df["edge_pos_frac"].to_numpy(dtype=float), bins=30, color="#4c72b0", alpha=0.85)
     axes[0].set_title("Per-graph edge GT fraction")
-    axes[0].set_xlabel("positive edges / total edges")
-    axes[0].set_ylabel("count")
-
-    axes[1].scatter(
-        split_df["n_mask_tensors"].to_numpy(dtype=float),
-        split_df["n_positive_edges"].to_numpy(dtype=float),
-        s=14,
-        alpha=0.6,
-        color="#dd8452",
-    )
-    axes[1].set_title("Mask tensors vs positive edges")
-    axes[1].set_xlabel("# motif mask tensors")
-    axes[1].set_ylabel("# positive edges")
-
+    axes[1].hist(df["n_active_rule_motifs"].to_numpy(dtype=float), bins=20, color="#dd8452", alpha=0.85)
+    axes[1].set_title("Active rule motifs per graph")
     fig.suptitle(title)
     fig.tight_layout()
     fig_path.parent.mkdir(parents=True, exist_ok=True)
@@ -144,136 +182,118 @@ def _debug_plot(split_df: pd.DataFrame, fig_path: Path, title: str):
     plt.close(fig)
 
 
-def load_or_build_ground_truth_split(
+def load_or_build_ground_truth_splits(
     *,
     dataset_name: str,
     fold: int,
-    split_name: str,
-    dataset,
-    mask_data,
+    split_datasets: dict[str, Any],
     cache_root: Path,
     dictionary_fold_variant: str = "nofilter",
     force_rebuild: bool = False,
     relabel_graphs_with_ground_truth: bool = True,
-) -> tuple[list, dict[str, Any]]:
-    """
-    Return split dataset with edge_label GT, using on-disk cache when available.
-    """
-    cache_dir = (
-        Path(cache_root)
-        / dataset_name
-        / f"fold{int(fold)}"
-        / str(dictionary_fold_variant)
-    )
+) -> tuple[dict[str, list], dict[str, dict[str, Any]]]:
+    cache_dir = Path(cache_root) / dataset_name / f"fold{int(fold)}" / str(dictionary_fold_variant)
     cache_dir.mkdir(parents=True, exist_ok=True)
-
     relabel_tag = "relabel1" if relabel_graphs_with_ground_truth else "relabel0"
-    cache_file = cache_dir / f"{split_name}_dataset_with_ground_truth_{relabel_tag}.pt"
-    debug_csv = cache_dir / f"{split_name}_ground_truth_debug_{relabel_tag}.csv"
-    debug_json = cache_dir / f"{split_name}_ground_truth_debug_{relabel_tag}.json"
-    debug_fig = cache_dir / f"{split_name}_ground_truth_debug_{relabel_tag}.png"
+    cache_files = {s: cache_dir / f"{s}_dataset_with_ground_truth_dnf_{relabel_tag}.pt" for s in ("train", "valid", "test")}
+    debug_json = {s: cache_dir / f"{s}_ground_truth_debug_dnf_{relabel_tag}.json" for s in ("train", "valid", "test")}
+    debug_csv = {s: cache_dir / f"{s}_ground_truth_debug_dnf_{relabel_tag}.csv" for s in ("train", "valid", "test")}
+    debug_fig = {s: cache_dir / f"{s}_ground_truth_debug_dnf_{relabel_tag}.png" for s in ("train", "valid", "test")}
+    rules_json = cache_dir / f"dnf_rules_{relabel_tag}.json"
 
-    if cache_file.is_file() and not force_rebuild:
-        data_list = torch.load(cache_file, weights_only=False)
-        debug = {}
-        if debug_json.is_file():
-            try:
-                with open(debug_json) as f:
-                    debug = json.load(f)
-            except Exception:
-                debug = {}
-        debug["loaded_from_cache"] = True
-        debug["cache_file"] = str(cache_file)
-        return data_list, debug
+    if (not force_rebuild) and all(p.is_file() for p in cache_files.values()) and rules_json.is_file():
+        out = {s: torch.load(cache_files[s], weights_only=False) for s in ("train", "valid", "test")}
+        dbg = {}
+        for s in ("train", "valid", "test"):
+            d = {}
+            if debug_json[s].is_file():
+                with open(debug_json[s]) as f:
+                    d = json.load(f)
+            d["loaded_from_cache"] = True
+            d["cache_file"] = str(cache_files[s])
+            dbg[s] = d
+        return out, dbg
 
-    data_list = _as_data_list(dataset)
-    per_graph_masks, mask_stats = _extract_mask_index(mask_data)
-
-    debug_rows: list[dict[str, Any]] = []
-    aggregate = {
-        "n_graphs_total": int(len(data_list)),
-        "n_graphs_with_pos_edges": 0,
-        "n_total_edges": 0,
-        "n_total_pos_edges": 0,
-        "n_graphs_relabelled": 0,
-        "n_used_masks_total": 0,
-        "n_bad_shape_total": 0,
-        "n_no_masked_nodes_total": 0,
-        **mask_stats,
-    }
-
-    for gi, data in enumerate(data_list):
-        masked_x_list = per_graph_masks.get(gi, [])
-        edge_label, dbg = _edge_label_from_masked_features(data, masked_x_list)
-        data.edge_label = edge_label.float()
-
-        n_edges = int(edge_label.numel())
-        n_pos = int(edge_label.sum().item())
-        edge_pos_frac = (float(n_pos) / n_edges) if n_edges > 0 else 0.0
-        gt_graph_label = 1.0 if n_pos > 0 else 0.0
-
-        old_y = getattr(data, "y", None)
-        old_y_scalar = np.nan
-        if old_y is not None:
-            try:
-                old_y_scalar = float(torch.as_tensor(old_y).view(-1)[0].item())
-            except Exception:
-                old_y_scalar = np.nan
-
-        if relabel_graphs_with_ground_truth:
-            data.y = torch.tensor([gt_graph_label], dtype=torch.float32)
-            if not np.isnan(old_y_scalar) and float(old_y_scalar) != float(gt_graph_label):
-                aggregate["n_graphs_relabelled"] += 1
-
-        aggregate["n_total_edges"] += n_edges
-        aggregate["n_total_pos_edges"] += n_pos
-        aggregate["n_used_masks_total"] += dbg["n_used_masks"]
-        aggregate["n_bad_shape_total"] += dbg["n_bad_shape"]
-        aggregate["n_no_masked_nodes_total"] += dbg["n_no_masked_nodes"]
-        if n_pos > 0:
-            aggregate["n_graphs_with_pos_edges"] += 1
-
-        debug_rows.append(
+    split_data_lists = {s: _as_data_list(split_datasets[s]) for s in ("train", "valid", "test")}
+    records = _records_from_splits(split_data_lists)
+    model = _fit_rules(records, dataset_name)
+    X, clauses, col_to_motif = model["X"], model["clauses"], model["col_to_motif"]
+    with open(rules_json, "w") as f:
+        json.dump(
             {
-                "graph_idx": int(gi),
-                "smiles": str(getattr(data, "smiles", "")),
-                "n_edges": n_edges,
-                "n_positive_edges": n_pos,
-                "edge_pos_frac": edge_pos_frac,
-                "n_mask_tensors": int(len(masked_x_list)),
-                "n_used_masks": int(dbg["n_used_masks"]),
-                "n_bad_shape": int(dbg["n_bad_shape"]),
-                "n_no_masked_nodes": int(dbg["n_no_masked_nodes"]),
-                "old_graph_label": old_y_scalar,
-                "new_graph_label": gt_graph_label if relabel_graphs_with_ground_truth else old_y_scalar,
-                "gt_graph_label": gt_graph_label,
-            }
+                "dataset": dataset_name,
+                "fold": int(fold),
+                "n_rows": model["n_rows"],
+                "n_motifs": model["n_motifs"],
+                "n_anchor_candidates": model["n_anchor_candidates"],
+                "n_fill_candidates": model["n_fill_candidates"],
+                "n_selected_clauses": len(clauses),
+                "clauses": [{"tier": c["tier"], "k": int(c["k"]), "motif_ids": [int(v) for v in c["motif_ids"]], "prec": float(c["prec"]), "score": float(c["score"]), "gain": int(c["gain"]), "cumul_cov": float(c["cumul_cov"])} for c in clauses],
+            },
+            f,
+            indent=2,
         )
 
-    aggregate["edge_positive_fraction_global"] = (
-        float(aggregate["n_total_pos_edges"]) / float(aggregate["n_total_edges"])
-        if aggregate["n_total_edges"] > 0
-        else 0.0
-    )
-    aggregate["loaded_from_cache"] = False
-    aggregate["cache_file"] = str(cache_file)
-    aggregate["split"] = split_name
-    aggregate["dataset"] = dataset_name
-    aggregate["fold"] = int(fold)
-    aggregate["relabel_graphs_with_ground_truth"] = bool(relabel_graphs_with_ground_truth)
-
-    torch.save(data_list, cache_file)
-    debug_df = pd.DataFrame(debug_rows)
-    debug_df.to_csv(debug_csv, index=False)
-    _debug_plot(
-        debug_df,
-        debug_fig,
-        title=f"{dataset_name} fold{fold} {split_name}: edge GT diagnostics",
-    )
-    with open(debug_json, "w") as f:
-        json.dump(aggregate, f, indent=2)
-
-    return data_list, aggregate
+    out = {"train": [], "valid": [], "test": []}
+    dbg = {}
+    cursor = 0
+    for split_name in ("train", "valid", "test"):
+        rows = []
+        agg = {
+            "n_graphs_total": int(len(split_data_lists[split_name])),
+            "n_graphs_with_pos_edges": 0,
+            "n_total_edges": 0,
+            "n_total_pos_edges": 0,
+            "n_graphs_rule_positive": 0,
+            "n_graphs_relabelled": 0,
+            "n_selected_clauses": int(len(clauses)),
+            "rules_file": str(rules_json),
+            "loaded_from_cache": False,
+            "cache_file": str(cache_files[split_name]),
+        }
+        for data in split_data_lists[split_name]:
+            fired_idx, active_motifs = _fired(X[cursor], clauses, col_to_motif)
+            gt_y = 1.0 if fired_idx else 0.0
+            edge_label, n_pos = _edge_label(data, set(active_motifs))
+            data.edge_label = edge_label
+            old_y = float(torch.as_tensor(getattr(data, "y")).view(-1)[0].item())
+            if relabel_graphs_with_ground_truth:
+                data.y = torch.tensor([gt_y], dtype=torch.float32)
+                if old_y != gt_y:
+                    agg["n_graphs_relabelled"] += 1
+            n_edges = int(edge_label.numel())
+            if gt_y > 0.5:
+                agg["n_graphs_rule_positive"] += 1
+            if n_pos > 0:
+                agg["n_graphs_with_pos_edges"] += 1
+            agg["n_total_edges"] += n_edges
+            agg["n_total_pos_edges"] += int(n_pos)
+            rows.append(
+                {
+                    "smiles": str(getattr(data, "smiles", "")),
+                    "n_edges": n_edges,
+                    "n_positive_edges": int(n_pos),
+                    "edge_pos_frac": (float(n_pos) / n_edges) if n_edges > 0 else 0.0,
+                    "n_fired_clauses": int(len(fired_idx)),
+                    "fired_clause_indices": ",".join(str(v) for v in fired_idx),
+                    "n_active_rule_motifs": int(len(active_motifs)),
+                    "active_rule_motif_ids": ",".join(str(v) for v in active_motifs),
+                    "old_graph_label": old_y,
+                    "gt_graph_label": gt_y,
+                    "new_graph_label": gt_y if relabel_graphs_with_ground_truth else old_y,
+                }
+            )
+            out[split_name].append(data)
+            cursor += 1
+        agg["edge_positive_fraction_global"] = float(agg["n_total_pos_edges"]) / float(agg["n_total_edges"]) if agg["n_total_edges"] > 0 else 0.0
+        df = pd.DataFrame(rows)
+        df.to_csv(debug_csv[split_name], index=False)
+        _debug_plot(df, debug_fig[split_name], f"{dataset_name} fold{fold} {split_name}: DNF-rule GT diagnostics")
+        with open(debug_json[split_name], "w") as f:
+            json.dump(agg, f, indent=2)
+        torch.save(out[split_name], cache_files[split_name])
+        dbg[split_name] = agg
+    return out, dbg
 
 
 def _normalize_label_col(label_col):
@@ -282,123 +302,31 @@ def _normalize_label_col(label_col):
     return label_col
 
 
-def _build_split_datasets_for_cli(
-    *,
-    dataset_name: str,
-    fold: int,
-    csv_file: str,
-    label_col,
-    lookup,
-    test_lookup,
-    dataset_type: str,
-):
+def _build_split_datasets_for_cli(*, csv_file: str, label_col, lookup, test_lookup, dataset_type: str):
     from DataLoader import MolDataset
-
     label_col = _normalize_label_col(label_col)
     if dataset_type == "Regression":
-        train_set = MolDataset(
-            root=".",
-            split="training",
-            csv_file=csv_file,
-            label_col=[label_col],
-            normalize=True,
-            mean=None,
-            std=None,
-            lookup=lookup,
-        )
-        valid_set = MolDataset(
-            root=".",
-            split="valid",
-            csv_file=csv_file,
-            label_col=[label_col],
-            normalize=True,
-            mean=train_set.mean,
-            std=train_set.std,
-            lookup=lookup,
-        )
-        test_set = MolDataset(
-            root=".",
-            split="test",
-            csv_file=csv_file,
-            label_col=[label_col],
-            normalize=True,
-            mean=train_set.mean,
-            std=train_set.std,
-            lookup=test_lookup,
-        )
+        train_set = MolDataset(root=".", split="training", csv_file=csv_file, label_col=[label_col], normalize=True, mean=None, std=None, lookup=lookup)
+        valid_set = MolDataset(root=".", split="valid", csv_file=csv_file, label_col=[label_col], normalize=True, mean=train_set.mean, std=train_set.std, lookup=lookup)
+        test_set = MolDataset(root=".", split="test", csv_file=csv_file, label_col=[label_col], normalize=True, mean=train_set.mean, std=train_set.std, lookup=test_lookup)
     else:
-        train_set = MolDataset(
-            root=".",
-            split="training",
-            csv_file=csv_file,
-            label_col=[label_col],
-            normalize=False,
-            lookup=lookup,
-        )
-        valid_set = MolDataset(
-            root=".",
-            split="valid",
-            csv_file=csv_file,
-            label_col=[label_col],
-            normalize=False,
-            lookup=lookup,
-        )
-        test_set = MolDataset(
-            root=".",
-            split="test",
-            csv_file=csv_file,
-            label_col=[label_col],
-            normalize=False,
-            lookup=test_lookup,
-        )
+        train_set = MolDataset(root=".", split="training", csv_file=csv_file, label_col=[label_col], normalize=False, lookup=lookup)
+        valid_set = MolDataset(root=".", split="valid", csv_file=csv_file, label_col=[label_col], normalize=False, lookup=lookup)
+        test_set = MolDataset(root=".", split="test", csv_file=csv_file, label_col=[label_col], normalize=False, lookup=test_lookup)
     return {"train": train_set, "valid": valid_set, "test": test_set}
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description=(
-            "Build cached dataset splits with edge-level ground truth from "
-            "masked motif pickles, plus debug artifacts."
-        )
-    )
-    parser.add_argument(
-        "--datasets",
-        nargs="+",
-        default=[
-            "Mutagenicity",
-            "BBBP",
-            "hERG",
-            "Benzene",
-            "Alkane_Carbonyl",
-            "Fluoride_Carbonyl",
-            "esol",
-            "Lipophilicity",
-        ],
-    )
+    parser = argparse.ArgumentParser(description="Build cached DNF-rule GT splits.")
+    parser.add_argument("--datasets", nargs="+", default=["Mutagenicity", "BBBP", "hERG", "Benzene", "Alkane_Carbonyl"])
     parser.add_argument("--folds", nargs="+", type=int, default=[0, 1])
     parser.add_argument("--algorithm", type=str, default="BRICS")
     parser.add_argument("--dictionary_fold_variant", type=str, default="nofilter")
-    parser.add_argument(
-        "--dictionary_path",
-        type=str,
-        default=os.environ.get(
-            "MOTIFSAT_DICTIONARY_PATH",
-            "/nfs/stak/users/kokatea/hpc-share/ChemIntuit/MotifBreakdown/DICTIONARY_CREATE",
-        ),
-    )
-    parser.add_argument(
-        "--csv_root",
-        type=str,
-        default="/nfs/stak/users/kokatea/hpc-share/ChemIntuit/MOSE-GNN/DomainDrivenGlobalExpl/datasets/FOLDS",
-    )
+    parser.add_argument("--dictionary_path", type=str, default=os.environ.get("MOTIFSAT_DICTIONARY_PATH", "/nfs/stak/users/kokatea/hpc-share/ChemIntuit/MotifBreakdown/DICTIONARY_CREATE"))
+    parser.add_argument("--csv_root", type=str, default="/nfs/stak/users/kokatea/hpc-share/ChemIntuit/MOSE-GNN/DomainDrivenGlobalExpl/datasets/FOLDS")
     parser.add_argument("--cache_root", type=str, default="../data/ground_truth_cache")
     parser.add_argument("--force_rebuild", action="store_true")
-    parser.add_argument(
-        "--no_relabel_graphs_with_ground_truth",
-        action="store_true",
-        default=False,
-        help="Keep original graph labels even when edge-level ground truth is present.",
-    )
+    parser.add_argument("--no_relabel_graphs_with_ground_truth", action="store_true", default=False)
     args = parser.parse_args()
 
     from DataLoader import CHOSEN_THRESHOLD, get_setup_files_with_folds
@@ -406,39 +334,17 @@ def main():
 
     cache_root = Path(args.cache_root)
     cache_root.mkdir(parents=True, exist_ok=True)
-    run_rows: list[dict[str, Any]] = []
-
+    summary = []
     for dataset in args.datasets:
         if dataset not in DATASET_COLUMN:
-            print(f"[WARN] Unknown dataset in DATASET_COLUMN: {dataset}")
             continue
         for fold in args.folds:
-            print(f"\n[INFO] Processing {dataset} fold={fold}")
-            try:
-                thr = CHOSEN_THRESHOLD[args.algorithm][dataset]
-                date_tag = f"{args.algorithm}{thr:g}"
-            except Exception as e:
-                print(f"[WARN] Missing threshold for {dataset}: {e}")
-                continue
-
+            thr = CHOSEN_THRESHOLD[args.algorithm][dataset]
+            date_tag = f"{args.algorithm}{thr:g}"
             csv_file = Path(args.csv_root) / f"{dataset}_{fold}.csv"
             if not csv_file.is_file():
-                print(f"[WARN] Missing CSV: {csv_file}")
                 continue
-
-            (
-                lookup,
-                _motif_list,
-                _motif_counts,
-                _motif_lengths,
-                _motif_class_count,
-                _graph_to_motifs,
-                test_lookup,
-                _test_graph_to_motifs,
-                train_mask_data,
-                val_mask_data,
-                test_mask_data,
-            ) = get_setup_files_with_folds(
+            setup = get_setup_files_with_folds(
                 dataset_name=dataset,
                 date_tag=date_tag,
                 fold=fold,
@@ -446,60 +352,38 @@ def main():
                 path=args.dictionary_path,
                 dictionary_fold_variant=args.dictionary_fold_variant,
             )
-
+            lookup = setup[0]
+            test_lookup = setup[6]
             split_sets = _build_split_datasets_for_cli(
-                dataset_name=dataset,
-                fold=fold,
                 csv_file=str(csv_file),
                 label_col=DATASET_COLUMN[dataset],
                 lookup=lookup,
                 test_lookup=test_lookup,
                 dataset_type=DATASET_TYPE[dataset],
             )
-            split_masks = {
-                "train": train_mask_data,
-                "valid": val_mask_data,
-                "test": test_mask_data,
-            }
-
-            split_debug = {}
-            for split_name in ("train", "valid", "test"):
-                _, dbg = load_or_build_ground_truth_split(
-                    dataset_name=dataset,
-                    fold=fold,
-                    split_name=split_name,
-                    dataset=split_sets[split_name],
-                    mask_data=split_masks[split_name],
-                    cache_root=cache_root,
-                    dictionary_fold_variant=args.dictionary_fold_variant,
-                    force_rebuild=args.force_rebuild,
-                    relabel_graphs_with_ground_truth=not args.no_relabel_graphs_with_ground_truth,
-                )
-                split_debug[split_name] = dbg
-                print(
-                    f"[INFO] {dataset} fold={fold} {split_name}: "
-                    f"graphs={dbg.get('n_graphs_total', 'na')} "
-                    f"pos_graphs={dbg.get('n_graphs_with_pos_edges', 'na')} "
-                    f"relabelled={dbg.get('n_graphs_relabelled', 'na')} "
-                    f"edge_pos_frac={dbg.get('edge_positive_fraction_global', float('nan')):.4f} "
-                    f"cache={dbg.get('cache_file', '')}"
-                )
-
-            run_rows.append(
+            _, split_debug = load_or_build_ground_truth_splits(
+                dataset_name=dataset,
+                fold=fold,
+                split_datasets=split_sets,
+                cache_root=cache_root,
+                dictionary_fold_variant=args.dictionary_fold_variant,
+                force_rebuild=args.force_rebuild,
+                relabel_graphs_with_ground_truth=not args.no_relabel_graphs_with_ground_truth,
+            )
+            summary.append(
                 {
                     "dataset": dataset,
                     "fold": int(fold),
-                    "dictionary_fold_variant": args.dictionary_fold_variant,
                     "train_edge_positive_fraction_global": split_debug["train"].get("edge_positive_fraction_global", np.nan),
                     "valid_edge_positive_fraction_global": split_debug["valid"].get("edge_positive_fraction_global", np.nan),
                     "test_edge_positive_fraction_global": split_debug["test"].get("edge_positive_fraction_global", np.nan),
+                    "train_rule_positive_graphs": split_debug["train"].get("n_graphs_rule_positive", np.nan),
                 }
             )
-
-    if run_rows:
-        summary_path = cache_root / "ground_truth_cache_summary.csv"
-        pd.DataFrame(run_rows).to_csv(summary_path, index=False)
-        print(f"\n[INFO] Summary saved: {summary_path}")
+    if summary:
+        out_path = cache_root / "ground_truth_cache_summary.csv"
+        pd.DataFrame(summary).to_csv(out_path, index=False)
+        print(f"[INFO] Summary saved: {out_path}")
 
 
 if __name__ == "__main__":
