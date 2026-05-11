@@ -5296,6 +5296,24 @@ def write_seed_dir_run_configs(seed_dir, local_config, dataset_name, model_name,
             pass
 
 
+def _results_dataset_name(base_dataset_name, data_config):
+    """
+    Dataset tag used for output namespaces (results dir, W&B project/name, summaries).
+
+    Data loading still uses the canonical dataset name. When GT cache mode is active,
+    append a suffix so GT/non-GT runs do not collide.
+    """
+    if not isinstance(data_config, dict):
+        return base_dataset_name
+    if not bool(data_config.get('use_ground_truth_cache', False)):
+        return base_dataset_name
+    relabel = bool(data_config.get('ground_truth_relabel_graphs', True))
+    suffix = '_GT_relabeled' if relabel else '_GT'
+    if str(base_dataset_name).endswith(suffix):
+        return str(base_dataset_name)
+    return f"{base_dataset_name}{suffix}"
+
+
 _WANDB_LITE_HINT_PRINTED = False
 
 
@@ -5816,12 +5834,14 @@ def train_vanilla_gnn_one_seed(local_config, data_dir, log_dir, model_name, data
     path = "/nfs/stak/users/kokatea/hpc-share/ChemIntuit/MotifBreakdown/DICTIONARY_CREATE"
 
     gsat_config = local_config.get('GSAT_config', {})
+    data_config = local_config.get('data_config', {}) or {}
+    dataset_name_for_results = _results_dataset_name(dataset_name, data_config)
     tuning_id = gsat_config.get('tuning_id', 'default')
     experiment_name = gsat_config.get('experiment_name', 'default_experiment')
 
     results_base = os.environ.get('RESULTS_DIR', '../tuning_results')
     seed_dir = Path(os.path.join(
-        results_base, str(dataset_name), f'model_{model_name}',
+        results_base, str(dataset_name_for_results), f'model_{model_name}',
         f'experiment_{experiment_name}', f'tuning_{tuning_id}',
         'method_vanilla', 'vanilla',
         f'fold{fold}_seed{random_state}'
@@ -5843,10 +5863,11 @@ def train_vanilla_gnn_one_seed(local_config, data_dir, log_dir, model_name, data
 
     model_config = local_config['model_config']
     model_config['use_edge_attr'] = False
-    data_config = local_config['data_config']
+    # Keep the same normalized object used for dataset namespace selection.
+    data_config = local_config.get('data_config', {}) or {}
     method_config = local_config['GSAT_config']
 
-    wandb_project = f"GSAT-{dataset_name}"
+    wandb_project = f"GSAT-{dataset_name_for_results}"
     wandb_name = f"{model_name}-fold{fold}-seed{random_state}-vanilla_clean"
     try:
         wandb_dir = os.environ.get('WANDB_DIR', '../wandb')
@@ -5854,8 +5875,15 @@ def train_vanilla_gnn_one_seed(local_config, data_dir, log_dir, model_name, data
             project=wandb_project,
             name=wandb_name,
             dir=wandb_dir,
-            config={'dataset': dataset_name, 'model': model_name, 'fold': fold,
-                    'seed': random_state, 'experiment': experiment_name, 'method': 'vanilla_clean'},
+            config={
+                'dataset': dataset_name_for_results,
+                'base_dataset': dataset_name,
+                'model': model_name,
+                'fold': fold,
+                'seed': random_state,
+                'experiment': experiment_name,
+                'method': 'vanilla_clean',
+            },
             reinit=True,
             **_wandb_init_extras(),
         )
@@ -5897,7 +5925,8 @@ def train_vanilla_gnn_one_seed(local_config, data_dir, log_dir, model_name, data
     summary = {
         'experiment_name': experiment_name,
         'model_name': model_name,
-        'dataset': dataset_name,
+        'dataset': dataset_name_for_results,
+        'base_dataset': dataset_name,
         'fold': fold,
         'seed': random_state,
         'method': 'vanilla_clean',
@@ -6007,6 +6036,8 @@ def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_nam
     path = "/nfs/stak/users/kokatea/hpc-share/ChemIntuit/MotifBreakdown/DICTIONARY_CREATE"
     
     # Build the deterministic seed_dir path to check for artifacts
+    data_config = local_config.get('data_config', {}) or {}
+    dataset_name_for_results = _results_dataset_name(dataset_name, data_config)
     gsat_config = local_config.get('GSAT_config', {})
     tuning_id = gsat_config.get('tuning_id', 'default')
     experiment_name = gsat_config.get('experiment_name', 'default_experiment')
@@ -6046,7 +6077,7 @@ def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_nam
 
     seed_dir = os.path.join(
         results_base,
-        str(dataset_name),
+        str(dataset_name_for_results),
         f'model_{model_name}',
         f'experiment_{experiment_name}',
         f'tuning_{tuning_id}',
@@ -6074,11 +6105,12 @@ def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_nam
     print('====================================')
     print(f'[INFO] Using device: {device}')
     print(f'[INFO] Using random_state: {random_state}')
-    print(f'[INFO] Using dataset: {dataset_name}')
+    print(f'[INFO] Using dataset (base): {dataset_name}')
+    print(f'[INFO] Using dataset (results namespace): {dataset_name_for_results}')
     print(f'[INFO] Using model: {model_name}')
     
     # Initialize wandb
-    wandb_project = f"GSAT-{dataset_name}"
+    wandb_project = f"GSAT-{dataset_name_for_results}"
     wandb_name = f"{model_name}-fold{fold}-seed{random_state}-{tuning_id}"
     
     try:
@@ -6089,7 +6121,8 @@ def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_nam
         # `run_config` holds full per-section dicts so no keys are lost to cross-section overwrites.
         _gsat_cfg = local_config.get('GSAT_config', {}) or {}
         _wandb_flat = {
-            'dataset': dataset_name,
+            'dataset': dataset_name_for_results,
+            'base_dataset': dataset_name,
             'model': model_name,
             'fold': fold,
             'seed': random_state,
@@ -6098,7 +6131,7 @@ def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_nam
             **_gsat_cfg,
             **local_config.get('shared_config', {}),
             **local_config.get('model_config', {}),
-            **local_config.get('data_config', {}),
+            **(local_config.get('data_config', {}) or {}),
             **local_config.get(f'{method_name}_config', {}),
         }
         _wandb_flat['run_config'] = {
@@ -6124,7 +6157,8 @@ def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_nam
 
     model_config = local_config['model_config']
     model_config['use_edge_attr'] = False
-    data_config = local_config['data_config']
+    # Keep the same normalized object used for dataset namespace selection.
+    data_config = local_config.get('data_config', {}) or {}
     method_config = local_config[f'{method_name}_config']
     shared_config = local_config['shared_config']
     assert model_config['model_name'] == model_name
@@ -6337,7 +6371,7 @@ def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_nam
 
     try:
         write_seed_dir_run_configs(
-            gsat.seed_dir, local_config, dataset_name, model_name, fold, random_state,
+            gsat.seed_dir, local_config, dataset_name_for_results, model_name, fold, random_state,
         )
     except Exception as e:
         print(f'[WARNING] Failed to write data_config.yaml / run_config_full.json: {e}')
