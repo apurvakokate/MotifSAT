@@ -266,6 +266,7 @@ def get_data_loaders(
                     dataset_name=dataset_name,
                     fold=int(fold),
                     split_datasets=split_to_dataset,
+                    motif_list=motif_list,
                     cache_root=gt_cache_root,
                     dictionary_fold_variant=dictionary_fold_variant,
                     force_rebuild=bool(ground_truth_force_rebuild),

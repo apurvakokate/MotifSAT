@@ -169,6 +169,32 @@ def _edge_label(data, active_motifs: set[int]) -> tuple[torch.Tensor, int]:
     return edge_label, int(pos.sum().item())
 
 
+def _motif_name(motif_id: int, motif_list: list[Any] | None) -> str:
+    if motif_list is not None and 0 <= int(motif_id) < len(motif_list):
+        raw = motif_list[int(motif_id)]
+        return str(raw)
+    return f"motif_{int(motif_id)}"
+
+
+def _motif_name_to_ids(motif_list: list[Any] | None) -> dict[str, set[int]]:
+    out: dict[str, set[int]] = {}
+    if motif_list is None:
+        return out
+    for mid, raw in enumerate(motif_list):
+        key = str(raw)
+        if key not in out:
+            out[key] = set()
+        out[key].add(int(mid))
+    return out
+
+
+def _resolve_active_ids(active_ids: set[int], active_names: set[str], motif_name_to_ids: dict[str, set[int]]) -> set[int]:
+    resolved = set(int(v) for v in active_ids)
+    for name in active_names:
+        resolved.update(motif_name_to_ids.get(str(name), set()))
+    return resolved
+
+
 def _debug_plot(df: pd.DataFrame, fig_path: Path, title: str):
     fig, axes = plt.subplots(1, 2, figsize=(10, 3.8))
     axes[0].hist(df["edge_pos_frac"].to_numpy(dtype=float), bins=30, color="#4c72b0", alpha=0.85)
@@ -187,6 +213,7 @@ def load_or_build_ground_truth_splits(
     dataset_name: str,
     fold: int,
     split_datasets: dict[str, Any],
+    motif_list: list[Any] | None = None,
     cache_root: Path,
     dictionary_fold_variant: str = "nofilter",
     force_rebuild: bool = False,
@@ -215,6 +242,7 @@ def load_or_build_ground_truth_splits(
         return out, dbg
 
     split_data_lists = {s: _as_data_list(split_datasets[s]) for s in ("train", "valid", "test")}
+    motif_name_to_ids = _motif_name_to_ids(motif_list)
     records = _records_from_splits(split_data_lists)
     model = _fit_rules(records, dataset_name)
     X, clauses, col_to_motif = model["X"], model["clauses"], model["col_to_motif"]
@@ -228,7 +256,20 @@ def load_or_build_ground_truth_splits(
                 "n_anchor_candidates": model["n_anchor_candidates"],
                 "n_fill_candidates": model["n_fill_candidates"],
                 "n_selected_clauses": len(clauses),
-                "clauses": [{"tier": c["tier"], "k": int(c["k"]), "motif_ids": [int(v) for v in c["motif_ids"]], "prec": float(c["prec"]), "score": float(c["score"]), "gain": int(c["gain"]), "cumul_cov": float(c["cumul_cov"])} for c in clauses],
+                "clauses": [
+                    {
+                        "tier": c["tier"],
+                        "k": int(c["k"]),
+                        "motif_names": [_motif_name(int(v), motif_list) for v in c["motif_ids"]],
+                        # Backward-compatible metadata for existing analysis scripts.
+                        "motif_ids": [int(v) for v in c["motif_ids"]],
+                        "prec": float(c["prec"]),
+                        "score": float(c["score"]),
+                        "gain": int(c["gain"]),
+                        "cumul_cov": float(c["cumul_cov"]),
+                    }
+                    for c in clauses
+                ],
             },
             f,
             indent=2,
@@ -253,8 +294,10 @@ def load_or_build_ground_truth_splits(
         }
         for data in split_data_lists[split_name]:
             fired_idx, active_motifs = _fired(X[cursor], clauses, col_to_motif)
+            active_motif_names = {_motif_name(int(v), motif_list) for v in active_motifs}
+            active_motif_ids_resolved = _resolve_active_ids(set(active_motifs), active_motif_names, motif_name_to_ids)
             gt_y = 1.0 if fired_idx else 0.0
-            edge_label, n_pos = _edge_label(data, set(active_motifs))
+            edge_label, n_pos = _edge_label(data, active_motif_ids_resolved)
             data.edge_label = edge_label
             old_y = float(torch.as_tensor(getattr(data, "y")).view(-1)[0].item())
             if relabel_graphs_with_ground_truth:
@@ -276,8 +319,10 @@ def load_or_build_ground_truth_splits(
                     "edge_pos_frac": (float(n_pos) / n_edges) if n_edges > 0 else 0.0,
                     "n_fired_clauses": int(len(fired_idx)),
                     "fired_clause_indices": ",".join(str(v) for v in fired_idx),
-                    "n_active_rule_motifs": int(len(active_motifs)),
-                    "active_rule_motif_ids": ",".join(str(v) for v in active_motifs),
+                    "n_active_rule_motifs": int(len(active_motif_ids_resolved)),
+                    "active_rule_motif_names": ",".join(sorted(active_motif_names)),
+                    # Backward-compatible metadata for existing analysis scripts.
+                    "active_rule_motif_ids": ",".join(str(v) for v in sorted(active_motif_ids_resolved)),
                     "old_graph_label": old_y,
                     "gt_graph_label": gt_y,
                     "new_graph_label": gt_y if relabel_graphs_with_ground_truth else old_y,
@@ -353,6 +398,7 @@ def main():
                 dictionary_fold_variant=args.dictionary_fold_variant,
             )
             lookup = setup[0]
+            motif_list = setup[1]
             test_lookup = setup[6]
             split_sets = _build_split_datasets_for_cli(
                 csv_file=str(csv_file),
@@ -365,6 +411,7 @@ def main():
                 dataset_name=dataset,
                 fold=fold,
                 split_datasets=split_sets,
+                motif_list=motif_list,
                 cache_root=cache_root,
                 dictionary_fold_variant=args.dictionary_fold_variant,
                 force_rebuild=args.force_rebuild,
