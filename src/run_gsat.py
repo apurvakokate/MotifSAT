@@ -1496,6 +1496,7 @@ class GSAT(nn.Module):
         _clamp = method_config.get('factored_motif_node_logit_clamp', None)
         self.factored_motif_node_logit_clamp = None if _clamp is None else float(_clamp)
         self.motif_readout_beta_r07 = bool(method_config.get('motif_readout_beta_r07', False))
+        self.motif_readout_beta_disable_clamp = bool(method_config.get('motif_readout_beta_disable_clamp', False))
 
         self.factored_motif_attention = bool(method_config.get('factored_motif_attention', False))
         self.factored_motif_zk_axis = str(method_config.get('factored_motif_zk_axis', 'M4')).upper()
@@ -1643,6 +1644,10 @@ class GSAT(nn.Module):
                     'alpha_v from motif logits, edge alpha_uv=alpha_u*alpha_v via endpoint products, '
                     'normalized weighted readout.'
                 )
+                print(
+                    f'[INFO] Motif readout beta clamp: '
+                    f'{"disabled" if self.motif_readout_beta_disable_clamp else f"|ell_m|<={FACTORED_MOTIF_LOGIT_CLAMP}"}'
+                )
         if self.factored_motif_regularized:
             print(
                 f'[INFO] Factored motif regularized: zk_dropout_p={self.factored_motif_zk_dropout_p}, '
@@ -1703,6 +1708,7 @@ class GSAT(nn.Module):
                 f'start_epoch={self.motif_grad_probe_start_epoch}, '
                 f'epoch_every={self.motif_grad_probe_epoch_every})'
             )
+        self._latest_motif_sampling_stats = {}
         # if self.motif_r_values is not None:
         #     print(f'[INFO] Score-based per-motif r: loaded {len(self.motif_r_values)} values')
         
@@ -1979,6 +1985,30 @@ class GSAT(nn.Module):
             h = _wandb_histogram_safe(arr, num_bins=50)
             if h is not None:
                 wandb_metrics[f'{base}_distribution'] = h
+
+    def _save_motif_sampling_diag_stats(self, epoch, phase, merged_diag):
+        if not merged_diag:
+            return
+        out = {'epoch': int(epoch), 'phase': str(phase)}
+        for key, arr in merged_diag.items():
+            if arr is None or len(arr) == 0:
+                continue
+            arr_np = np.asarray(arr)
+            out[f'{key}_mean'] = float(np.mean(arr_np))
+            out[f'{key}_std'] = float(np.std(arr_np))
+            out[f'{key}_min'] = float(np.min(arr_np))
+            out[f'{key}_max'] = float(np.max(arr_np))
+            self._latest_motif_sampling_stats[(str(phase), str(key))] = {
+                'mean': out[f'{key}_mean'],
+                'std': out[f'{key}_std'],
+                'min': out[f'{key}_min'],
+                'max': out[f'{key}_max'],
+            }
+        if len(out) <= 2:
+            return
+        path = os.path.join(self.seed_dir, 'motif_sampling_stats.jsonl')
+        with open(path, 'a') as f:
+            f.write(json.dumps(out) + '\n')
 
     def save_final_metrics(self, metric_dict):
         """Save final best metrics after training completes."""
@@ -2361,11 +2391,13 @@ class GSAT(nn.Module):
         # Explicit z_m dropout + motif MLP internal dropout (configured in train_gsat_one_seed).
         z_m = F.dropout(z_m, p=0.3, training=training)
         motif_att_log_logits = self.motif_scoring_mlp(z_m, motif_batch)
-        ell_m = torch.clamp(
-            motif_att_log_logits.squeeze(-1),
-            -FACTORED_MOTIF_LOGIT_CLAMP,
-            FACTORED_MOTIF_LOGIT_CLAMP,
-        )
+        ell_m = motif_att_log_logits.squeeze(-1)
+        if not self.motif_readout_beta_disable_clamp:
+            ell_m = torch.clamp(
+                ell_m,
+                -FACTORED_MOTIF_LOGIT_CLAMP,
+                FACTORED_MOTIF_LOGIT_CLAMP,
+            )
         motif_att_log_logits = ell_m.unsqueeze(-1)
         node_logit = motif_att_log_logits[inverse_indices]
         if self.motif_level_sampling:
@@ -4162,6 +4194,7 @@ class GSAT(nn.Module):
                 for k, v in all_loss_dict.items():
                     all_loss_dict[k] = v / loader_len
                 motif_diag_epoch = self._merge_motif_sampling_epoch_arrays(motif_diag_batches)
+                self._save_motif_sampling_diag_stats(epoch, phase.strip(), motif_diag_epoch)
                 desc, att_auroc, precision, clf_acc, clf_roc, avg_loss = self.log_epoch(epoch, phase, all_loss_dict, all_exp_labels, all_att,
                                                                                         all_precision_at_k, all_clf_labels, all_clf_logits, batch=False,
                                                                                         motif_sampling_diag=motif_diag_epoch)
@@ -4569,6 +4602,14 @@ class GSAT(nn.Module):
                                     base_edge_att=base_edge_att_cf,
                                 )
                                 old_pred_val = float(old_prediction.squeeze().detach().cpu().item())
+                                graph_prob = float(torch.sigmoid(torch.tensor(old_pred_val)).item())
+                                graph_pred = int(graph_prob >= 0.5)
+                                graph_label = int(data.y.view(-1)[0].detach().cpu().item())
+                                graph_correct = int(graph_pred == graph_label)
+                                sample_results['graph_label'] = graph_label
+                                sample_results['graph_pred'] = graph_pred
+                                sample_results['graph_prob'] = graph_prob
+                                sample_results['graph_correct'] = graph_correct
                                 nodes_to_motifs = getattr(data, 'nodes_to_motifs', None)
                                 smiles_val = getattr(data, 'smiles', None)
 
@@ -4724,6 +4765,12 @@ class GSAT(nn.Module):
                       f'Best Test X AUROC: {metric_dict["metric/best_x_roc_test"]:.3f}')
             print('====================================')
             print('====================================')
+        for (phase_key, arr_key), stats in self._latest_motif_sampling_stats.items():
+            pref = f'motif_sampling/{phase_key}/{arr_key}'
+            metric_dict[f'{pref}_mean'] = float(stats['mean'])
+            metric_dict[f'{pref}_std'] = float(stats['std'])
+            metric_dict[f'{pref}_min'] = float(stats['min'])
+            metric_dict[f'{pref}_max'] = float(stats['max'])
         try:
             extra_m = self._save_post_training_analysis_artifacts(
                 loaders, use_edge_attr, max(0, self.epochs - 1),
@@ -5110,6 +5157,10 @@ class GSAT(nn.Module):
         motif_logit_node = sample_result.get('motif_logit_node')
         node_logit_node = sample_result.get('node_logit_node')
         delta_node = sample_result.get('delta_node')
+        graph_label = sample_result.get('graph_label')
+        graph_pred = sample_result.get('graph_pred')
+        graph_prob = sample_result.get('graph_prob')
+        graph_correct = sample_result.get('graph_correct')
         
         # Save node scores
         if node_att is not None:
@@ -5120,7 +5171,11 @@ class GSAT(nn.Module):
                     'smiles': sample.smiles,
                     'node_index': local_node_idx,
                     'motif_index': int(sample.nodes_to_motifs[local_node_idx]),
-                    'score': float(node_att[local_node_idx])
+                    'score': float(node_att[local_node_idx]),
+                    'graph_label': int(graph_label) if graph_label is not None else None,
+                    'graph_pred': int(graph_pred) if graph_pred is not None else None,
+                    'graph_prob': float(graph_prob) if graph_prob is not None else None,
+                    'graph_correct': int(graph_correct) if graph_correct is not None else None,
                 }
                 if motif_score_node is not None:
                     node_record['motif_score'] = float(motif_score_node[local_node_idx])
@@ -5145,7 +5200,13 @@ class GSAT(nn.Module):
                     'edge_index': local_edge_idx,
                     'source': source,
                     'target': target,
-                    'score': float(edge_att[local_edge_idx])
+                    'score': float(edge_att[local_edge_idx]),
+                    'edge_label': float(sample.edge_label[local_edge_idx].detach().cpu().item())
+                    if getattr(sample, 'edge_label', None) is not None else None,
+                    'graph_label': int(graph_label) if graph_label is not None else None,
+                    'graph_pred': int(graph_pred) if graph_pred is not None else None,
+                    'graph_prob': float(graph_prob) if graph_prob is not None else None,
+                    'graph_correct': int(graph_correct) if graph_correct is not None else None,
                 }
                 edge_f.write(json.dumps(edge_record) + '\n')
 

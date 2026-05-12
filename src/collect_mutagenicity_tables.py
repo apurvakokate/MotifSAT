@@ -390,6 +390,11 @@ EXPERIMENT_ROW_CONFIG = {
         'row_label_prefix': 'cfg',
         'path_extract': 'beta_info0_sweep',
     },
+    'motif_readout_info0_motif_noise_add_temp1_compare': {
+        'summary_path': None,
+        'row_label_prefix': 'pipeline',
+        'path_extract': 'motif_noise_compare_variant',
+    },
     'maxmean_clamped_111_eval_fixed': {
         'summary_path': ('loss_coefficients', 'info_loss_coef'),
         'row_label_prefix': 'info_loss_coef',
@@ -654,6 +659,16 @@ def _extract_value_from_parts(parts, mode):
             pool = m.group(2)
             temp = m.group(3).replace('p', '.')
             return f'pert={pert},pool={pool},temp={temp}'
+        return None
+
+    elif mode == 'motif_noise_compare_variant':
+        joined = '/'.join(parts)
+        if 'compare_beta_clamped' in joined:
+            return 'beta_clamped'
+        if 'compare_beta_unclamped' in joined:
+            return 'beta_unclamped'
+        if 'compare_base_decay_r07' in joined:
+            return 'base_decay_r07'
         return None
 
     return None
