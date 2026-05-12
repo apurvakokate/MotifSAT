@@ -1568,7 +1568,7 @@ EXPERIMENT_GROUPS['motif_readout_info0_motif_noise_add_temp1_compare'] = {
                 **_DECAY_R_BASE,
                 'final_r': 0.7,
                 **_BASE_GSAT_NONE,
-                **INJECTION_PRESETS['010'],
+                **INJECTION_PRESETS['111'],
             },
             'learn_edge_att': False,
         },
