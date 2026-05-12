@@ -29,7 +29,6 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import roc_auc_score
 
-from analyze_motif_consistency import get_motif_level_score_impact_points
 from collect_mutagenicity_tables import (
     compute_node_score_impact_correlation,
     compute_posthoc_correlation,
@@ -229,6 +228,38 @@ def _node_points(seed_dir: Path, split: str = "test") -> tuple[np.ndarray | None
     return np.asarray(xs, dtype=float), np.asarray(ys, dtype=float)
 
 
+def _motif_points(seed_dir: Path, split: str = "test") -> tuple[np.ndarray | None, np.ndarray | None]:
+    node_rows = _read_jsonl(seed_dir / "node_scores.jsonl")
+    impact_rows = _read_jsonl(seed_dir / "Motif_level_node_and_edge_masking_impact.jsonl")
+    score_by_m = defaultdict(list)
+    for r in node_rows:
+        if r.get("split") != split:
+            continue
+        m = r.get("motif_index")
+        s = r.get("motif_score", r.get("score"))
+        if m is None or s is None:
+            continue
+        score_by_m[int(m)].append(float(s))
+    impact_by_m = defaultdict(list)
+    for r in impact_rows:
+        if r.get("split") != split:
+            continue
+        m = r.get("motif_idx", r.get("motif_index"))
+        old_p = r.get("old_prediction")
+        new_p = r.get("new_prediction")
+        if m is None or old_p is None or new_p is None:
+            continue
+        impact_by_m[int(m)].append(abs(_sigmoid(float(new_p)) - _sigmoid(float(old_p))))
+    common = sorted(set(score_by_m.keys()) & set(impact_by_m.keys()))
+    if not common:
+        return None, None
+    xs = np.asarray([float(np.mean(score_by_m[m])) for m in common], dtype=float)
+    ys = np.asarray([float(np.mean(impact_by_m[m])) for m in common], dtype=float)
+    if xs.size == 0 or ys.size == 0:
+        return None, None
+    return xs, ys
+
+
 def _plot_grid(rep: dict[tuple[str, str], Path], pipelines: list[str], out_png: Path, level: str = "motif") -> None:
     n_rows = len(pipelines)
     n_cols = len(MODEL_ORDER)
@@ -248,7 +279,7 @@ def _plot_grid(rep: dict[tuple[str, str], Path], pipelines: list[str], out_png: 
                 ax.set_yticks([])
                 continue
             if level == "motif":
-                xs, ys = get_motif_level_score_impact_points(sd, split="test")
+                xs, ys = _motif_points(sd, split="test")
             else:
                 xs, ys = _node_points(sd, split="test")
             if xs is None or ys is None or len(xs) == 0:
