@@ -775,10 +775,15 @@ def _read_json(path: Path):
 
 def _read_jsonl(path: Path):
     with path.open('r') as f:
-        for line in f:
+        for lineno, line in enumerate(f, start=1):
             line = line.strip()
             if line:
-                yield json.loads(line)
+                try:
+                    yield json.loads(line)
+                except json.JSONDecodeError:
+                    # Be robust to occasional partially-written/corrupt lines in large HPC exports.
+                    print(f"[WARN] Skipping malformed JSONL line: {path}:{lineno}")
+                    continue
 
 
 def _infer_model_from_parts(parts):
