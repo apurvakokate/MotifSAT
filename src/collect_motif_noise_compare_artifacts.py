@@ -31,7 +31,9 @@ from sklearn.metrics import roc_auc_score
 
 from collect_mutagenicity_tables import (
     compute_node_score_impact_correlation,
+    compute_node_score_impact_correlation_per_graph,
     compute_posthoc_correlation,
+    compute_posthoc_correlation_per_graph,
     find_results,
 )
 
@@ -380,14 +382,24 @@ def build_dataset_artifact(
 
             for split in ("train", "valid", "test"):
                 motif_vals, node_vals = [], []
+                motif_graph_vals, node_graph_vals = [], []
+                motif_graph_counts, node_graph_counts = [], []
                 for c in cell:
                     sd_dir = Path(c["seed_dir"])
                     motif_r, _, _ = compute_posthoc_correlation(sd_dir, split=split)
                     node_r, _, _ = compute_node_score_impact_correlation(sd_dir, split=split)
+                    motif_graph_r, _, motif_graph_n = compute_posthoc_correlation_per_graph(sd_dir, split=split)
+                    node_graph_r, _, node_graph_n = compute_node_score_impact_correlation_per_graph(sd_dir, split=split)
                     motif_vals.append(motif_r)
                     node_vals.append(node_r)
+                    motif_graph_vals.append(motif_graph_r)
+                    node_graph_vals.append(node_graph_r)
+                    motif_graph_counts.append(motif_graph_n)
+                    node_graph_counts.append(node_graph_n)
                 m_mu, m_sd, m_n = _mean_std(motif_vals)
                 n_mu, n_sd, n_n = _mean_std(node_vals)
+                mg_mu, mg_sd, mg_n = _mean_std(motif_graph_vals)
+                ng_mu, ng_sd, ng_n = _mean_std(node_graph_vals)
                 corr_rows.append(
                     {
                         "dataset": dataset_tag,
@@ -400,6 +412,14 @@ def build_dataset_artifact(
                         "node_corr_mean": n_mu,
                         "node_corr_std": n_sd,
                         "node_corr_n": n_n,
+                        "motif_graph_corr_mean": mg_mu,
+                        "motif_graph_corr_std": mg_sd,
+                        "motif_graph_corr_n_runs": mg_n,
+                        "motif_graph_corr_n_graphs_total": int(sum(int(v) for v in motif_graph_counts if v is not None)),
+                        "node_graph_corr_mean": ng_mu,
+                        "node_graph_corr_std": ng_sd,
+                        "node_graph_corr_n_runs": ng_n,
+                        "node_graph_corr_n_graphs_total": int(sum(int(v) for v in node_graph_counts if v is not None)),
                     }
                 )
 

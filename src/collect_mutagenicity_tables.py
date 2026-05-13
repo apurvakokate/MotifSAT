@@ -1043,6 +1043,120 @@ def compute_posthoc_correlation(seed_dir: Path, split: str = 'test'):
     return float(r), float(p), len(common)
 
 
+def compute_posthoc_correlation_per_graph(seed_dir: Path, split: str = 'test'):
+    """
+    Per-graph Pearson r between motif score and motif masking impact.
+
+    For each graph:
+      1) aggregate node scores to motif-level mean
+      2) align with motif masking impact for motifs in that graph
+      3) compute Pearson r if >=3 aligned motifs and non-constant vectors
+
+    Returns:
+      mean_r_across_graphs, std_r_across_graphs, n_graphs_with_valid_r
+    """
+    node_scores_path = seed_dir / 'node_scores.jsonl'
+    impact_path = seed_dir / 'Motif_level_node_and_edge_masking_impact.jsonl'
+    if not impact_path.exists():
+        impact_path = seed_dir / 'masked-edge-impact.jsonl'
+    if not node_scores_path.exists() or not impact_path.exists():
+        return np.nan, np.nan, 0
+
+    score_key = 'score'
+    summary_path = seed_dir / 'experiment_summary.json'
+    if summary_path.exists():
+        try:
+            summary = _read_json(summary_path)
+            method = ((summary.get('motif_incorporation') or {}).get('method')) if summary else None
+            if method == 'factored_between_within':
+                score_key = 'motif_score'
+        except Exception:
+            pass
+
+    def _parse_graph_id(rec):
+        g = rec.get('graph_idx', rec.get('graph_id'))
+        if g is None:
+            return None
+        try:
+            return int(g)
+        except (TypeError, ValueError):
+            return None
+
+    def _parse_motif_id(rec):
+        raw = rec.get('motif_idx', rec.get('motif_index'))
+        if raw is None:
+            return None
+        try:
+            motif_id = int(raw)
+        except (TypeError, ValueError):
+            return None
+        if motif_id < 0:
+            return None
+        return motif_id
+
+    def _parse_motif_name(rec, motif_id, name_by_id):
+        raw_name = rec.get('motif_name', rec.get('motif_smiles'))
+        if raw_name is None:
+            raw_name = name_by_id.get(motif_id)
+        motif_name = str(raw_name).strip() if raw_name is not None else ''
+        if not motif_name:
+            motif_name = f'motif_{motif_id}'
+        name_by_id.setdefault(motif_id, motif_name)
+        return motif_name
+
+    name_by_id = {}
+    scores_by_graph = defaultdict(lambda: defaultdict(list))
+    for rec in _read_jsonl(node_scores_path):
+        if rec.get('split') != split:
+            continue
+        graph_id = _parse_graph_id(rec)
+        motif_idx = _parse_motif_id(rec)
+        if graph_id is None or motif_idx is None:
+            continue
+        score_val = rec.get(score_key)
+        if score_val is None:
+            score_val = rec.get('score')
+        if score_val is None:
+            continue
+        motif_name = _parse_motif_name(rec, motif_idx, name_by_id)
+        scores_by_graph[graph_id][(motif_idx, motif_name)].append(float(score_val))
+
+    impacts_by_graph = defaultdict(lambda: defaultdict(list))
+    for rec in _read_jsonl(impact_path):
+        if rec.get('split') != split:
+            continue
+        graph_id = _parse_graph_id(rec)
+        motif_idx = _parse_motif_id(rec)
+        if graph_id is None or motif_idx is None:
+            continue
+        motif_name = _parse_motif_name(rec, motif_idx, name_by_id)
+        imp = abs(_sigmoid(rec['new_prediction']) - _sigmoid(rec['old_prediction']))
+        impacts_by_graph[graph_id][(motif_idx, motif_name)].append(float(imp))
+
+    graph_rs = []
+    for graph_id in sorted(set(scores_by_graph.keys()) & set(impacts_by_graph.keys())):
+        s_map = scores_by_graph[graph_id]
+        i_map = impacts_by_graph[graph_id]
+        common = sorted(set(s_map.keys()) & set(i_map.keys()))
+        if len(common) < 3:
+            continue
+        avg_scores = np.array([np.mean(s_map[k]) for k in common], dtype=float)
+        avg_impacts = np.array([np.mean(i_map[k]) for k in common], dtype=float)
+        if np.allclose(avg_scores, avg_scores[0]) or np.allclose(avg_impacts, avg_impacts[0]):
+            continue
+        try:
+            r, _ = pearsonr(avg_scores, avg_impacts)
+        except Exception:
+            continue
+        if np.isfinite(r):
+            graph_rs.append(float(r))
+
+    if not graph_rs:
+        return np.nan, np.nan, 0
+    arr = np.asarray(graph_rs, dtype=float)
+    return float(np.mean(arr)), float(np.std(arr, ddof=0)), int(arr.size)
+
+
 def compute_node_score_impact_correlation(seed_dir: Path, split: str = 'test'):
     """
     Pearson r between per-node attention score and |Δ sigmoid(pred)| from individual-node masking.
@@ -1063,6 +1177,57 @@ def compute_node_score_impact_correlation(seed_dir: Path, split: str = 'test'):
         return np.nan, np.nan, len(xs)
     r, p = pearsonr(xs, ys)
     return float(r), float(p), len(xs)
+
+
+def compute_node_score_impact_correlation_per_graph(seed_dir: Path, split: str = 'test'):
+    """
+    Per-graph Pearson r between per-node attention score and node masking impact.
+
+    Returns:
+      mean_r_across_graphs, std_r_across_graphs, n_graphs_with_valid_r
+    """
+    path = seed_dir / 'Individual_node_node_masking_impact.jsonl'
+    if not path.exists():
+        path = seed_dir / 'masked-node-impact.jsonl'
+    if not path.exists():
+        return np.nan, np.nan, 0
+
+    by_graph_x = defaultdict(list)
+    by_graph_y = defaultdict(list)
+    for rec in _read_jsonl(path):
+        if rec.get('split') != split:
+            continue
+        g = rec.get('graph_idx', rec.get('graph_id'))
+        if g is None:
+            continue
+        try:
+            g = int(g)
+            x = float(rec['score'])
+            y = abs(_sigmoid(rec['new_prediction']) - _sigmoid(rec['old_prediction']))
+        except (TypeError, ValueError, KeyError):
+            continue
+        by_graph_x[g].append(x)
+        by_graph_y[g].append(y)
+
+    graph_rs = []
+    for g in sorted(set(by_graph_x.keys()) & set(by_graph_y.keys())):
+        xs = np.asarray(by_graph_x[g], dtype=float)
+        ys = np.asarray(by_graph_y[g], dtype=float)
+        if xs.size < 3 or ys.size < 3:
+            continue
+        if np.allclose(xs, xs[0]) or np.allclose(ys, ys[0]):
+            continue
+        try:
+            r, _ = pearsonr(xs, ys)
+        except Exception:
+            continue
+        if np.isfinite(r):
+            graph_rs.append(float(r))
+
+    if not graph_rs:
+        return np.nan, np.nan, 0
+    arr = np.asarray(graph_rs, dtype=float)
+    return float(np.mean(arr)), float(np.std(arr, ddof=0)), int(arr.size)
 
 
 def build_posthoc_table(records, split='test'):
