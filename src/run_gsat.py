@@ -6412,7 +6412,7 @@ def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_nam
     print('====================================')
     print('[INFO] Training GSAT...')
     gsat = GSAT(
-        model, extractor, optimizer, scheduler, writer, device, log_dir, dataset_name, num_class,
+        model, extractor, optimizer, scheduler, writer, device, log_dir, dataset_name_for_results, num_class,
         aux_info['multi_label'], random_state, method_config, shared_config, fold, task_type,
         datasets, masked_data_features, motif_clf=motif_clf, motif_list=motif_list,
         intra_motif_pool=intra_motif_pool, motif_prior_node_gate_module=motif_prior_node_gate_module,
