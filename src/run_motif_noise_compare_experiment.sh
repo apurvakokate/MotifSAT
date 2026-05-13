@@ -32,16 +32,22 @@ MODELS=(GIN PNA GAT SAGE GCN)
 BASE_DATASETS=(Mutagenicity Benzene BBBP)
 FOLDS=(0 1)
 SEEDS=(0)
+# Set GT_ONLY=1 to skip base (non-GT) branch.
+GT_ONLY="${GT_ONLY:-0}"
 
 echo "[INFO] Running experiment: ${EXPERIMENT}"
 echo "[INFO] Base datasets: ${BASE_DATASETS[*]}"
 echo "[INFO] Models: ${MODELS[*]}"
 echo "[INFO] Folds: ${FOLDS[*]}"
+echo "[INFO] GT_ONLY=${GT_ONLY}"
 
 for DATASET in "${BASE_DATASETS[@]}"; do
   for GT_RELABEL in 0 1; do
+    if [[ "$GT_ONLY" -eq 1 && "$GT_RELABEL" -eq 0 ]]; then
+      continue
+    fi
     if [[ "$GT_RELABEL" -eq 1 ]]; then
-      DATASET_ALIAS="${DATASET}_GT_relabled"
+      DATASET_ALIAS="${DATASET}_GT_relabeled"
       GT_ARGS=()
       echo "[INFO] Dataset alias=${DATASET_ALIAS} -> run dataset=${DATASET} (GT cache + relabel ON)"
     else
