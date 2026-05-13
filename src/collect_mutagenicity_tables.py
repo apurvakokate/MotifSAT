@@ -980,29 +980,54 @@ def compute_posthoc_correlation(seed_dir: Path, split: str = 'test'):
         except Exception:
             pass
 
+    def _parse_motif_id(rec):
+        raw = rec.get('motif_idx', rec.get('motif_index'))
+        if raw is None:
+            return None
+        try:
+            motif_id = int(raw)
+        except (TypeError, ValueError):
+            return None
+        if motif_id < 0:
+            return None
+        return motif_id
+
+    def _parse_motif_name(rec, motif_id, name_by_id):
+        raw_name = rec.get('motif_name', rec.get('motif_smiles'))
+        if raw_name is None:
+            raw_name = name_by_id.get(motif_id)
+        motif_name = str(raw_name).strip() if raw_name is not None else ''
+        if not motif_name:
+            motif_name = f'motif_{motif_id}'
+        name_by_id.setdefault(motif_id, motif_name)
+        return motif_name
+
+    name_by_id = {}
     scores = defaultdict(list)
     for rec in _read_jsonl(node_scores_path):
         if rec.get('split') != split:
             continue
-        motif_idx = rec.get('motif_index', rec.get('motif_idx'))
-        if motif_idx is None or motif_idx < 0:
+        motif_idx = _parse_motif_id(rec)
+        if motif_idx is None:
             continue
         score_val = rec.get(score_key)
         if score_val is None:
             score_val = rec.get('score')
         if score_val is None:
             continue
-        scores[motif_idx].append(float(score_val))
+        motif_name = _parse_motif_name(rec, motif_idx, name_by_id)
+        scores[(motif_idx, motif_name)].append(float(score_val))
 
     impacts = defaultdict(list)
     for rec in _read_jsonl(impact_path):
         if rec.get('split') != split:
             continue
-        motif_idx = rec.get('motif_idx', rec.get('motif_index'))
-        if motif_idx is None or motif_idx < 0:
+        motif_idx = _parse_motif_id(rec)
+        if motif_idx is None:
             continue
+        motif_name = _parse_motif_name(rec, motif_idx, name_by_id)
         imp = abs(_sigmoid(rec['new_prediction']) - _sigmoid(rec['old_prediction']))
-        impacts[motif_idx].append(imp)
+        impacts[(motif_idx, motif_name)].append(imp)
 
     common = set(scores.keys()) & set(impacts.keys())
     if len(common) < 3:

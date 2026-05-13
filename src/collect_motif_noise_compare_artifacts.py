@@ -90,6 +90,30 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     return out
 
 
+def _parse_motif_id(rec: dict[str, Any]) -> int | None:
+    raw = rec.get("motif_idx", rec.get("motif_index"))
+    if raw is None:
+        return None
+    try:
+        motif_id = int(raw)
+    except (TypeError, ValueError):
+        return None
+    if motif_id < 0:
+        return None
+    return motif_id
+
+
+def _parse_motif_name(rec: dict[str, Any], motif_id: int, name_by_id: dict[int, str]) -> str:
+    raw_name = rec.get("motif_name", rec.get("motif_smiles"))
+    if raw_name is None:
+        raw_name = name_by_id.get(motif_id)
+    name = str(raw_name).strip() if raw_name is not None else ""
+    if not name:
+        name = f"motif_{motif_id}"
+    name_by_id.setdefault(motif_id, name)
+    return name
+
+
 def _edge_roc(seed_dir: Path, split: str = "test") -> tuple[float | None, float | None]:
     rows = _read_jsonl(seed_dir / "edge_scores.jsonl")
     if not rows:
@@ -171,19 +195,21 @@ def _top10_motifs(seed_dir: Path, split: str = "test") -> pd.DataFrame:
     node_rows = _read_jsonl(seed_dir / "node_scores.jsonl")
     impact_rows = _read_jsonl(seed_dir / "Motif_level_node_and_edge_masking_impact.jsonl")
     score_by_m = defaultdict(list)
+    name_by_id: dict[int, str] = {}
     for r in node_rows:
         if r.get("split") != split:
             continue
-        m = r.get("motif_index")
+        m = _parse_motif_id(r)
         s = r.get("motif_score", r.get("score"))
         if m is None or s is None:
             continue
-        score_by_m[int(m)].append(float(s))
+        motif_name = _parse_motif_name(r, m, name_by_id)
+        score_by_m[(m, motif_name)].append(float(s))
     impact_by_m = defaultdict(list)
     for r in impact_rows:
         if r.get("split") != split:
             continue
-        m = r.get("motif_idx", r.get("motif_index"))
+        m = _parse_motif_id(r)
         if m is None:
             continue
         old_p = r.get("old_prediction")
@@ -191,20 +217,24 @@ def _top10_motifs(seed_dir: Path, split: str = "test") -> pd.DataFrame:
         if old_p is None or new_p is None:
             continue
         imp = abs(_sigmoid(float(new_p)) - _sigmoid(float(old_p)))
-        impact_by_m[int(m)].append(float(imp))
+        motif_name = _parse_motif_name(r, m, name_by_id)
+        impact_by_m[(m, motif_name)].append(float(imp))
     rows = []
-    for m, sc in score_by_m.items():
+    for (motif_id, motif_name), sc in score_by_m.items():
         rows.append(
             {
-                "motif_index": int(m),
+                "motif_id": int(motif_id),
+                "motif_name": motif_name,
                 "score_mean": float(np.mean(sc)),
                 "score_std": float(np.std(sc, ddof=0)),
-                "impact_mean": float(np.mean(impact_by_m[m])) if impact_by_m[m] else np.nan,
+                "impact_mean": float(np.mean(impact_by_m[(motif_id, motif_name)]))
+                if impact_by_m[(motif_id, motif_name)]
+                else np.nan,
                 "n_nodes": int(len(sc)),
             }
         )
     if not rows:
-        return pd.DataFrame(columns=["rank", "motif_index", "score_mean", "score_std", "impact_mean", "n_nodes"])
+        return pd.DataFrame(columns=["rank", "motif_id", "motif_name", "score_mean", "score_std", "impact_mean", "n_nodes"])
     df = pd.DataFrame(rows).sort_values("score_mean", ascending=False).head(10).reset_index(drop=True)
     df.insert(0, "rank", np.arange(1, len(df) + 1))
     return df
@@ -232,24 +262,27 @@ def _motif_points(seed_dir: Path, split: str = "test") -> tuple[np.ndarray | Non
     node_rows = _read_jsonl(seed_dir / "node_scores.jsonl")
     impact_rows = _read_jsonl(seed_dir / "Motif_level_node_and_edge_masking_impact.jsonl")
     score_by_m = defaultdict(list)
+    name_by_id: dict[int, str] = {}
     for r in node_rows:
         if r.get("split") != split:
             continue
-        m = r.get("motif_index")
+        m = _parse_motif_id(r)
         s = r.get("motif_score", r.get("score"))
         if m is None or s is None:
             continue
-        score_by_m[int(m)].append(float(s))
+        motif_name = _parse_motif_name(r, m, name_by_id)
+        score_by_m[(m, motif_name)].append(float(s))
     impact_by_m = defaultdict(list)
     for r in impact_rows:
         if r.get("split") != split:
             continue
-        m = r.get("motif_idx", r.get("motif_index"))
+        m = _parse_motif_id(r)
         old_p = r.get("old_prediction")
         new_p = r.get("new_prediction")
         if m is None or old_p is None or new_p is None:
             continue
-        impact_by_m[int(m)].append(abs(_sigmoid(float(new_p)) - _sigmoid(float(old_p))))
+        motif_name = _parse_motif_name(r, m, name_by_id)
+        impact_by_m[(m, motif_name)].append(abs(_sigmoid(float(new_p)) - _sigmoid(float(old_p))))
     common = sorted(set(score_by_m.keys()) & set(impact_by_m.keys()))
     if not common:
         return None, None
@@ -268,6 +301,7 @@ def _plot_grid(rep: dict[tuple[str, str], Path], pipelines: list[str], out_png: 
     for i, p in enumerate(pipelines):
         for j, m in enumerate(MODEL_ORDER):
             ax = axes[i, j]
+            ax.set_xlim(0.0, 1.0)
             sd = rep.get((p, m))
             if i == 0:
                 ax.set_title(m, fontsize=9)
