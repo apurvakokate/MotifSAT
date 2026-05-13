@@ -1044,15 +1044,7 @@ def get_motif_level_score_impact_points(seed_dir, split='test'):
             return None
         return motif_id
 
-    def _parse_motif_name(rec, motif_id, name_by_id):
-        raw_name = rec.get('motif_name', rec.get('motif_smiles'))
-        if raw_name is None:
-            raw_name = name_by_id.get(motif_id)
-        motif_name = str(raw_name).strip() if raw_name is not None else ''
-        if not motif_name:
-            motif_name = f'motif_{motif_id}'
-        name_by_id.setdefault(motif_id, motif_name)
-        return motif_name
+    from collect_mutagenicity_tables import _resolve_motif_name_from_seed
 
     name_by_id = {}
     motif_scores = defaultdict(list)
@@ -1065,7 +1057,7 @@ def get_motif_level_score_impact_points(seed_dir, split='test'):
             score_val = rec.get('score')
         if score_val is None:
             continue
-        motif_name = _parse_motif_name(rec, midx, name_by_id)
+        motif_name = _resolve_motif_name_from_seed(seed_dir, rec, midx, name_by_id)
         motif_scores[(rec['graph_idx'], midx, motif_name)].append(float(score_val))
 
     if not motif_scores:
@@ -1077,7 +1069,7 @@ def get_motif_level_score_impact_points(seed_dir, split='test'):
         midx = _parse_motif_id(rec)
         if midx is None:
             continue
-        motif_name = _parse_motif_name(rec, midx, name_by_id)
+        motif_name = _resolve_motif_name_from_seed(seed_dir, rec, midx, name_by_id)
         imp = abs(_sigmoid(rec['new_prediction']) - _sigmoid(rec['old_prediction']))
         motif_impacts[(rec['graph_idx'], midx, motif_name)] = imp
 

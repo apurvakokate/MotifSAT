@@ -21,6 +21,8 @@ import numpy as np
 import pandas as pd
 from scipy.stats import pearsonr
 
+from DataLoader import CHOSEN_THRESHOLD, get_setup_files_with_folds
+
 
 EXPERIMENT_ROW_CONFIG = {
     # legacy
@@ -960,6 +962,100 @@ def _sigmoid(x: float) -> float:
     return z / (1.0 + z)
 
 
+_MOTIF_NAME_MAP_CACHE: dict[tuple[str, int, str, str | None], dict[int, str]] = {}
+
+
+def _base_dataset_name(dataset_name: str) -> str:
+    ds = str(dataset_name or "")
+    for suffix in ("_GT_relabeled", "_GT_relabled", "_GT"):
+        if ds.endswith(suffix):
+            return ds[: -len(suffix)]
+    return ds
+
+
+def _normalize_record_motif_name(raw_name):
+    if raw_name is None:
+        return None
+    s = str(raw_name).strip()
+    if not s:
+        return None
+    # Ignore synthetic fallback names to prefer dictionary SMARTS.
+    if re.fullmatch(r"motif[_\s:-]*\d+", s):
+        return None
+    if re.fullmatch(r"motif_id[:\s_-]*\d+", s):
+        return None
+    return s
+
+
+def _load_motif_id_to_smarts(seed_dir: Path) -> dict[int, str]:
+    seed_dir = Path(seed_dir)
+    summary_path = seed_dir / "experiment_summary.json"
+    run_cfg_path = seed_dir / "run_config_full.json"
+    if not summary_path.exists():
+        return {}
+
+    try:
+        summary = _read_json(summary_path)
+    except Exception:
+        return {}
+
+    run_cfg = {}
+    if run_cfg_path.exists():
+        try:
+            run_cfg = _read_json(run_cfg_path)
+        except Exception:
+            run_cfg = {}
+
+    dataset_name = _base_dataset_name(summary.get("dataset", run_cfg.get("dataset", "")))
+    fold = summary.get("fold", run_cfg.get("fold", None))
+    try:
+        fold = int(fold)
+    except Exception:
+        return {}
+
+    data_cfg = ((run_cfg.get("run_config") or {}).get("data") or {})
+    dictionary_fold_variant = str(data_cfg.get("dictionary_fold_variant", "nofilter"))
+    dictionary_path = data_cfg.get("path", os.environ.get("MOTIFSAT_DICTIONARY_PATH"))
+    cache_key = (dataset_name, fold, dictionary_fold_variant, str(dictionary_path) if dictionary_path else None)
+    if cache_key in _MOTIF_NAME_MAP_CACHE:
+        return _MOTIF_NAME_MAP_CACHE[cache_key]
+
+    try:
+        algorithm = "BRICS"
+        date_tag = f"{algorithm}{CHOSEN_THRESHOLD[algorithm][dataset_name]}"
+        setup = get_setup_files_with_folds(
+            dataset_name,
+            date_tag,
+            fold,
+            algorithm,
+            path=dictionary_path,
+            dictionary_fold_variant=dictionary_fold_variant,
+        )
+        motif_list = setup[1] if setup is not None and len(setup) > 1 else None
+        motif_map = {int(i): str(v) for i, v in enumerate(motif_list)} if motif_list is not None else {}
+    except Exception:
+        motif_map = {}
+
+    _MOTIF_NAME_MAP_CACHE[cache_key] = motif_map
+    return motif_map
+
+
+def _resolve_motif_name_from_seed(seed_dir: Path, rec: dict, motif_id: int, name_by_id: dict[int, str]) -> str:
+    raw_name = _normalize_record_motif_name(rec.get("motif_smarts"))
+    if raw_name is None:
+        raw_name = _normalize_record_motif_name(rec.get("motif_smiles"))
+    if raw_name is None:
+        raw_name = _normalize_record_motif_name(rec.get("motif_name"))
+    if raw_name is None:
+        motif_map = _load_motif_id_to_smarts(seed_dir)
+        raw_name = _normalize_record_motif_name(motif_map.get(int(motif_id)))
+    if raw_name is None:
+        raw_name = _normalize_record_motif_name(name_by_id.get(int(motif_id)))
+    motif_name = raw_name if raw_name is not None else f"motif_{int(motif_id)}"
+    name_by_id.setdefault(int(motif_id), motif_name)
+    return motif_name
+
+
 def compute_posthoc_correlation(seed_dir: Path, split: str = 'test'):
     node_scores_path = seed_dir / 'node_scores.jsonl'
     impact_path = seed_dir / 'Motif_level_node_and_edge_masking_impact.jsonl'
@@ -992,16 +1088,6 @@ def compute_posthoc_correlation(seed_dir: Path, split: str = 'test'):
             return None
         return motif_id
 
-    def _parse_motif_name(rec, motif_id, name_by_id):
-        raw_name = rec.get('motif_name', rec.get('motif_smiles'))
-        if raw_name is None:
-            raw_name = name_by_id.get(motif_id)
-        motif_name = str(raw_name).strip() if raw_name is not None else ''
-        if not motif_name:
-            motif_name = f'motif_{motif_id}'
-        name_by_id.setdefault(motif_id, motif_name)
-        return motif_name
-
     name_by_id = {}
     scores = defaultdict(list)
     for rec in _read_jsonl(node_scores_path):
@@ -1015,7 +1101,7 @@ def compute_posthoc_correlation(seed_dir: Path, split: str = 'test'):
             score_val = rec.get('score')
         if score_val is None:
             continue
-        motif_name = _parse_motif_name(rec, motif_idx, name_by_id)
+        motif_name = _resolve_motif_name_from_seed(seed_dir, rec, motif_idx, name_by_id)
         scores[(motif_idx, motif_name)].append(float(score_val))
 
     impacts = defaultdict(list)
@@ -1025,7 +1111,7 @@ def compute_posthoc_correlation(seed_dir: Path, split: str = 'test'):
         motif_idx = _parse_motif_id(rec)
         if motif_idx is None:
             continue
-        motif_name = _parse_motif_name(rec, motif_idx, name_by_id)
+        motif_name = _resolve_motif_name_from_seed(seed_dir, rec, motif_idx, name_by_id)
         imp = abs(_sigmoid(rec['new_prediction']) - _sigmoid(rec['old_prediction']))
         impacts[(motif_idx, motif_name)].append(imp)
 
@@ -1094,16 +1180,6 @@ def compute_posthoc_correlation_per_graph(seed_dir: Path, split: str = 'test'):
             return None
         return motif_id
 
-    def _parse_motif_name(rec, motif_id, name_by_id):
-        raw_name = rec.get('motif_name', rec.get('motif_smiles'))
-        if raw_name is None:
-            raw_name = name_by_id.get(motif_id)
-        motif_name = str(raw_name).strip() if raw_name is not None else ''
-        if not motif_name:
-            motif_name = f'motif_{motif_id}'
-        name_by_id.setdefault(motif_id, motif_name)
-        return motif_name
-
     name_by_id = {}
     scores_by_graph = defaultdict(lambda: defaultdict(list))
     for rec in _read_jsonl(node_scores_path):
@@ -1118,7 +1194,7 @@ def compute_posthoc_correlation_per_graph(seed_dir: Path, split: str = 'test'):
             score_val = rec.get('score')
         if score_val is None:
             continue
-        motif_name = _parse_motif_name(rec, motif_idx, name_by_id)
+        motif_name = _resolve_motif_name_from_seed(seed_dir, rec, motif_idx, name_by_id)
         scores_by_graph[graph_id][(motif_idx, motif_name)].append(float(score_val))
 
     impacts_by_graph = defaultdict(lambda: defaultdict(list))
@@ -1129,7 +1205,7 @@ def compute_posthoc_correlation_per_graph(seed_dir: Path, split: str = 'test'):
         motif_idx = _parse_motif_id(rec)
         if graph_id is None or motif_idx is None:
             continue
-        motif_name = _parse_motif_name(rec, motif_idx, name_by_id)
+        motif_name = _resolve_motif_name_from_seed(seed_dir, rec, motif_idx, name_by_id)
         imp = abs(_sigmoid(rec['new_prediction']) - _sigmoid(rec['old_prediction']))
         impacts_by_graph[graph_id][(motif_idx, motif_name)].append(float(imp))
 

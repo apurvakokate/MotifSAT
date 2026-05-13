@@ -35,6 +35,7 @@ from collect_mutagenicity_tables import (
     compute_posthoc_correlation,
     compute_posthoc_correlation_per_graph,
     find_results,
+    _resolve_motif_name_from_seed,
 )
 
 try:
@@ -103,17 +104,6 @@ def _parse_motif_id(rec: dict[str, Any]) -> int | None:
     if motif_id < 0:
         return None
     return motif_id
-
-
-def _parse_motif_name(rec: dict[str, Any], motif_id: int, name_by_id: dict[int, str]) -> str:
-    raw_name = rec.get("motif_name", rec.get("motif_smiles"))
-    if raw_name is None:
-        raw_name = name_by_id.get(motif_id)
-    name = str(raw_name).strip() if raw_name is not None else ""
-    if not name:
-        name = f"motif_{motif_id}"
-    name_by_id.setdefault(motif_id, name)
-    return name
 
 
 def _edge_roc(seed_dir: Path, split: str = "test") -> tuple[float | None, float | None]:
@@ -205,7 +195,7 @@ def _top10_motifs(seed_dir: Path, split: str = "test") -> pd.DataFrame:
         s = r.get("motif_score", r.get("score"))
         if m is None or s is None:
             continue
-        motif_name = _parse_motif_name(r, m, name_by_id)
+        motif_name = _resolve_motif_name_from_seed(seed_dir, r, m, name_by_id)
         score_by_m[(m, motif_name)].append(float(s))
     impact_by_m = defaultdict(list)
     for r in impact_rows:
@@ -219,7 +209,7 @@ def _top10_motifs(seed_dir: Path, split: str = "test") -> pd.DataFrame:
         if old_p is None or new_p is None:
             continue
         imp = abs(_sigmoid(float(new_p)) - _sigmoid(float(old_p)))
-        motif_name = _parse_motif_name(r, m, name_by_id)
+        motif_name = _resolve_motif_name_from_seed(seed_dir, r, m, name_by_id)
         impact_by_m[(m, motif_name)].append(float(imp))
     rows = []
     for (motif_id, motif_name), sc in score_by_m.items():
@@ -272,7 +262,7 @@ def _motif_points(seed_dir: Path, split: str = "test") -> tuple[np.ndarray | Non
         s = r.get("motif_score", r.get("score"))
         if m is None or s is None:
             continue
-        motif_name = _parse_motif_name(r, m, name_by_id)
+        motif_name = _resolve_motif_name_from_seed(seed_dir, r, m, name_by_id)
         score_by_m[(m, motif_name)].append(float(s))
     impact_by_m = defaultdict(list)
     for r in impact_rows:
@@ -283,7 +273,7 @@ def _motif_points(seed_dir: Path, split: str = "test") -> tuple[np.ndarray | Non
         new_p = r.get("new_prediction")
         if m is None or old_p is None or new_p is None:
             continue
-        motif_name = _parse_motif_name(r, m, name_by_id)
+        motif_name = _resolve_motif_name_from_seed(seed_dir, r, m, name_by_id)
         impact_by_m[(m, motif_name)].append(abs(_sigmoid(float(new_p)) - _sigmoid(float(old_p))))
     common = sorted(set(score_by_m.keys()) & set(impact_by_m.keys()))
     if not common:
