@@ -16,12 +16,12 @@ set -euo pipefail
 # Environment:
 #   RESULTS_DIR      root results directory (default: ~/hpc-share/ChemIntuit/MotifSAT/tuning_results)
 #   EXPERIMENT_NAME  experiment directory key without "experiment_" prefix
-#                    (default: motif_readout_info0_motif_noise_add_temp1_compare)
+#                    (default: motif_readout_info0_motif_noise_add_temp1_compare_rerun)
 #   APPLY            1 => delete stale export JSONLs in affected seed dirs
 #   DATASET_FILTER   optional exact dataset tag under RESULTS_DIR (e.g., Mutagenicity_GT_relabeled)
 
 RESULTS_DIR="${RESULTS_DIR:-$HOME/hpc-share/ChemIntuit/MotifSAT/tuning_results}"
-EXPERIMENT_NAME="${EXPERIMENT_NAME:-motif_readout_info0_motif_noise_add_temp1_compare}"
+EXPERIMENT_NAME="${EXPERIMENT_NAME:-motif_readout_info0_motif_noise_add_temp1_compare_rerun}"
 APPLY="${APPLY:-0}"
 DATASET_FILTER="${DATASET_FILTER:-}"
 

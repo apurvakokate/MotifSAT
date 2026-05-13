@@ -390,7 +390,7 @@ EXPERIMENT_ROW_CONFIG = {
         'row_label_prefix': 'cfg',
         'path_extract': 'beta_info0_sweep',
     },
-    'motif_readout_info0_motif_noise_add_temp1_compare': {
+    'motif_readout_info0_motif_noise_add_temp1_compare_rerun': {
         'summary_path': None,
         'row_label_prefix': 'pipeline',
         'path_extract': 'motif_noise_compare_variant',

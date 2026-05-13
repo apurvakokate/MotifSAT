@@ -27,7 +27,7 @@ elif [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
 fi
 export PYTHONPATH="$(pwd)${PYTHONPATH:+:${PYTHONPATH}}"
 
-EXPERIMENT="motif_readout_info0_motif_noise_add_temp1_compare"
+EXPERIMENT="motif_readout_info0_motif_noise_add_temp1_compare_rerun"
 MODELS=(GIN PNA GAT SAGE GCN)
 BASE_DATASETS=(Mutagenicity Benzene BBBP)
 FOLDS=(0 1)

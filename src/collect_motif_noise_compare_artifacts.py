@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Build per-dataset artifacts for motif_readout_info0_motif_noise_add_temp1_compare.
+Build per-dataset artifacts for motif_readout_info0_motif_noise_add_temp1_compare_rerun.
 
 Outputs one artifact directory per dataset with:
   - Prediction performance (train/valid/test) by pipeline x model
@@ -41,7 +41,7 @@ except Exception:
     wandb = None
 
 
-EXPERIMENT_KEY = "motif_readout_info0_motif_noise_add_temp1_compare"
+EXPERIMENT_KEY = "motif_readout_info0_motif_noise_add_temp1_compare_rerun"
 MODEL_ORDER = ["GAT", "GCN", "GIN", "PNA", "SAGE"]
 PIPELINE_ORDER = ["beta_clamped", "beta_unclamped", "base_decay_r07"]
 PIPELINE_LABEL = {

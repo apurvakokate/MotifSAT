@@ -37,7 +37,7 @@ Active groups (EXPERIMENT_GROUPS):
   motif_readout_beta0.3_r0.6_mean — same as motif_readout_beta0.2_r0.7 config family but with graph_pooling forced to mean for all backbones
   motif_readout_beta0.3_r0.8 — beta readout with final_r=0.8 (and add graph pooling, as in original beta add variant)
   motif_readout_beta0.3_r0.8_info0_sweep — beta readout with final_r=0.8 and info_loss_coef=0; sweep perturbation granularity (node vs motif), graph pooling (add vs mean), and sampling temperature
-  motif_readout_info0_motif_noise_add_temp1_compare — compare beta readout (clamped vs unclamped motif logits) plus base GSAT decay final_r=0.7
+  motif_readout_info0_motif_noise_add_temp1_compare_rerun — compare beta readout (clamped vs unclamped motif logits) plus base GSAT decay final_r=0.7
   simplified_motif_readout_maxmean_injection_ablation — maxmean + no info warmup; sweep injection 010 / 101 / 011 / 111
   simplified_motif_readout_maxmean_info_loss_ablation — maxmean + 010 + no warmup; sweep info_loss_coef ∈ {0.01, 0.1, 0.3}
   maxmean_clamped — maxmean + 010 + no warmup; clamped factored-regularized readout; sweep info_loss_coef ∈ {0.3, 0.0}
@@ -1522,8 +1522,8 @@ EXPERIMENT_GROUPS['motif_readout_info0_motif_noise_add_temp1_diag'] = {
     ],
 }
 
-EXPERIMENT_GROUPS['motif_readout_info0_motif_noise_add_temp1_compare'] = {
-    'experiment_name': 'motif_readout_info0_motif_noise_add_temp1_compare',
+EXPERIMENT_GROUPS['motif_readout_info0_motif_noise_add_temp1_compare_rerun'] = {
+    'experiment_name': 'motif_readout_info0_motif_noise_add_temp1_compare_rerun',
     'variants': [
         {
             'variant_id': 'compare_beta_clamped',
@@ -1754,7 +1754,7 @@ def main():
         'motif_readout_beta0.3_r0.8',
         'motif_readout_beta0.3_r0.8_info0_sweep',
         'motif_readout_info0_motif_noise_add_temp1_diag',
-        'motif_readout_info0_motif_noise_add_temp1_compare',
+        'motif_readout_info0_motif_noise_add_temp1_compare_rerun',
         'simplified_motif_readout_maxmean_injection_ablation',
         'simplified_motif_readout_maxmean_info_loss_ablation',
         'maxmean_clamped',
