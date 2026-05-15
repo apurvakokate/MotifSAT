@@ -100,6 +100,14 @@ def get_data_loaders(
     ground_truth_cache_root=None,
     ground_truth_force_rebuild=False,
     ground_truth_relabel_graphs=True,
+    ground_truth_label_data_root=None,
+    ground_truth_rule_index=None,
+    ground_truth_rule_interactive=True,
+    ground_truth_min_sup=0.01,
+    ground_truth_j_cooc=0.15,
+    ground_truth_top_n=5,
+    ground_truth_min_cov=5.0,
+    ground_truth_k_max=3,
 ):
     if path is None:
         path = _DEFAULT_MOTIF_DICTIONARY_PATH
@@ -271,6 +279,14 @@ def get_data_loaders(
                     dictionary_fold_variant=dictionary_fold_variant,
                     force_rebuild=bool(ground_truth_force_rebuild),
                     relabel_graphs_with_ground_truth=bool(ground_truth_relabel_graphs),
+                    motif_label_data_root=ground_truth_label_data_root,
+                    motif_label_rule_index=ground_truth_rule_index,
+                    motif_label_interactive=bool(ground_truth_rule_interactive),
+                    motif_label_min_sup=float(ground_truth_min_sup),
+                    motif_label_j_cooc=float(ground_truth_j_cooc),
+                    motif_label_top_n=int(ground_truth_top_n),
+                    motif_label_min_cov=float(ground_truth_min_cov),
+                    motif_label_k_max=int(ground_truth_k_max),
                 )
 
                 train_set = split_to_dataset['train']

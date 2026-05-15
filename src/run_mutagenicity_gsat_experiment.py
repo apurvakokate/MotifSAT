@@ -1611,6 +1611,14 @@ def run_one(
     ground_truth_cache_root=None,
     ground_truth_force_rebuild=False,
     ground_truth_relabel_graphs=True,
+    ground_truth_label_data_root=None,
+    ground_truth_rule_index=None,
+    ground_truth_rule_interactive=True,
+    ground_truth_min_sup=0.01,
+    ground_truth_j_cooc=0.15,
+    ground_truth_top_n=5,
+    ground_truth_min_cov=5.0,
+    ground_truth_k_max=3,
 ):
     """Run a single experiment: one model, one fold, one variant, one seed."""
     config = get_base_config(model_name, dataset_name, gsat_overrides=variant['gsat_overrides'])
@@ -1626,6 +1634,14 @@ def run_one(
     config['data_config']['ground_truth_cache_root'] = ground_truth_cache_root
     config['data_config']['ground_truth_force_rebuild'] = bool(ground_truth_force_rebuild)
     config['data_config']['ground_truth_relabel_graphs'] = bool(ground_truth_relabel_graphs)
+    config['data_config']['ground_truth_label_data_root'] = ground_truth_label_data_root
+    config['data_config']['ground_truth_rule_index'] = ground_truth_rule_index
+    config['data_config']['ground_truth_rule_interactive'] = bool(ground_truth_rule_interactive)
+    config['data_config']['ground_truth_min_sup'] = float(ground_truth_min_sup)
+    config['data_config']['ground_truth_j_cooc'] = float(ground_truth_j_cooc)
+    config['data_config']['ground_truth_top_n'] = int(ground_truth_top_n)
+    config['data_config']['ground_truth_min_cov'] = float(ground_truth_min_cov)
+    config['data_config']['ground_truth_k_max'] = int(ground_truth_k_max)
     config['GSAT_config']['experiment_name'] = experiment_name
     # Log variant identity on W&B with full GSAT config (train_gsat_one_seed run_config.gsat).
     config['GSAT_config']['variant_id'] = variant['variant_id']
@@ -1703,6 +1719,29 @@ def main():
         default=False,
         help='When GT cache is enabled, keep original graph labels instead of relabeling from GT motif presence.',
     )
+    parser.add_argument(
+        '--ground_truth_label_data_root',
+        type=str,
+        default=os.environ.get('MOTIF_LABEL_DATA_ROOT', None),
+        help='Root directory containing <dataset>_fold<k>/graph_motif_matrix*.{npz,csv} exports for motif label pipeline.',
+    )
+    parser.add_argument(
+        '--ground_truth_rule_index',
+        type=int,
+        default=None,
+        help='Preselect motif rule index (skip prompt). If not set, interactive prompt is used when possible.',
+    )
+    parser.add_argument(
+        '--no_ground_truth_rule_interactive',
+        action='store_true',
+        default=False,
+        help='Disable interactive rule selection; default rule (or --ground_truth_rule_index) is used.',
+    )
+    parser.add_argument('--ground_truth_min_sup', type=float, default=0.01)
+    parser.add_argument('--ground_truth_j_cooc', type=float, default=0.15)
+    parser.add_argument('--ground_truth_top_n', type=int, default=5)
+    parser.add_argument('--ground_truth_min_cov', type=float, default=5.0)
+    parser.add_argument('--ground_truth_k_max', type=int, default=3)
     args = parser.parse_args()
 
     if args.wandb_lite:
@@ -1792,7 +1831,10 @@ def main():
         f"[INFO] use_ground_truth_cache={not args.no_ground_truth_cache}, "
         f"ground_truth_cache_root={args.ground_truth_cache_root}, "
         f"ground_truth_force_rebuild={args.ground_truth_force_rebuild}, "
-        f"ground_truth_relabel_graphs={not args.no_ground_truth_relabel_graphs}"
+        f"ground_truth_relabel_graphs={not args.no_ground_truth_relabel_graphs}, "
+        f"ground_truth_label_data_root={args.ground_truth_label_data_root}, "
+        f"ground_truth_rule_index={args.ground_truth_rule_index}, "
+        f"ground_truth_rule_interactive={not args.no_ground_truth_rule_interactive}"
     )
 
     for exp_key in args.experiments:
@@ -1819,6 +1861,14 @@ def main():
                                 ground_truth_cache_root=args.ground_truth_cache_root,
                                 ground_truth_force_rebuild=args.ground_truth_force_rebuild,
                                 ground_truth_relabel_graphs=not args.no_ground_truth_relabel_graphs,
+                                ground_truth_label_data_root=args.ground_truth_label_data_root,
+                                ground_truth_rule_index=args.ground_truth_rule_index,
+                                ground_truth_rule_interactive=not args.no_ground_truth_rule_interactive,
+                                ground_truth_min_sup=args.ground_truth_min_sup,
+                                ground_truth_j_cooc=args.ground_truth_j_cooc,
+                                ground_truth_top_n=args.ground_truth_top_n,
+                                ground_truth_min_cov=args.ground_truth_min_cov,
+                                ground_truth_k_max=args.ground_truth_k_max,
                             )
                         except Exception as e:
                             print(f'[ERROR] {e}')

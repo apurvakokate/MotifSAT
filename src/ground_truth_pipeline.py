@@ -16,6 +16,13 @@ import torch
 
 matplotlib.use("Agg")
 
+from motif_label_pipeline import (
+    choose_rule_interactive,
+    evaluate_rule_on_motifs,
+    load_dataset_rulebook,
+    save_rulebook_json,
+)
+
 DNF_RULE_CONFIGS = {
     "Mutagenicity": {"floor_anchor": 0.70, "floor_fill": 0.55, "sup_lo": 0.005},
     "Benzene": {"floor_anchor": 0.90, "floor_fill": 0.60, "sup_lo": 0.003},
@@ -153,7 +160,8 @@ def _fired(row_x: np.ndarray, clauses: list[dict[str, Any]], col_to_motif_name: 
     active_motif_names = set()
     for ci, c in enumerate(clauses):
         cols = c["motif_cols"]
-        ok = bool(row_x[cols[0]]) if len(cols) == 1 else bool(row_x[cols[0]] and row_x[cols[1]])
+        # OR semantics within each clause: fire if ANY motif in the clause is present.
+        ok = any(bool(row_x[int(cc)]) for cc in cols)
         if ok:
             fired_idx.append(int(ci))
             for cc in cols:
@@ -222,15 +230,23 @@ def load_or_build_ground_truth_splits(
     dictionary_fold_variant: str = "nofilter",
     force_rebuild: bool = False,
     relabel_graphs_with_ground_truth: bool = True,
+    motif_label_data_root: str | None = None,
+    motif_label_rule_index: int | None = None,
+    motif_label_interactive: bool = True,
+    motif_label_min_sup: float = 0.01,
+    motif_label_j_cooc: float = 0.15,
+    motif_label_top_n: int = 5,
+    motif_label_min_cov: float = 5.0,
+    motif_label_k_max: int = 3,
 ) -> tuple[dict[str, list], dict[str, dict[str, Any]]]:
     cache_dir = Path(cache_root) / dataset_name / f"fold{int(fold)}" / str(dictionary_fold_variant)
     cache_dir.mkdir(parents=True, exist_ok=True)
     relabel_tag = "relabel1" if relabel_graphs_with_ground_truth else "relabel0"
-    cache_files = {s: cache_dir / f"{s}_dataset_with_ground_truth_dnf_{relabel_tag}.pt" for s in ("train", "valid", "test")}
-    debug_json = {s: cache_dir / f"{s}_ground_truth_debug_dnf_{relabel_tag}.json" for s in ("train", "valid", "test")}
-    debug_csv = {s: cache_dir / f"{s}_ground_truth_debug_dnf_{relabel_tag}.csv" for s in ("train", "valid", "test")}
-    debug_fig = {s: cache_dir / f"{s}_ground_truth_debug_dnf_{relabel_tag}.png" for s in ("train", "valid", "test")}
-    rules_json = cache_dir / f"dnf_rules_{relabel_tag}.json"
+    cache_files = {s: cache_dir / f"{s}_dataset_with_ground_truth_rule_{relabel_tag}.pt" for s in ("train", "valid", "test")}
+    debug_json = {s: cache_dir / f"{s}_ground_truth_debug_rule_{relabel_tag}.json" for s in ("train", "valid", "test")}
+    debug_csv = {s: cache_dir / f"{s}_ground_truth_debug_rule_{relabel_tag}.csv" for s in ("train", "valid", "test")}
+    debug_fig = {s: cache_dir / f"{s}_ground_truth_debug_rule_{relabel_tag}.png" for s in ("train", "valid", "test")}
+    rules_json = cache_dir / f"motif_label_results_{relabel_tag}.json"
 
     if (not force_rebuild) and all(p.is_file() for p in cache_files.values()) and rules_json.is_file():
         out = {s: torch.load(cache_files[s], weights_only=False) for s in ("train", "valid", "test")}
@@ -247,47 +263,36 @@ def load_or_build_ground_truth_splits(
 
     split_data_lists = {s: _as_data_list(split_datasets[s]) for s in ("train", "valid", "test")}
     motif_name_to_ids = _motif_name_to_ids(motif_list)
-    records = _records_from_splits(split_data_lists, motif_list=motif_list)
-    model = _fit_rules(records, dataset_name)
-    X, clauses, col_to_motif_name = model["X"], model["clauses"], model["col_to_motif_name"]
-    with open(rules_json, "w") as f:
-        json.dump(
-            {
-                "dataset": dataset_name,
-                "fold": int(fold),
-                "n_rows": model["n_rows"],
-                "n_motifs": model["n_motifs"],
-                "n_anchor_candidates": model["n_anchor_candidates"],
-                "n_fill_candidates": model["n_fill_candidates"],
-                "n_selected_clauses": len(clauses),
-                "clauses": [
-                    {
-                        "tier": c["tier"],
-                        "k": int(c["k"]),
-                        "motif_names": [str(v) for v in c["motif_names"]],
-                        # Backward-compatible metadata for existing analysis scripts.
-                        "motif_ids": sorted(
-                            {
-                                int(mid)
-                                for name in c["motif_names"]
-                                for mid in motif_name_to_ids.get(str(name), set())
-                            }
-                        ),
-                        "prec": float(c["prec"]),
-                        "score": float(c["score"]),
-                        "gain": int(c["gain"]),
-                        "cumul_cov": float(c["cumul_cov"]),
-                    }
-                    for c in clauses
-                ],
-            },
-            f,
-            indent=2,
+    data_root = motif_label_data_root or os.environ.get("MOTIF_LABEL_DATA_ROOT")
+    if not data_root:
+        raise ValueError(
+            "motif_label_data_root is required for motif-based rule generation. "
+            "Set data_config.ground_truth_label_data_root or MOTIF_LABEL_DATA_ROOT."
         )
+
+    rulebook = load_dataset_rulebook(
+        data_root=data_root,
+        dataset_name=dataset_name,
+        fold=int(fold),
+        min_sup=float(motif_label_min_sup),
+        j_cooc=float(motif_label_j_cooc),
+        top_n=int(motif_label_top_n),
+        min_cov=float(motif_label_min_cov),
+        k_max=int(motif_label_k_max),
+    )
+    selected_rule = choose_rule_interactive(
+        rulebook,
+        selected_index=motif_label_rule_index,
+        interactive=bool(motif_label_interactive),
+    )
+    save_rulebook_json(rulebook, selected_rule, rules_json)
+
+    smiles_to_row_idxs: dict[str, list[int]] = {}
+    for i, smi in enumerate(rulebook["row_smiles"]):
+        smiles_to_row_idxs.setdefault(str(smi), []).append(int(i))
 
     out = {"train": [], "valid": [], "test": []}
     dbg = {}
-    cursor = 0
     for split_name in ("train", "valid", "test"):
         rows = []
         agg = {
@@ -297,16 +302,36 @@ def load_or_build_ground_truth_splits(
             "n_total_pos_edges": 0,
             "n_graphs_rule_positive": 0,
             "n_graphs_relabelled": 0,
-            "n_selected_clauses": int(len(clauses)),
+            "n_selected_groups": int(selected_rule.get("k", 0)),
+            "selected_rule_index": int(selected_rule.get("rule_index", 0)),
+            "selected_rule": str(selected_rule.get("rule", "")),
+            "selected_rule_n1": int(selected_rule.get("n1", 0)),
+            "selected_rule_pct1": float(selected_rule.get("pct1", 0.0)),
             "rules_file": str(rules_json),
             "loaded_from_cache": False,
             "cache_file": str(cache_files[split_name]),
+            "n_missing_smiles_in_rulebook": 0,
         }
         for data in split_data_lists[split_name]:
-            fired_idx, active_motif_names_list = _fired(X[cursor], clauses, col_to_motif_name)
-            active_motif_names = set(active_motif_names_list)
-            active_motif_ids_resolved = _resolve_active_ids(set(), active_motif_names, motif_name_to_ids)
-            gt_y = 1.0 if fired_idx else 0.0
+            smi = str(getattr(data, "smiles", ""))
+            present_motifs: set[str] = set()
+            row_idxs = smiles_to_row_idxs.get(smi, [])
+            if row_idxs:
+                for ridx in row_idxs:
+                    present_motifs |= set(rulebook["row_motif_sets"][int(ridx)])
+            else:
+                agg["n_missing_smiles_in_rulebook"] += 1
+                n2m = getattr(data, "nodes_to_motifs", None)
+                if n2m is not None:
+                    present_motifs = {
+                        _motif_name(int(v), motif_list)
+                        for v in n2m.detach().cpu().tolist()
+                        if int(v) >= 0
+                    }
+
+            rule_positive, active_motif_names = evaluate_rule_on_motifs(present_motifs, selected_rule)
+            active_motif_ids_resolved = _resolve_active_ids(set(), set(active_motif_names), motif_name_to_ids)
+            gt_y = 1.0 if rule_positive else 0.0
             edge_label, n_pos = _edge_label(data, active_motif_ids_resolved)
             data.edge_label = edge_label
             old_y = float(torch.as_tensor(getattr(data, "y")).view(-1)[0].item())
@@ -327,8 +352,8 @@ def load_or_build_ground_truth_splits(
                     "n_edges": n_edges,
                     "n_positive_edges": int(n_pos),
                     "edge_pos_frac": (float(n_pos) / n_edges) if n_edges > 0 else 0.0,
-                    "n_fired_clauses": int(len(fired_idx)),
-                    "fired_clause_indices": ",".join(str(v) for v in fired_idx),
+                    "n_fired_clauses": int(1 if rule_positive else 0),
+                    "fired_clause_indices": str(selected_rule.get("rule_index", 0)) if rule_positive else "",
                     "n_active_rule_motifs": int(len(active_motif_ids_resolved)),
                     "active_rule_motif_names": ",".join(sorted(active_motif_names)),
                     # Backward-compatible metadata for existing analysis scripts.
@@ -339,11 +364,10 @@ def load_or_build_ground_truth_splits(
                 }
             )
             out[split_name].append(data)
-            cursor += 1
         agg["edge_positive_fraction_global"] = float(agg["n_total_pos_edges"]) / float(agg["n_total_edges"]) if agg["n_total_edges"] > 0 else 0.0
         df = pd.DataFrame(rows)
         df.to_csv(debug_csv[split_name], index=False)
-        _debug_plot(df, debug_fig[split_name], f"{dataset_name} fold{fold} {split_name}: DNF-rule GT diagnostics")
+        _debug_plot(df, debug_fig[split_name], f"{dataset_name} fold{fold} {split_name}: motif-rule GT diagnostics")
         with open(debug_json[split_name], "w") as f:
             json.dump(agg, f, indent=2)
         torch.save(out[split_name], cache_files[split_name])
@@ -372,7 +396,7 @@ def _build_split_datasets_for_cli(*, csv_file: str, label_col, lookup, test_look
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Build cached DNF-rule GT splits.")
+    parser = argparse.ArgumentParser(description="Build cached motif-rule GT splits.")
     parser.add_argument("--datasets", nargs="+", default=["Mutagenicity", "BBBP", "hERG", "Benzene", "Alkane_Carbonyl"])
     parser.add_argument("--folds", nargs="+", type=int, default=[0, 1])
     parser.add_argument("--algorithm", type=str, default="BRICS")
@@ -382,6 +406,19 @@ def main():
     parser.add_argument("--cache_root", type=str, default="../data/ground_truth_cache")
     parser.add_argument("--force_rebuild", action="store_true")
     parser.add_argument("--no_relabel_graphs_with_ground_truth", action="store_true", default=False)
+    parser.add_argument(
+        "--motif_label_data_root",
+        type=str,
+        default=os.environ.get("MOTIF_LABEL_DATA_ROOT", None),
+        help="Root dir containing <dataset>_fold<k>/graph_motif_matrix*.{npz,csv} exports.",
+    )
+    parser.add_argument("--motif_label_rule_index", type=int, default=None, help="Preselect rule index.")
+    parser.add_argument("--no_motif_label_interactive", action="store_true", default=False)
+    parser.add_argument("--motif_label_min_sup", type=float, default=0.01)
+    parser.add_argument("--motif_label_j_cooc", type=float, default=0.15)
+    parser.add_argument("--motif_label_top_n", type=int, default=5)
+    parser.add_argument("--motif_label_min_cov", type=float, default=5.0)
+    parser.add_argument("--motif_label_k_max", type=int, default=3)
     args = parser.parse_args()
 
     from DataLoader import CHOSEN_THRESHOLD, get_setup_files_with_folds
@@ -426,6 +463,14 @@ def main():
                 dictionary_fold_variant=args.dictionary_fold_variant,
                 force_rebuild=args.force_rebuild,
                 relabel_graphs_with_ground_truth=not args.no_relabel_graphs_with_ground_truth,
+                motif_label_data_root=args.motif_label_data_root,
+                motif_label_rule_index=args.motif_label_rule_index,
+                motif_label_interactive=not args.no_motif_label_interactive,
+                motif_label_min_sup=args.motif_label_min_sup,
+                motif_label_j_cooc=args.motif_label_j_cooc,
+                motif_label_top_n=args.motif_label_top_n,
+                motif_label_min_cov=args.motif_label_min_cov,
+                motif_label_k_max=args.motif_label_k_max,
             )
             summary.append(
                 {
