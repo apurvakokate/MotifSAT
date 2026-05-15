@@ -1619,6 +1619,8 @@ def run_one(
     ground_truth_top_n=5,
     ground_truth_min_cov=5.0,
     ground_truth_k_max=3,
+    ground_truth_fold_invariant=True,
+    ground_truth_reference_fold=0,
 ):
     """Run a single experiment: one model, one fold, one variant, one seed."""
     config = get_base_config(model_name, dataset_name, gsat_overrides=variant['gsat_overrides'])
@@ -1642,6 +1644,8 @@ def run_one(
     config['data_config']['ground_truth_top_n'] = int(ground_truth_top_n)
     config['data_config']['ground_truth_min_cov'] = float(ground_truth_min_cov)
     config['data_config']['ground_truth_k_max'] = int(ground_truth_k_max)
+    config['data_config']['ground_truth_fold_invariant'] = bool(ground_truth_fold_invariant)
+    config['data_config']['ground_truth_reference_fold'] = int(ground_truth_reference_fold)
     config['GSAT_config']['experiment_name'] = experiment_name
     # Log variant identity on W&B with full GSAT config (train_gsat_one_seed run_config.gsat).
     config['GSAT_config']['variant_id'] = variant['variant_id']
@@ -1742,6 +1746,8 @@ def main():
     parser.add_argument('--ground_truth_top_n', type=int, default=5)
     parser.add_argument('--ground_truth_min_cov', type=float, default=5.0)
     parser.add_argument('--ground_truth_k_max', type=int, default=3)
+    parser.add_argument('--no_ground_truth_fold_invariant', action='store_true', default=False)
+    parser.add_argument('--ground_truth_reference_fold', type=int, default=0)
     args = parser.parse_args()
 
     if args.wandb_lite:
@@ -1834,7 +1840,9 @@ def main():
         f"ground_truth_relabel_graphs={not args.no_ground_truth_relabel_graphs}, "
         f"ground_truth_label_data_root={args.ground_truth_label_data_root}, "
         f"ground_truth_rule_index={args.ground_truth_rule_index}, "
-        f"ground_truth_rule_interactive={not args.no_ground_truth_rule_interactive}"
+        f"ground_truth_rule_interactive={not args.no_ground_truth_rule_interactive}, "
+        f"ground_truth_fold_invariant={not args.no_ground_truth_fold_invariant}, "
+        f"ground_truth_reference_fold={args.ground_truth_reference_fold}"
     )
 
     for exp_key in args.experiments:
@@ -1869,6 +1877,8 @@ def main():
                                 ground_truth_top_n=args.ground_truth_top_n,
                                 ground_truth_min_cov=args.ground_truth_min_cov,
                                 ground_truth_k_max=args.ground_truth_k_max,
+                                ground_truth_fold_invariant=not args.no_ground_truth_fold_invariant,
+                                ground_truth_reference_fold=args.ground_truth_reference_fold,
                             )
                         except Exception as e:
                             print(f'[ERROR] {e}')

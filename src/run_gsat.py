@@ -5968,6 +5968,8 @@ def train_vanilla_gnn_one_seed(local_config, data_dir, log_dir, model_name, data
         ground_truth_top_n=data_config.get('ground_truth_top_n', 5),
         ground_truth_min_cov=data_config.get('ground_truth_min_cov', 5.0),
         ground_truth_k_max=data_config.get('ground_truth_k_max', 3),
+        ground_truth_fold_invariant=data_config.get('ground_truth_fold_invariant', True),
+        ground_truth_reference_fold=data_config.get('ground_truth_reference_fold', 0),
     )
 
     if len(loader_result) == 9:
@@ -6259,6 +6261,8 @@ def train_gsat_one_seed(local_config, data_dir, log_dir, model_name, dataset_nam
         ground_truth_top_n=data_config.get('ground_truth_top_n', 5),
         ground_truth_min_cov=data_config.get('ground_truth_min_cov', 5.0),
         ground_truth_k_max=data_config.get('ground_truth_k_max', 3),
+        ground_truth_fold_invariant=data_config.get('ground_truth_fold_invariant', True),
+        ground_truth_reference_fold=data_config.get('ground_truth_reference_fold', 0),
     )
     
     if len(loader_result) == 9:
@@ -6818,6 +6822,8 @@ def main():
             ground_truth_top_n=data_config.get('ground_truth_top_n', 5),
             ground_truth_min_cov=data_config.get('ground_truth_min_cov', 5.0),
             ground_truth_k_max=data_config.get('ground_truth_k_max', 3),
+            ground_truth_fold_invariant=data_config.get('ground_truth_fold_invariant', True),
+            ground_truth_reference_fold=data_config.get('ground_truth_reference_fold', 0),
         )
         if len(loader_result) == 9:
             loaders, test_set, x_dim, edge_attr_dim, num_class, aux_info, datasets, _, _ = loader_result

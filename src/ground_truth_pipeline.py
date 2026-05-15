@@ -238,15 +238,36 @@ def load_or_build_ground_truth_splits(
     motif_label_top_n: int = 5,
     motif_label_min_cov: float = 5.0,
     motif_label_k_max: int = 3,
+    motif_label_fold_invariant: bool = True,
+    motif_label_reference_fold: int = 0,
 ) -> tuple[dict[str, list], dict[str, dict[str, Any]]]:
     cache_dir = Path(cache_root) / dataset_name / f"fold{int(fold)}" / str(dictionary_fold_variant)
     cache_dir.mkdir(parents=True, exist_ok=True)
     relabel_tag = "relabel1" if relabel_graphs_with_ground_truth else "relabel0"
-    cache_files = {s: cache_dir / f"{s}_dataset_with_ground_truth_rule_{relabel_tag}.pt" for s in ("train", "valid", "test")}
-    debug_json = {s: cache_dir / f"{s}_ground_truth_debug_rule_{relabel_tag}.json" for s in ("train", "valid", "test")}
-    debug_csv = {s: cache_dir / f"{s}_ground_truth_debug_rule_{relabel_tag}.csv" for s in ("train", "valid", "test")}
-    debug_fig = {s: cache_dir / f"{s}_ground_truth_debug_rule_{relabel_tag}.png" for s in ("train", "valid", "test")}
-    rules_json = cache_dir / f"motif_label_results_{relabel_tag}.json"
+    rule_source_fold = int(motif_label_reference_fold) if bool(motif_label_fold_invariant) else int(fold)
+    fold_tag = f"inv{int(bool(motif_label_fold_invariant))}_src{int(rule_source_fold)}"
+    cache_files = {
+        s: cache_dir / f"{s}_dataset_with_ground_truth_rule_{relabel_tag}_{fold_tag}.pt"
+        for s in ("train", "valid", "test")
+    }
+    debug_json = {
+        s: cache_dir / f"{s}_ground_truth_debug_rule_{relabel_tag}_{fold_tag}.json"
+        for s in ("train", "valid", "test")
+    }
+    debug_csv = {
+        s: cache_dir / f"{s}_ground_truth_debug_rule_{relabel_tag}_{fold_tag}.csv"
+        for s in ("train", "valid", "test")
+    }
+    debug_fig = {
+        s: cache_dir / f"{s}_ground_truth_debug_rule_{relabel_tag}_{fold_tag}.png"
+        for s in ("train", "valid", "test")
+    }
+    rules_json = cache_dir / f"motif_label_results_{relabel_tag}_{fold_tag}.json"
+    shared_rules_json = None
+    if bool(motif_label_fold_invariant):
+        shared_dir = Path(cache_root) / dataset_name / "_shared_rules" / str(dictionary_fold_variant)
+        shared_dir.mkdir(parents=True, exist_ok=True)
+        shared_rules_json = shared_dir / f"motif_label_results_{relabel_tag}_inv1_src{int(rule_source_fold)}.json"
 
     if (not force_rebuild) and all(p.is_file() for p in cache_files.values()) and rules_json.is_file():
         out = {s: torch.load(cache_files[s], weights_only=False) for s in ("train", "valid", "test")}
@@ -273,19 +294,35 @@ def load_or_build_ground_truth_splits(
     rulebook = load_dataset_rulebook(
         data_root=data_root,
         dataset_name=dataset_name,
-        fold=int(fold),
+        fold=int(rule_source_fold),
         min_sup=float(motif_label_min_sup),
         j_cooc=float(motif_label_j_cooc),
         top_n=int(motif_label_top_n),
         min_cov=float(motif_label_min_cov),
         k_max=int(motif_label_k_max),
     )
-    selected_rule = choose_rule_interactive(
-        rulebook,
-        selected_index=motif_label_rule_index,
-        interactive=bool(motif_label_interactive),
-    )
+    selected_rule = None
+    if shared_rules_json is not None and shared_rules_json.is_file() and (not force_rebuild) and motif_label_rule_index is None:
+        try:
+            with open(shared_rules_json) as f:
+                payload = json.load(f)
+            selected_rule = payload.get("selected_rule", None)
+            if selected_rule is not None:
+                print(
+                    f"[INFO] Reusing fold-invariant selected rule for {dataset_name}: "
+                    f"source_fold={rule_source_fold}, rule_index={selected_rule.get('rule_index', 'n/a')}"
+                )
+        except Exception:
+            selected_rule = None
+    if selected_rule is None:
+        selected_rule = choose_rule_interactive(
+            rulebook,
+            selected_index=motif_label_rule_index,
+            interactive=bool(motif_label_interactive),
+        )
     save_rulebook_json(rulebook, selected_rule, rules_json)
+    if shared_rules_json is not None:
+        save_rulebook_json(rulebook, selected_rule, shared_rules_json)
 
     smiles_to_row_idxs: dict[str, list[int]] = {}
     for i, smi in enumerate(rulebook["row_smiles"]):
@@ -307,7 +344,10 @@ def load_or_build_ground_truth_splits(
             "selected_rule": str(selected_rule.get("rule", "")),
             "selected_rule_n1": int(selected_rule.get("n1", 0)),
             "selected_rule_pct1": float(selected_rule.get("pct1", 0.0)),
+            "motif_label_fold_invariant": bool(motif_label_fold_invariant),
+            "rule_source_fold": int(rule_source_fold),
             "rules_file": str(rules_json),
+            "shared_rules_file": str(shared_rules_json) if shared_rules_json is not None else None,
             "loaded_from_cache": False,
             "cache_file": str(cache_files[split_name]),
             "n_missing_smiles_in_rulebook": 0,
@@ -419,6 +459,8 @@ def main():
     parser.add_argument("--motif_label_top_n", type=int, default=5)
     parser.add_argument("--motif_label_min_cov", type=float, default=5.0)
     parser.add_argument("--motif_label_k_max", type=int, default=3)
+    parser.add_argument("--no_motif_label_fold_invariant", action="store_true", default=False)
+    parser.add_argument("--motif_label_reference_fold", type=int, default=0)
     args = parser.parse_args()
 
     from DataLoader import CHOSEN_THRESHOLD, get_setup_files_with_folds
@@ -471,6 +513,8 @@ def main():
                 motif_label_top_n=args.motif_label_top_n,
                 motif_label_min_cov=args.motif_label_min_cov,
                 motif_label_k_max=args.motif_label_k_max,
+                motif_label_fold_invariant=not args.no_motif_label_fold_invariant,
+                motif_label_reference_fold=args.motif_label_reference_fold,
             )
             summary.append(
                 {

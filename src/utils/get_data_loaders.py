@@ -108,6 +108,8 @@ def get_data_loaders(
     ground_truth_top_n=5,
     ground_truth_min_cov=5.0,
     ground_truth_k_max=3,
+    ground_truth_fold_invariant=True,
+    ground_truth_reference_fold=0,
 ):
     if path is None:
         path = _DEFAULT_MOTIF_DICTIONARY_PATH
@@ -287,6 +289,8 @@ def get_data_loaders(
                     motif_label_top_n=int(ground_truth_top_n),
                     motif_label_min_cov=float(ground_truth_min_cov),
                     motif_label_k_max=int(ground_truth_k_max),
+                    motif_label_fold_invariant=bool(ground_truth_fold_invariant),
+                    motif_label_reference_fold=int(ground_truth_reference_fold),
                 )
 
                 train_set = split_to_dataset['train']
