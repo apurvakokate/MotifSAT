@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Build per-dataset artifacts for motif_readout_info0_motif_noise_add_temp1_compare_rerun.
+Build per-dataset artifacts for motif-noise compare experiments.
 
 Outputs one artifact directory per dataset with:
   - Prediction performance (train/valid/test) by pipeline x model
@@ -44,7 +44,10 @@ except Exception:
     wandb = None
 
 
-EXPERIMENT_KEY = "motif_readout_info0_motif_noise_add_temp1_compare_rerun"
+DEFAULT_EXPERIMENT_KEYS = [
+    "motif_readout_info0_motif_noise_add_temp1_compare_rerun",
+    "motif_readout_info0_motif_noise_add_temp1_compare_gt_only",
+]
 MODEL_ORDER = ["GAT", "GCN", "GIN", "PNA", "SAGE"]
 PIPELINE_ORDER = ["beta_clamped", "beta_unclamped", "base_decay_r07"]
 PIPELINE_LABEL = {
@@ -285,20 +288,24 @@ def _motif_points(seed_dir: Path, split: str = "test") -> tuple[np.ndarray | Non
     return xs, ys
 
 
-def _plot_grid(rep: dict[tuple[str, str], Path], pipelines: list[str], out_png: Path, level: str = "motif") -> None:
-    n_rows = len(pipelines)
+def _sanitize_tag(x: str) -> str:
+    return str(x).replace("/", "_").replace(" ", "_")
+
+
+def _plot_grid(rep: dict[tuple[str, str], Path], row_keys: list[str], out_png: Path, level: str = "motif") -> None:
+    n_rows = len(row_keys)
     n_cols = len(MODEL_ORDER)
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(3.0 * n_cols, 2.5 * n_rows), squeeze=False)
     fig.suptitle(f"{level.title()} importance vs impact (test)", fontsize=12, fontweight="bold")
-    for i, p in enumerate(pipelines):
+    for i, rk in enumerate(row_keys):
         for j, m in enumerate(MODEL_ORDER):
             ax = axes[i, j]
             ax.set_xlim(0.0, 1.0)
-            sd = rep.get((p, m))
+            sd = rep.get((rk, m))
             if i == 0:
                 ax.set_title(m, fontsize=9)
             if j == 0:
-                ax.set_ylabel(PIPELINE_LABEL.get(p, p), fontsize=8)
+                ax.set_ylabel(rk, fontsize=8)
             if sd is None:
                 ax.text(0.5, 0.5, "No run", ha="center", va="center", transform=ax.transAxes, fontsize=8)
                 ax.set_xticks([])
@@ -326,143 +333,172 @@ def build_dataset_artifact(
     results_dir: Path,
     output_root: Path,
     dataset_name: str,
+    experiment_keys: list[str],
     log_to_wandb: bool = True,
 ) -> Path:
     dataset_tag = _dataset_to_results_tag(dataset_name)
-    recs = find_results(results_dir, EXPERIMENT_KEY, dataset=dataset_tag, verbose=False)
+    recs: list[dict[str, Any]] = []
+    for exp in experiment_keys:
+        rows = find_results(results_dir, exp, dataset=dataset_tag, verbose=False)
+        for r in rows:
+            rr = dict(r)
+            rr["experiment"] = exp
+            recs.append(rr)
     out_dir = output_root / dataset_tag
     out_dir.mkdir(parents=True, exist_ok=True)
     if not recs:
         with (out_dir / "README.txt").open("w") as f:
-            f.write(f"No records found for {dataset_tag} / {EXPERIMENT_KEY}\n")
+            f.write(f"No records found for {dataset_tag} / {experiment_keys}\n")
         return out_dir
 
-    grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
-    rep_seed: dict[tuple[str, str], tuple[Path, float]] = {}
+    grouped: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
+    rep_seed: dict[tuple[str, str, str], tuple[Path, float]] = {}
+    row_keys: list[str] = []
     for r in recs:
+        exp = str(r.get("experiment", "unknown_experiment"))
         p = str(r.get("row_val", "unknown"))
         m = str(r.get("model", ""))
         if p not in PIPELINE_ORDER or m not in MODEL_ORDER:
             continue
-        grouped[(p, m)].append(r)
+        rk = f"{exp} | {PIPELINE_LABEL.get(p, p)}"
+        if rk not in row_keys:
+            row_keys.append(rk)
+        grouped[(exp, p, m)].append(r)
         rv = r.get("metrics", {}).get("metric/best_clf_roc_valid", np.nan)
         rv = float(rv) if np.isfinite(rv) else -1e18
-        cur = rep_seed.get((p, m))
+        cur = rep_seed.get((exp, p, m))
         if cur is None or rv > cur[1]:
-            rep_seed[(p, m)] = (Path(r["seed_dir"]), rv)
+            rep_seed[(exp, p, m)] = (Path(r["seed_dir"]), rv)
 
     pred_rows, corr_rows, roc_rows, stat_rows = [], [], [], []
     top_tables = {}
     rep_paths: dict[tuple[str, str], Path] = {}
 
-    for p in PIPELINE_ORDER:
-        for m in MODEL_ORDER:
-            cell = grouped.get((p, m), [])
-            if not cell:
-                continue
-            for split, key in (
-                ("train", "metric/best_clf_roc_train"),
-                ("validation", "metric/best_clf_roc_valid"),
-                ("test", "metric/best_clf_roc_test"),
-            ):
-                mu, sd, n = _mean_std([c.get("metrics", {}).get(key, np.nan) for c in cell])
-                pred_rows.append(
-                    {"dataset": dataset_tag, "pipeline": p, "model": m, "split": split, "mean": mu, "std": sd, "n_runs": n}
-                )
+    for exp in experiment_keys:
+        for p in PIPELINE_ORDER:
+            for m in MODEL_ORDER:
+                cell = grouped.get((exp, p, m), [])
+                if not cell:
+                    continue
+                row_key = f"{exp} | {PIPELINE_LABEL.get(p, p)}"
+                for split, key in (
+                    ("train", "metric/best_clf_roc_train"),
+                    ("validation", "metric/best_clf_roc_valid"),
+                    ("test", "metric/best_clf_roc_test"),
+                ):
+                    mu, sd, n = _mean_std([c.get("metrics", {}).get(key, np.nan) for c in cell])
+                    pred_rows.append(
+                        {
+                            "dataset": dataset_tag,
+                            "experiment": exp,
+                            "pipeline": p,
+                            "model": m,
+                            "split": split,
+                            "mean": mu,
+                            "std": sd,
+                            "n_runs": n,
+                        }
+                    )
 
-            for split in ("train", "valid", "test"):
-                motif_vals, node_vals = [], []
-                motif_graph_vals, node_graph_vals = [], []
-                motif_graph_counts, node_graph_counts = [], []
+                for split in ("train", "valid", "test"):
+                    motif_vals, node_vals = [], []
+                    motif_graph_vals, node_graph_vals = [], []
+                    motif_graph_counts, node_graph_counts = [], []
+                    for c in cell:
+                        sd_dir = Path(c["seed_dir"])
+                        motif_r, _, _ = compute_posthoc_correlation(sd_dir, split=split)
+                        node_r, _, _ = compute_node_score_impact_correlation(sd_dir, split=split)
+                        motif_graph_r, _, motif_graph_n = compute_posthoc_correlation_per_graph(sd_dir, split=split)
+                        node_graph_r, _, node_graph_n = compute_node_score_impact_correlation_per_graph(sd_dir, split=split)
+                        motif_vals.append(motif_r)
+                        node_vals.append(node_r)
+                        motif_graph_vals.append(motif_graph_r)
+                        node_graph_vals.append(node_graph_r)
+                        motif_graph_counts.append(motif_graph_n)
+                        node_graph_counts.append(node_graph_n)
+                    m_mu, m_sd, m_n = _mean_std(motif_vals)
+                    n_mu, n_sd, n_n = _mean_std(node_vals)
+                    mg_mu, mg_sd, mg_n = _mean_std(motif_graph_vals)
+                    ng_mu, ng_sd, ng_n = _mean_std(node_graph_vals)
+                    corr_rows.append(
+                        {
+                            "dataset": dataset_tag,
+                            "experiment": exp,
+                            "pipeline": p,
+                            "model": m,
+                            "split": "validation" if split == "valid" else split,
+                            "motif_corr_mean": m_mu,
+                            "motif_corr_std": m_sd,
+                            "motif_corr_n": m_n,
+                            "node_corr_mean": n_mu,
+                            "node_corr_std": n_sd,
+                            "node_corr_n": n_n,
+                            "motif_graph_corr_mean": mg_mu,
+                            "motif_graph_corr_std": mg_sd,
+                            "motif_graph_corr_n_runs": mg_n,
+                            "motif_graph_corr_n_graphs_total": int(sum(int(v) for v in motif_graph_counts if v is not None)),
+                            "node_graph_corr_mean": ng_mu,
+                            "node_graph_corr_std": ng_sd,
+                            "node_graph_corr_n_runs": ng_n,
+                            "node_graph_corr_n_graphs_total": int(sum(int(v) for v in node_graph_counts if v is not None)),
+                        }
+                    )
+
+                auc_all_vals, auc_pos_vals = [], []
                 for c in cell:
-                    sd_dir = Path(c["seed_dir"])
-                    motif_r, _, _ = compute_posthoc_correlation(sd_dir, split=split)
-                    node_r, _, _ = compute_node_score_impact_correlation(sd_dir, split=split)
-                    motif_graph_r, _, motif_graph_n = compute_posthoc_correlation_per_graph(sd_dir, split=split)
-                    node_graph_r, _, node_graph_n = compute_node_score_impact_correlation_per_graph(sd_dir, split=split)
-                    motif_vals.append(motif_r)
-                    node_vals.append(node_r)
-                    motif_graph_vals.append(motif_graph_r)
-                    node_graph_vals.append(node_graph_r)
-                    motif_graph_counts.append(motif_graph_n)
-                    node_graph_counts.append(node_graph_n)
-                m_mu, m_sd, m_n = _mean_std(motif_vals)
-                n_mu, n_sd, n_n = _mean_std(node_vals)
-                mg_mu, mg_sd, mg_n = _mean_std(motif_graph_vals)
-                ng_mu, ng_sd, ng_n = _mean_std(node_graph_vals)
-                corr_rows.append(
+                    a_all, a_pos = _edge_roc(Path(c["seed_dir"]), split="test")
+                    auc_all_vals.append(a_all if a_all is not None else np.nan)
+                    auc_pos_vals.append(a_pos if a_pos is not None else np.nan)
+                a_mu, a_sd, a_n = _mean_std(auc_all_vals)
+                p_mu, p_sd, p_n = _mean_std(auc_pos_vals)
+                roc_rows.append(
                     {
                         "dataset": dataset_tag,
+                        "experiment": exp,
                         "pipeline": p,
                         "model": m,
-                        "split": "validation" if split == "valid" else split,
-                        "motif_corr_mean": m_mu,
-                        "motif_corr_std": m_sd,
-                        "motif_corr_n": m_n,
-                        "node_corr_mean": n_mu,
-                        "node_corr_std": n_sd,
-                        "node_corr_n": n_n,
-                        "motif_graph_corr_mean": mg_mu,
-                        "motif_graph_corr_std": mg_sd,
-                        "motif_graph_corr_n_runs": mg_n,
-                        "motif_graph_corr_n_graphs_total": int(sum(int(v) for v in motif_graph_counts if v is not None)),
-                        "node_graph_corr_mean": ng_mu,
-                        "node_graph_corr_std": ng_sd,
-                        "node_graph_corr_n_runs": ng_n,
-                        "node_graph_corr_n_graphs_total": int(sum(int(v) for v in node_graph_counts if v is not None)),
+                        "split": "test",
+                        "explainer_roc_all_mean": a_mu,
+                        "explainer_roc_all_std": a_sd,
+                        "explainer_roc_all_n": a_n,
+                        "explainer_roc_cls1_correct_mean": p_mu,
+                        "explainer_roc_cls1_correct_std": p_sd,
+                        "explainer_roc_cls1_correct_n": p_n,
                     }
                 )
 
-            auc_all_vals, auc_pos_vals = [], []
-            for c in cell:
-                a_all, a_pos = _edge_roc(Path(c["seed_dir"]), split="test")
-                auc_all_vals.append(a_all if a_all is not None else np.nan)
-                auc_pos_vals.append(a_pos if a_pos is not None else np.nan)
-            a_mu, a_sd, a_n = _mean_std(auc_all_vals)
-            p_mu, p_sd, p_n = _mean_std(auc_pos_vals)
-            roc_rows.append(
-                {
-                    "dataset": dataset_tag,
-                    "pipeline": p,
-                    "model": m,
-                    "split": "test",
-                    "explainer_roc_all_mean": a_mu,
-                    "explainer_roc_all_std": a_sd,
-                    "explainer_roc_all_n": a_n,
-                    "explainer_roc_cls1_correct_mean": p_mu,
-                    "explainer_roc_cls1_correct_std": p_sd,
-                    "explainer_roc_cls1_correct_n": p_n,
-                }
-            )
+                best = rep_seed.get((exp, p, m))
+                if best is None:
+                    continue
+                sd_path = best[0]
+                rep_paths[(row_key, m)] = sd_path
+                top_df = _top10_motifs(sd_path, split="test")
+                top_tables[(exp, p, m)] = top_df
+                if not top_df.empty:
+                    top_df.to_csv(
+                        out_dir / f"top10_motifs_{_sanitize_tag(exp)}_{_sanitize_tag(p)}_{m}.csv",
+                        index=False,
+                    )
 
-            best = rep_seed.get((p, m))
-            if best is None:
-                continue
-            sd_path = best[0]
-            rep_paths[(p, m)] = sd_path
-            top_df = _top10_motifs(sd_path, split="test")
-            top_tables[(p, m)] = top_df
-            if not top_df.empty:
-                top_df.to_csv(out_dir / f"top10_motifs_{p}_{m}.csv", index=False)
-
-            mlp_stats = _mlp_logit_stats(sd_path, split="test")
-            noise_stats = _noise_stats(sd_path)
-            stat_rows.append(
-                {
-                    "dataset": dataset_tag,
-                    "pipeline": p,
-                    "model": m,
-                    "mlp_logit_mean": mlp_stats["mean"],
-                    "mlp_logit_std": mlp_stats["std"],
-                    "mlp_logit_min": mlp_stats["min"],
-                    "mlp_logit_max": mlp_stats["max"],
-                    "noise_logit_mean": noise_stats["mean"],
-                    "noise_logit_std": noise_stats["std"],
-                    "noise_logit_min": noise_stats["min"],
-                    "noise_logit_max": noise_stats["max"],
-                    "representative_seed_dir": str(sd_path),
-                }
-            )
+                mlp_stats = _mlp_logit_stats(sd_path, split="test")
+                noise_stats = _noise_stats(sd_path)
+                stat_rows.append(
+                    {
+                        "dataset": dataset_tag,
+                        "experiment": exp,
+                        "pipeline": p,
+                        "model": m,
+                        "mlp_logit_mean": mlp_stats["mean"],
+                        "mlp_logit_std": mlp_stats["std"],
+                        "mlp_logit_min": mlp_stats["min"],
+                        "mlp_logit_max": mlp_stats["max"],
+                        "noise_logit_mean": noise_stats["mean"],
+                        "noise_logit_std": noise_stats["std"],
+                        "noise_logit_min": noise_stats["min"],
+                        "noise_logit_max": noise_stats["max"],
+                        "representative_seed_dir": str(sd_path),
+                    }
+                )
 
     pred_df = pd.DataFrame(pred_rows)
     corr_df = pd.DataFrame(corr_rows)
@@ -473,13 +509,14 @@ def build_dataset_artifact(
     roc_df.to_csv(out_dir / "explainer_roc.csv", index=False)
     stats_df.to_csv(out_dir / "logit_and_noise_stats.csv", index=False)
 
-    _plot_grid(rep_paths, PIPELINE_ORDER, out_dir / "motif_level_importance_vs_impact.png", level="motif")
-    _plot_grid(rep_paths, PIPELINE_ORDER, out_dir / "node_level_importance_vs_impact.png", level="node")
+    _plot_grid(rep_paths, row_keys, out_dir / "motif_level_importance_vs_impact.png", level="motif")
+    _plot_grid(rep_paths, row_keys, out_dir / "node_level_importance_vs_impact.png", level="node")
 
     summary = {
         "dataset": dataset_tag,
-        "experiment": EXPERIMENT_KEY,
+        "experiments": experiment_keys,
         "pipelines": PIPELINE_ORDER,
+        "row_keys": row_keys,
         "models": MODEL_ORDER,
         "files": sorted([p.name for p in out_dir.iterdir()]),
     }
@@ -492,7 +529,7 @@ def build_dataset_artifact(
                 project=f"GSAT-{dataset_tag}-posthoc",
                 name=f"{dataset_tag}-motif-noise-compare-artifact",
                 reinit=True,
-                config={"dataset": dataset_tag, "experiment": EXPERIMENT_KEY},
+                config={"dataset": dataset_tag, "experiments": experiment_keys},
             )
             if run is not None:
                 if not pred_df.empty:
@@ -510,7 +547,7 @@ def build_dataset_artifact(
                 artifact = wandb.Artifact(
                     name=f"{dataset_tag}_motif_noise_compare",
                     type="analysis",
-                    metadata={"dataset": dataset_tag, "experiment": EXPERIMENT_KEY},
+                    metadata={"dataset": dataset_tag, "experiments": experiment_keys},
                 )
                 artifact.add_dir(str(out_dir))
                 wandb.log_artifact(artifact)
@@ -525,6 +562,12 @@ def main() -> None:
     p = argparse.ArgumentParser(description="Collect dataset artifacts for motif-noise compare experiment.")
     p.add_argument("--results_dir", type=str, default="../tuning_results")
     p.add_argument("--output_dir", type=str, default="../dataset_artifacts/motif_noise_compare")
+    p.add_argument(
+        "--experiments",
+        nargs="+",
+        default=DEFAULT_EXPERIMENT_KEYS,
+        help="Experiment names to include in merged artifact tables/plots.",
+    )
     p.add_argument(
         "--datasets",
         nargs="+",
@@ -549,6 +592,7 @@ def main() -> None:
             results_dir=results_dir,
             output_root=output_dir,
             dataset_name=ds,
+            experiment_keys=[str(x) for x in args.experiments],
             log_to_wandb=(not args.no_wandb),
         )
         print(f"[INFO] Wrote dataset artifact: {out}")

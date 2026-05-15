@@ -7,6 +7,9 @@ export OUTPUT_DIR="${OUTPUT_DIR:-../dataset_artifacts/motif_noise_compare}"
 python3 collect_motif_noise_compare_artifacts.py \
   --results_dir "${RESULTS_DIR}" \
   --output_dir "${OUTPUT_DIR}" \
+  --experiments \
+    motif_readout_info0_motif_noise_add_temp1_compare_rerun \
+    motif_readout_info0_motif_noise_add_temp1_compare_gt_only \
   --datasets \
     Mutagenicity Mutagenicity_GT_relabled \
     Benzene Benzene_GT_relabled \
