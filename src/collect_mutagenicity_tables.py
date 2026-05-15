@@ -397,6 +397,11 @@ EXPERIMENT_ROW_CONFIG = {
         'row_label_prefix': 'pipeline',
         'path_extract': 'motif_noise_compare_variant',
     },
+    'motif_readout_info0_motif_noise_add_temp1_compare_gt_only': {
+        'summary_path': None,
+        'row_label_prefix': 'pipeline',
+        'path_extract': 'motif_noise_compare_variant',
+    },
     'maxmean_clamped_111_eval_fixed': {
         'summary_path': ('loss_coefficients', 'info_loss_coef'),
         'row_label_prefix': 'info_loss_coef',

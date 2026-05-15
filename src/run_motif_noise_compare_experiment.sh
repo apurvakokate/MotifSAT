@@ -27,13 +27,13 @@ elif [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
 fi
 export PYTHONPATH="$(pwd)${PYTHONPATH:+:${PYTHONPATH}}"
 
-EXPERIMENT="motif_readout_info0_motif_noise_add_temp1_compare_rerun"
+EXPERIMENT="motif_readout_info0_motif_noise_add_temp1_compare_gt_only"
 MODELS=(GIN PNA GAT SAGE GCN)
 BASE_DATASETS=(Mutagenicity Benzene BBBP)
 FOLDS=(0 1)
 SEEDS=(0)
-# Set GT_ONLY=1 to skip base (non-GT) branch.
-GT_ONLY="${GT_ONLY:-0}"
+# GT-only experiment by default (set GT_ONLY=0 to include non-GT branch).
+GT_ONLY="${GT_ONLY:-1}"
 
 echo "[INFO] Running experiment: ${EXPERIMENT}"
 echo "[INFO] Base datasets: ${BASE_DATASETS[*]}"

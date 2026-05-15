@@ -1575,6 +1575,72 @@ EXPERIMENT_GROUPS['motif_readout_info0_motif_noise_add_temp1_compare_rerun'] = {
     ],
 }
 
+EXPERIMENT_GROUPS['motif_readout_info0_motif_noise_add_temp1_compare_gt_only'] = {
+    'experiment_name': 'motif_readout_info0_motif_noise_add_temp1_compare_gt_only',
+    'variants': [
+        {
+            'variant_id': 'compare_beta_clamped',
+            'gsat_overrides': {
+                'tuning_id': 'compare_beta_clamped',
+                **_MOTIF_READOUT_BETA02_R07_GSAT,
+                'final_r': 0.8,
+                'info_loss_coef': 0.0,
+                'motif_level_sampling': True,
+                'attention_sampling_temp': 1.0,
+                'log_motif_sampling_diagnostics': True,
+                'save_motif_logits_posthoc': True,
+                'motif_readout_beta_disable_clamp': False,
+            },
+            'learn_edge_att': False,
+            'model_overrides': {
+                'graph_pooling': 'add',
+            },
+            'data_overrides': {
+                # Keep this experiment GT-only by default.
+                'use_ground_truth_cache': True,
+                'ground_truth_relabel_graphs': True,
+            },
+        },
+        {
+            'variant_id': 'compare_beta_unclamped',
+            'gsat_overrides': {
+                'tuning_id': 'compare_beta_unclamped',
+                **_MOTIF_READOUT_BETA02_R07_GSAT,
+                'final_r': 0.8,
+                'info_loss_coef': 0.0,
+                'motif_level_sampling': True,
+                'attention_sampling_temp': 1.0,
+                'log_motif_sampling_diagnostics': True,
+                'save_motif_logits_posthoc': True,
+                'motif_readout_beta_disable_clamp': True,
+            },
+            'learn_edge_att': False,
+            'model_overrides': {
+                'graph_pooling': 'add',
+            },
+            'data_overrides': {
+                'use_ground_truth_cache': True,
+                'ground_truth_relabel_graphs': True,
+            },
+        },
+        {
+            'variant_id': 'compare_base_decay_r07',
+            'gsat_overrides': {
+                'tuning_id': 'compare_base_decay_r07',
+                **_DECAY_R_BASE,
+                'final_r': 0.7,
+                **_BASE_GSAT_NONE,
+                **INJECTION_PRESETS['111'],
+            },
+            'learn_edge_att': False,
+            'data_overrides': {
+                'use_ground_truth_cache': True,
+                'ground_truth_relabel_graphs': True,
+            },
+        },
+    ],
+}
+
 EXPERIMENT_GROUPS['factored_motif_attention_grid'] = {
     'experiment_name': 'factored_motif_attention_grid',
     'variants': [

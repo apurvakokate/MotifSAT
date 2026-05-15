@@ -80,6 +80,7 @@ EXPERIMENTS=(
   motif_readout_beta0.3_r0.8_info0_sweep
   motif_readout_info0_motif_noise_add_temp1_diag
   motif_readout_info0_motif_noise_add_temp1_compare_rerun
+  motif_readout_info0_motif_noise_add_temp1_compare_gt_only
   simplified_motif_readout_maxmean_injection_ablation
   simplified_motif_readout_maxmean_info_loss_ablation
   maxmean_clamped_111_eval_fixed
