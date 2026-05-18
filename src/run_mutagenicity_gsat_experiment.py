@@ -1964,6 +1964,8 @@ def main():
     total_variants = sum(len(EXPERIMENT_GROUPS[e]['variants']) for e in args.experiments)
     total = len(folds) * len(args.models) * total_variants * len(args.seeds)
     n = 0
+    # Consume --ground_truth_force_rebuild once per script invocation, then reuse cache.
+    gt_force_rebuild_pending = bool(args.ground_truth_force_rebuild)
 
     print(f'\n[INFO] Dataset: {dataset_name}')
     print(f'[INFO] Folds: {folds}')
@@ -1971,7 +1973,7 @@ def main():
     print(
         f"[INFO] use_ground_truth_cache={not args.no_ground_truth_cache}, "
         f"ground_truth_cache_root={args.ground_truth_cache_root}, "
-        f"ground_truth_force_rebuild={args.ground_truth_force_rebuild}, "
+        f"ground_truth_force_rebuild={args.ground_truth_force_rebuild} (one-shot per invocation), "
         f"ground_truth_relabel_graphs={not args.no_ground_truth_relabel_graphs}, "
         f"ground_truth_label_data_root={args.ground_truth_label_data_root}, "
         f"ground_truth_rule_index={args.ground_truth_rule_index}, "
@@ -1996,13 +1998,18 @@ def main():
                         print('=' * 80)
                         print(f'[{n}/{total}] {experiment_name} dataset={dataset_name} fold={fold} model={model_name} variant={vid} seed={seed}')
                         print('=' * 80)
+                        # Force GT cache rebuild only on the first run, then disable.
+                        run_force_rebuild = bool(gt_force_rebuild_pending)
+                        if run_force_rebuild:
+                            print('[INFO] ground_truth_force_rebuild=True for this run (one-shot). Subsequent runs reuse cache.')
+                            gt_force_rebuild_pending = False
                         try:
                             run_one(
                                 model_name, fold, variant, experiment_name, seed, args.cuda, data_dir, dataset_name,
                                 embedding_viz_every=args.embedding_viz_every,
                                 use_ground_truth_cache=not args.no_ground_truth_cache,
                                 ground_truth_cache_root=args.ground_truth_cache_root,
-                                ground_truth_force_rebuild=args.ground_truth_force_rebuild,
+                                ground_truth_force_rebuild=run_force_rebuild,
                                 ground_truth_relabel_graphs=not args.no_ground_truth_relabel_graphs,
                                 ground_truth_label_data_root=args.ground_truth_label_data_root,
                                 ground_truth_rule_index=args.ground_truth_rule_index,
