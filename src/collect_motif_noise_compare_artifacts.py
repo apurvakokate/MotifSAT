@@ -17,7 +17,8 @@ from __future__ import annotations
 import argparse
 import json
 import math
-from collections import defaultdict
+import re
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -235,6 +236,318 @@ def _top10_motifs(seed_dir: Path, split: str = "test") -> pd.DataFrame:
     return df
 
 
+def _bottom10_motifs(seed_dir: Path, split: str = "test") -> pd.DataFrame:
+    node_rows = _read_jsonl(seed_dir / "node_scores.jsonl")
+    impact_rows = _read_jsonl(seed_dir / "Motif_level_node_and_edge_masking_impact.jsonl")
+    score_by_m = defaultdict(list)
+    name_by_id: dict[int, str] = {}
+    for r in node_rows:
+        if r.get("split") != split:
+            continue
+        m = _parse_motif_id(r)
+        s = r.get("motif_score", r.get("score"))
+        if m is None or s is None:
+            continue
+        motif_name = _resolve_motif_name_from_seed(seed_dir, r, m, name_by_id)
+        score_by_m[(m, motif_name)].append(float(s))
+    impact_by_m = defaultdict(list)
+    for r in impact_rows:
+        if r.get("split") != split:
+            continue
+        m = _parse_motif_id(r)
+        if m is None:
+            continue
+        old_p = r.get("old_prediction")
+        new_p = r.get("new_prediction")
+        if old_p is None or new_p is None:
+            continue
+        imp = abs(_sigmoid(float(new_p)) - _sigmoid(float(old_p)))
+        motif_name = _resolve_motif_name_from_seed(seed_dir, r, m, name_by_id)
+        impact_by_m[(m, motif_name)].append(float(imp))
+    rows = []
+    for (motif_id, motif_name), sc in score_by_m.items():
+        rows.append(
+            {
+                "motif_id": int(motif_id),
+                "motif_name": motif_name,
+                "score_mean": float(np.mean(sc)),
+                "score_std": float(np.std(sc, ddof=0)),
+                "impact_mean": float(np.mean(impact_by_m[(motif_id, motif_name)]))
+                if impact_by_m[(motif_id, motif_name)]
+                else np.nan,
+                "n_nodes": int(len(sc)),
+            }
+        )
+    if not rows:
+        return pd.DataFrame(columns=["rank", "motif_id", "motif_name", "score_mean", "score_std", "impact_mean", "n_nodes"])
+    df = pd.DataFrame(rows).sort_values("score_mean", ascending=True).head(10).reset_index(drop=True)
+    df.insert(0, "rank", np.arange(1, len(df) + 1))
+    return df
+
+
+def _gt_vs_non_gt_motif_stats(seed_dir: Path, split: str = "test") -> pd.DataFrame:
+    node_rows = _read_jsonl(seed_dir / "node_scores.jsonl")
+    impact_rows = _read_jsonl(seed_dir / "Motif_level_node_and_edge_masking_impact.jsonl")
+    edge_rows = _read_jsonl(seed_dir / "edge_scores.jsonl")
+
+    node_to_motif: dict[tuple[int, int], tuple[int, str]] = {}
+    score_by_inst = defaultdict(list)
+    name_by_id: dict[int, str] = {}
+    for r in node_rows:
+        if r.get("split") != split:
+            continue
+        g = r.get("graph_idx")
+        ni = r.get("node_index")
+        m = _parse_motif_id(r)
+        s = r.get("motif_score", r.get("score"))
+        if g is None or ni is None or m is None or s is None:
+            continue
+        g = int(g)
+        ni = int(ni)
+        motif_name = _resolve_motif_name_from_seed(seed_dir, r, m, name_by_id)
+        node_to_motif[(g, ni)] = (m, motif_name)
+        score_by_inst[(g, m, motif_name)].append(float(s))
+
+    impact_by_inst = defaultdict(list)
+    for r in impact_rows:
+        if r.get("split") != split:
+            continue
+        g = r.get("graph_idx", r.get("graph_id"))
+        m = _parse_motif_id(r)
+        old_p = r.get("old_prediction")
+        new_p = r.get("new_prediction")
+        if g is None or m is None or old_p is None or new_p is None:
+            continue
+        g = int(g)
+        motif_name = _resolve_motif_name_from_seed(seed_dir, r, m, name_by_id)
+        impact_by_inst[(g, m, motif_name)].append(abs(_sigmoid(float(new_p)) - _sigmoid(float(old_p))))
+
+    gt_motifs_by_graph: dict[int, set[int]] = defaultdict(set)
+    for r in edge_rows:
+        if r.get("split") != split:
+            continue
+        g = r.get("graph_idx")
+        y = r.get("edge_label")
+        src = r.get("source")
+        dst = r.get("target")
+        if g is None or y is None or src is None or dst is None:
+            continue
+        if float(y) <= 0.5:
+            continue
+        g = int(g)
+        src = int(src)
+        dst = int(dst)
+        ms = node_to_motif.get((g, src))
+        md = node_to_motif.get((g, dst))
+        if ms is not None:
+            gt_motifs_by_graph[g].add(int(ms[0]))
+        if md is not None:
+            gt_motifs_by_graph[g].add(int(md[0]))
+
+    gt_scores, gt_impacts = [], []
+    non_scores, non_impacts = [], []
+    for key, sc in score_by_inst.items():
+        g, m, _ = key
+        if key not in impact_by_inst:
+            continue
+        score_mean = float(np.mean(sc))
+        impact_mean = float(np.mean(impact_by_inst[key]))
+        if m in gt_motifs_by_graph.get(g, set()):
+            gt_scores.append(score_mean)
+            gt_impacts.append(impact_mean)
+        else:
+            non_scores.append(score_mean)
+            non_impacts.append(impact_mean)
+
+    rows = []
+    for kind, scores, impacts in (
+        ("gt_motif", gt_scores, gt_impacts),
+        ("non_gt_motif", non_scores, non_impacts),
+    ):
+        s_arr = np.asarray(scores, dtype=float) if scores else np.asarray([], dtype=float)
+        i_arr = np.asarray(impacts, dtype=float) if impacts else np.asarray([], dtype=float)
+        rows.append(
+            {
+                "group": kind,
+                "n_motif_instances": int(s_arr.size),
+                "importance_mean": float(np.mean(s_arr)) if s_arr.size else np.nan,
+                "importance_std": float(np.std(s_arr, ddof=0)) if s_arr.size else np.nan,
+                "impact_mean": float(np.mean(i_arr)) if i_arr.size else np.nan,
+                "impact_std": float(np.std(i_arr, ddof=0)) if i_arr.size else np.nan,
+            }
+        )
+    if gt_scores and non_scores:
+        rows.append(
+            {
+                "group": "delta_gt_minus_non_gt",
+                "n_motif_instances": int(len(gt_scores) + len(non_scores)),
+                "importance_mean": float(np.mean(gt_scores) - np.mean(non_scores)),
+                "importance_std": np.nan,
+                "impact_mean": float(np.mean(gt_impacts) - np.mean(non_impacts)),
+                "impact_std": np.nan,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _base_dataset_name(dataset_tag: str) -> str:
+    ds = str(dataset_tag)
+    for suffix in ("_GT_relabeled", "_GT_relabled", "_GT"):
+        if ds.endswith(suffix):
+            return ds[: -len(suffix)]
+    return ds
+
+
+def _load_selected_rule(seed_dir: Path, dataset_tag: str) -> dict[str, Any] | None:
+    rc_path = seed_dir / "run_config_full.json"
+    if not rc_path.exists():
+        return None
+    try:
+        with rc_path.open("r") as f:
+            rc = json.load(f)
+    except Exception:
+        return None
+    data_cfg = ((rc.get("run_config") or {}).get("data") or {})
+    cache_root = data_cfg.get("ground_truth_cache_root", None)
+    if not cache_root:
+        return None
+    dictionary_fold_variant = str(data_cfg.get("dictionary_fold_variant", "nofilter"))
+    relabel = bool(data_cfg.get("ground_truth_relabel_graphs", True))
+    relabel_tag = "relabel1" if relabel else "relabel0"
+    fold_invariant = bool(data_cfg.get("ground_truth_fold_invariant", True))
+    ref_fold = int(data_cfg.get("ground_truth_reference_fold", 0))
+    ds_base = _base_dataset_name(dataset_tag)
+    sm_path = seed_dir / "experiment_summary.json"
+    fold = None
+    if sm_path.exists():
+        try:
+            with sm_path.open("r") as f:
+                fold = int(json.load(f).get("fold"))
+        except Exception:
+            fold = None
+    if fold is None:
+        fold = 0
+    src_fold = ref_fold if fold_invariant else int(fold)
+    fold_tag = f"inv{int(fold_invariant)}_src{int(src_fold)}"
+
+    paths = []
+    if fold_invariant:
+        paths.append(
+            Path(cache_root)
+            / ds_base
+            / "_shared_rules"
+            / dictionary_fold_variant
+            / f"motif_label_results_{relabel_tag}_inv1_src{int(src_fold)}.json"
+        )
+    paths.append(
+        Path(cache_root)
+        / ds_base
+        / f"fold{int(fold)}"
+        / dictionary_fold_variant
+        / f"motif_label_results_{relabel_tag}_{fold_tag}.json"
+    )
+    for p in paths:
+        if p.exists():
+            try:
+                with p.open("r") as f:
+                    payload = json.load(f)
+                sr = payload.get("selected_rule")
+                if isinstance(sr, dict):
+                    sr["_rules_file"] = str(p)
+                    return sr
+            except Exception:
+                continue
+    return None
+
+
+def _rule_satisfaction_tables(seed_dir: Path, dataset_tag: str, split: str = "test") -> tuple[pd.DataFrame, pd.DataFrame]:
+    selected_rule = _load_selected_rule(seed_dir, dataset_tag)
+    node_rows = _read_jsonl(seed_dir / "node_scores.jsonl")
+    if selected_rule is None:
+        return (
+            pd.DataFrame([{"note": "selected_rule_not_found", "rules_file": None}]),
+            pd.DataFrame([{"note": "selected_rule_not_found", "reason": "no_rule_file", "count": 0}]),
+        )
+
+    g_to_motifs: dict[int, set[str]] = defaultdict(set)
+    for r in node_rows:
+        if r.get("split") != split:
+            continue
+        g = r.get("graph_idx")
+        m = _parse_motif_id(r)
+        if g is None or m is None:
+            continue
+        motif_name = _resolve_motif_name_from_seed(seed_dir, r, m, {})
+        g_to_motifs[int(g)].add(motif_name)
+
+    group_motifs = selected_rule.get("group_motifs", [])
+    gates = [str(g).upper() for g in selected_rule.get("gates", [])]
+    cross = str(selected_rule.get("cross", "OR")).upper()
+    if not group_motifs or not gates or len(group_motifs) != len(gates):
+        return (
+            pd.DataFrame([{"note": "selected_rule_invalid", "rule": selected_rule.get("rule")}]),
+            pd.DataFrame([{"note": "selected_rule_invalid", "reason": "shape_mismatch", "count": 0}]),
+        )
+
+    total = max(1, len(g_to_motifs))
+    group_ok_counts = Counter()
+    miss_reason_counts = Counter()
+    missing_motif_counts = Counter()
+    rule_ok_count = 0
+    for _, present in g_to_motifs.items():
+        group_oks = []
+        for i, motifs in enumerate(group_motifs):
+            motif_set = {str(x) for x in motifs}
+            if gates[i] == "AND":
+                missing = sorted([m for m in motif_set if m not in present])
+                ok = len(missing) == 0
+                if not ok:
+                    miss_reason_counts[f"group{i}_AND_missing"] += 1
+                    for mm in missing:
+                        missing_motif_counts[(f"group{i}", mm)] += 1
+            else:
+                ok = any(m in present for m in motif_set)
+                if not ok:
+                    miss_reason_counts[f"group{i}_OR_no_match"] += 1
+            group_oks.append(ok)
+            if ok:
+                group_ok_counts[i] += 1
+        rule_ok = all(group_oks) if cross == "AND" else any(group_oks)
+        if rule_ok:
+            rule_ok_count += 1
+        else:
+            miss_reason_counts[f"cross_{cross}_not_satisfied"] += 1
+
+    sat_rows = [
+        {
+            "rule": selected_rule.get("rule"),
+            "rules_file": selected_rule.get("_rules_file"),
+            "metric": "rule_satisfied",
+            "count": int(rule_ok_count),
+            "pct": float(rule_ok_count) * 100.0 / float(total),
+        }
+    ]
+    for gi in range(len(group_motifs)):
+        c = int(group_ok_counts.get(gi, 0))
+        sat_rows.append(
+            {
+                "rule": selected_rule.get("rule"),
+                "rules_file": selected_rule.get("_rules_file"),
+                "metric": f"group{gi}_satisfied_{gates[gi]}",
+                "count": c,
+                "pct": float(c) * 100.0 / float(total),
+            }
+        )
+    miss_rows = []
+    for reason, c in miss_reason_counts.most_common():
+        miss_rows.append({"reason": reason, "count": int(c)})
+    for (gk, mm), c in missing_motif_counts.most_common(25):
+        miss_rows.append({"reason": f"{gk}_missing_motif::{mm}", "count": int(c)})
+    if not miss_rows:
+        miss_rows = [{"reason": "none", "count": 0}]
+    return pd.DataFrame(sat_rows), pd.DataFrame(miss_rows)
+
+
 def _node_points(seed_dir: Path, split: str = "test") -> tuple[np.ndarray | None, np.ndarray | None]:
     rows = _read_jsonl(seed_dir / "Individual_node_node_masking_impact.jsonl")
     xs, ys = [], []
@@ -371,6 +684,9 @@ def build_dataset_artifact(
             rep_seed[(exp, p, m)] = (Path(r["seed_dir"]), rv)
 
     pred_rows, corr_rows, roc_rows, stat_rows = [], [], [], []
+    gt_non_gt_rows = []
+    rule_sat_rows = []
+    rule_miss_rows = []
     top_tables = {}
     rep_paths: dict[tuple[str, str], Path] = {}
 
@@ -479,6 +795,49 @@ def build_dataset_artifact(
                         out_dir / f"top10_motifs_{_sanitize_tag(exp)}_{_sanitize_tag(p)}_{m}.csv",
                         index=False,
                     )
+                bottom_df = _bottom10_motifs(sd_path, split="test")
+                if not bottom_df.empty:
+                    bottom_df.to_csv(
+                        out_dir / f"bottom10_motifs_{_sanitize_tag(exp)}_{_sanitize_tag(p)}_{m}.csv",
+                        index=False,
+                    )
+
+                gt_df = _gt_vs_non_gt_motif_stats(sd_path, split="test")
+                if not gt_df.empty:
+                    gt_df = gt_df.copy()
+                    gt_df.insert(0, "dataset", dataset_tag)
+                    gt_df.insert(1, "experiment", exp)
+                    gt_df.insert(2, "pipeline", p)
+                    gt_df.insert(3, "model", m)
+                    gt_non_gt_rows.extend(gt_df.to_dict(orient="records"))
+                    gt_df.to_csv(
+                        out_dir / f"gt_vs_non_gt_motif_stats_{_sanitize_tag(exp)}_{_sanitize_tag(p)}_{m}.csv",
+                        index=False,
+                    )
+
+                sat_df, miss_df = _rule_satisfaction_tables(sd_path, dataset_tag, split="test")
+                if not sat_df.empty:
+                    sat_df = sat_df.copy()
+                    sat_df.insert(0, "dataset", dataset_tag)
+                    sat_df.insert(1, "experiment", exp)
+                    sat_df.insert(2, "pipeline", p)
+                    sat_df.insert(3, "model", m)
+                    rule_sat_rows.extend(sat_df.to_dict(orient="records"))
+                    sat_df.to_csv(
+                        out_dir / f"rule_satisfaction_{_sanitize_tag(exp)}_{_sanitize_tag(p)}_{m}.csv",
+                        index=False,
+                    )
+                if not miss_df.empty:
+                    miss_df = miss_df.copy()
+                    miss_df.insert(0, "dataset", dataset_tag)
+                    miss_df.insert(1, "experiment", exp)
+                    miss_df.insert(2, "pipeline", p)
+                    miss_df.insert(3, "model", m)
+                    rule_miss_rows.extend(miss_df.to_dict(orient="records"))
+                    miss_df.to_csv(
+                        out_dir / f"rule_miss_reasons_{_sanitize_tag(exp)}_{_sanitize_tag(p)}_{m}.csv",
+                        index=False,
+                    )
 
                 mlp_stats = _mlp_logit_stats(sd_path, split="test")
                 noise_stats = _noise_stats(sd_path)
@@ -504,10 +863,16 @@ def build_dataset_artifact(
     corr_df = pd.DataFrame(corr_rows)
     roc_df = pd.DataFrame(roc_rows)
     stats_df = pd.DataFrame(stat_rows)
+    gt_non_gt_df = pd.DataFrame(gt_non_gt_rows)
+    rule_sat_df = pd.DataFrame(rule_sat_rows)
+    rule_miss_df = pd.DataFrame(rule_miss_rows)
     pred_df.to_csv(out_dir / "prediction_performance.csv", index=False)
     corr_df.to_csv(out_dir / "explainer_correlation.csv", index=False)
     roc_df.to_csv(out_dir / "explainer_roc.csv", index=False)
     stats_df.to_csv(out_dir / "logit_and_noise_stats.csv", index=False)
+    gt_non_gt_df.to_csv(out_dir / "gt_vs_non_gt_motif_stats.csv", index=False)
+    rule_sat_df.to_csv(out_dir / "rule_satisfaction.csv", index=False)
+    rule_miss_df.to_csv(out_dir / "rule_miss_reasons.csv", index=False)
 
     _plot_grid(rep_paths, row_keys, out_dir / "motif_level_importance_vs_impact.png", level="motif")
     _plot_grid(rep_paths, row_keys, out_dir / "node_level_importance_vs_impact.png", level="node")
@@ -540,6 +905,12 @@ def build_dataset_artifact(
                     wandb.log({"posthoc/explainer_roc": wandb.Table(dataframe=roc_df)})
                 if not stats_df.empty:
                     wandb.log({"posthoc/logit_noise_stats": wandb.Table(dataframe=stats_df)})
+                if not gt_non_gt_df.empty:
+                    wandb.log({"posthoc/gt_vs_non_gt_motif_stats": wandb.Table(dataframe=gt_non_gt_df)})
+                if not rule_sat_df.empty:
+                    wandb.log({"posthoc/rule_satisfaction": wandb.Table(dataframe=rule_sat_df)})
+                if not rule_miss_df.empty:
+                    wandb.log({"posthoc/rule_miss_reasons": wandb.Table(dataframe=rule_miss_df)})
                 for img_name in ("motif_level_importance_vs_impact.png", "node_level_importance_vs_impact.png"):
                     p = out_dir / img_name
                     if p.exists():
