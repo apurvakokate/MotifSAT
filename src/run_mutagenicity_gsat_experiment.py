@@ -38,6 +38,7 @@ Active groups (EXPERIMENT_GROUPS):
   motif_readout_beta0.3_r0.8 — beta readout with final_r=0.8 (and add graph pooling, as in original beta add variant)
   motif_readout_beta0.3_r0.8_info0_sweep — beta readout with final_r=0.8 and info_loss_coef=0; sweep perturbation granularity (node vs motif), graph pooling (add vs mean), and sampling temperature
   motif_readout_info0_motif_noise_add_temp1_compare_rerun — compare beta readout (clamped vs unclamped motif logits) plus base GSAT decay final_r=0.7
+  motif_readout_info0_motif_noise_add_temp1_compare_gt_only_clone — clone of compare_gt_only under a distinct experiment name
   simplified_motif_readout_maxmean_injection_ablation — maxmean + no info warmup; sweep injection 010 / 101 / 011 / 111
   simplified_motif_readout_maxmean_info_loss_ablation — maxmean + 010 + no warmup; sweep info_loss_coef ∈ {0.01, 0.1, 0.3}
   maxmean_clamped — maxmean + 010 + no warmup; clamped factored-regularized readout; sweep info_loss_coef ∈ {0.3, 0.0}
@@ -1641,6 +1642,72 @@ EXPERIMENT_GROUPS['motif_readout_info0_motif_noise_add_temp1_compare_gt_only'] =
     ],
 }
 
+EXPERIMENT_GROUPS['motif_readout_info0_motif_noise_add_temp1_compare_gt_only_clone'] = {
+    'experiment_name': 'motif_readout_info0_motif_noise_add_temp1_compare_gt_only_clone',
+    'variants': [
+        {
+            'variant_id': 'compare_beta_clamped',
+            'gsat_overrides': {
+                'tuning_id': 'compare_beta_clamped',
+                **_MOTIF_READOUT_BETA02_R07_GSAT,
+                'final_r': 0.8,
+                'info_loss_coef': 0.0,
+                'motif_level_sampling': True,
+                'attention_sampling_temp': 1.0,
+                'log_motif_sampling_diagnostics': True,
+                'save_motif_logits_posthoc': True,
+                'motif_readout_beta_disable_clamp': False,
+            },
+            'learn_edge_att': False,
+            'model_overrides': {
+                'graph_pooling': 'add',
+            },
+            'data_overrides': {
+                # Keep this experiment GT-only by default.
+                'use_ground_truth_cache': True,
+                'ground_truth_relabel_graphs': True,
+            },
+        },
+        {
+            'variant_id': 'compare_beta_unclamped',
+            'gsat_overrides': {
+                'tuning_id': 'compare_beta_unclamped',
+                **_MOTIF_READOUT_BETA02_R07_GSAT,
+                'final_r': 0.8,
+                'info_loss_coef': 0.0,
+                'motif_level_sampling': True,
+                'attention_sampling_temp': 1.0,
+                'log_motif_sampling_diagnostics': True,
+                'save_motif_logits_posthoc': True,
+                'motif_readout_beta_disable_clamp': True,
+            },
+            'learn_edge_att': False,
+            'model_overrides': {
+                'graph_pooling': 'add',
+            },
+            'data_overrides': {
+                'use_ground_truth_cache': True,
+                'ground_truth_relabel_graphs': True,
+            },
+        },
+        {
+            'variant_id': 'compare_base_decay_r07',
+            'gsat_overrides': {
+                'tuning_id': 'compare_base_decay_r07',
+                **_DECAY_R_BASE,
+                'final_r': 0.7,
+                **_BASE_GSAT_NONE,
+                **INJECTION_PRESETS['111'],
+            },
+            'learn_edge_att': False,
+            'data_overrides': {
+                'use_ground_truth_cache': True,
+                'ground_truth_relabel_graphs': True,
+            },
+        },
+    ],
+}
+
 EXPERIMENT_GROUPS['factored_motif_attention_grid'] = {
     'experiment_name': 'factored_motif_attention_grid',
     'variants': [
@@ -1866,6 +1933,8 @@ def main():
         'motif_readout_beta0.3_r0.8_info0_sweep',
         'motif_readout_info0_motif_noise_add_temp1_diag',
         'motif_readout_info0_motif_noise_add_temp1_compare_rerun',
+        'motif_readout_info0_motif_noise_add_temp1_compare_gt_only',
+        'motif_readout_info0_motif_noise_add_temp1_compare_gt_only_clone',
         'simplified_motif_readout_maxmean_injection_ablation',
         'simplified_motif_readout_maxmean_info_loss_ablation',
         'maxmean_clamped',
